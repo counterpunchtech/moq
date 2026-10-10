@@ -19,7 +19,7 @@ Check against #5147 (export ts follows announcements), which may change how an e
 
 Public API: none expected. Wire: none expected.
 
-## Investigation
+Investigation (2026-10-10):
 
 On 2026-10-10, an isolated `nix develop --command just test ts` against
 main at `6559065b8` captured 20.47 s of the 20.06 s source (ratio 1.021).
