@@ -337,6 +337,12 @@ impl Connection {
 	pub fn handshake(&self) -> &crate::quic::handshake::Info {
 		&self.handshake
 	}
+
+	/// How much receive credit the application holds, and how much the peer
+	/// may still send.
+	pub fn credit(&self) -> moq_quic::CreditStats {
+		self.shared.conn.borrow().stats().credit
+	}
 }
 
 impl Clone for Connection {

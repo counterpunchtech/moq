@@ -1743,6 +1743,50 @@ async fn dropped_connection_cleans_up() {
     endpoint.wait_idle().await;
 }
 
+/// Held reads keep the connection window spent until released, while a stream window far
+/// smaller than it keeps replenishing; dropping the stream releases what is still held.
+#[tokio::test]
+async fn held_reads_spend_the_connection_window() {
+    const WINDOW: usize = 32 * 1024;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.receive_window((WINDOW as u32).into());
+    transport.stream_receive_window(4096u32.into());
+    let endpoint = endpoint_with_config(transport);
+
+    let (client, server) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send = client.open_uni().await.unwrap();
+    let writer = tokio::spawn(async move {
+        // The receiver walks away before this finishes.
+        let _ = send.write_all(&[7; 4 * WINDOW]).await;
+    });
+
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.hold();
+    let mut buf = vec![0; WINDOW];
+    recv.read_exact(&mut buf).await.unwrap();
+    let credit = server.stats().credit;
+    assert_eq!((credit.held, credit.available), (WINDOW as u64, 0));
+
+    // Far below the usual update threshold, and still enough to unblock.
+    recv.release(100);
+    recv.read_exact(&mut buf[..100]).await.unwrap();
+    assert_eq!(server.stats().credit.held, WINDOW as u64);
+
+    recv.release(WINDOW as u64);
+    recv.read_exact(&mut buf[..500]).await.unwrap();
+    assert_eq!(server.stats().credit.held, 500);
+    drop(recv);
+    assert_eq!(server.stats().credit.held, 0, "dropping releases the rest");
+    writer.await.unwrap();
+}
+
 #[derive(Default)]
 struct WakeCounter {
     wakes: AtomicUsize,

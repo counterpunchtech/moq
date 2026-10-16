@@ -76,7 +76,7 @@ use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
-pub use stats::{ConnectionStats, FrameStats, PathStats, UdpStats};
+pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
 #[cfg(fuzzing)]
@@ -84,7 +84,7 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
+    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendStream,
     ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
@@ -1358,8 +1358,23 @@ impl Connection {
         stats.path.cwnd = self.path.congestion.window();
         stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
+        stats.credit = self.streams.credit_stats();
 
         stats
+    }
+
+    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
+    ///
+    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
+    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
+    ///
+    /// # Panics
+    /// If more credit is released than this connection's reads have held, which means `credit`
+    /// came from another connection.
+    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        let transmit = self.streams.release(credit);
+        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
+        transmit
     }
 
     /// Ping the remote endpoint

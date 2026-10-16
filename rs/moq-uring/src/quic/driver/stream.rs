@@ -8,7 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{StreamId, VarInt};
+use moq_quic::{Credit, StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -223,6 +223,12 @@ pub struct RecvStream {
 	stopped: bool,
 	/// Bytes `poll_closed` read ahead, handed to `poll_read` before moq-quic's.
 	backlog: BytesMut,
+	/// Connection credit for bytes read since [`Self::hold`], not yet released.
+	/// Includes the held part of `backlog`, which the application has not seen.
+	held: Option<Credit>,
+	/// The front of `backlog` read before [`Self::hold`], whose credit is
+	/// already returned.
+	unheld: usize,
 }
 
 impl RecvStream {
@@ -234,6 +240,49 @@ impl RecvStream {
 			finished: false,
 			stopped: false,
 			backlog: BytesMut::new(),
+			held: None,
+			unheld: 0,
+		}
+	}
+
+	/// Keep the connection flow control credit for every byte read from now
+	/// on.
+	///
+	/// Stream credit still follows reads, so a stream window smaller than an
+	/// application message keeps the message flowing. The connection window
+	/// those bytes occupy stays spent until [`Self::release`] returns it, or
+	/// this stream is dropped.
+	pub fn hold(&mut self) {
+		if self.held.is_none() {
+			self.held = Some(Credit::default());
+			self.unheld = self.backlog.len();
+		}
+	}
+
+	/// Return the connection credit for `bytes` of the held bytes this stream
+	/// has handed to the application.
+	///
+	/// # Panics
+	/// If fewer than `bytes` read bytes are held.
+	pub fn release(&mut self, bytes: u64) {
+		let backlog = (self.backlog.len() - self.unheld) as u64;
+		let held = self.held.as_mut().expect("release requires hold");
+		assert!(
+			bytes + backlog <= held.len(),
+			"released {bytes} bytes with {} handed out",
+			held.len() - backlog
+		);
+		let credit = held.split(bytes);
+		self.give_back(credit);
+	}
+
+	/// Hand `credit` to moq-quic, kicking the driver if the peer should hear.
+	fn give_back(&self, credit: Credit) {
+		if credit.is_empty() {
+			return;
+		}
+		if self.shared.conn.borrow_mut().release(credit).should_transmit() {
+			self.shared.kick();
 		}
 	}
 
@@ -246,7 +295,13 @@ impl RecvStream {
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn stop_code(&mut self, code: u64) {
+		// The application never sees the read-ahead, so it can never release it.
+		if let Some(held) = &mut self.held {
+			let credit = held.split((self.backlog.len() - self.unheld) as u64);
+			self.give_back(credit);
+		}
 		self.backlog.clear();
+		self.unheld = 0;
 		if self.stopped || self.finished {
 			return;
 		}
@@ -268,7 +323,7 @@ impl RecvStream {
 	///
 	/// Takes the shared state rather than `&mut self` so a caller can hold a
 	/// waiter from `self.park` across the read.
-	fn read(shared: &Shared, id: StreamId, max: usize) -> Read {
+	fn read(shared: &Shared, id: StreamId, max: usize, held: Option<&mut Credit>) -> Read {
 		let mut conn = shared.conn.borrow_mut();
 		let mut recv = conn.recv_stream(id);
 		let mut chunks = match recv.read(true) {
@@ -282,6 +337,9 @@ impl RecvStream {
 			Err(moq_quic::ReadError::Blocked) => Read::Blocked,
 			Err(moq_quic::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 		};
+		if let Some(held) = held {
+			held.merge(chunks.hold());
+		}
 		let transmit = chunks.finalize().should_transmit();
 		drop(conn);
 		if transmit {
@@ -298,6 +356,7 @@ impl RecvStream {
 		let n = dst.len().min(self.backlog.len());
 		dst[..n].copy_from_slice(&self.backlog[..n]);
 		self.backlog.advance(n);
+		self.unheld = self.unheld.saturating_sub(n);
 		if n > 0 {
 			self.shared.wake_readable(self.id);
 		}
@@ -319,7 +378,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		match Self::read(&self.shared, self.id, dst.len()) {
+		match Self::read(&self.shared, self.id, dst.len(), self.held.as_mut()) {
 			Read::Chunk(bytes) => {
 				let n = bytes.len().min(dst.len());
 				dst[..n].copy_from_slice(&bytes[..n]);
@@ -367,7 +426,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 				self.shared.park_readable(self.id, waiter);
 				return Poll::Pending;
 			}
-			match Self::read(&self.shared, self.id, READ_CHUNK) {
+			match Self::read(&self.shared, self.id, READ_CHUNK, self.held.as_mut()) {
 				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
 				Read::Finished => {
 					self.finished = true;
@@ -388,6 +447,9 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
+		if let Some(held) = self.held.take() {
+			self.give_back(held);
+		}
 		self.shared.forget_recv(self.id);
 		if !self.finished && !self.stopped {
 			let _ = self

@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamId};
+use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, Credit, ReadableError, StreamId};
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
@@ -55,6 +55,8 @@ pub struct RecvStream {
     is_0rtt: bool,
     all_data_read: bool,
     reset: Option<VarInt>,
+    /// Connection credit for bytes read since [`Self::hold`], not yet released.
+    held: Option<Credit>,
 }
 
 impl RecvStream {
@@ -65,6 +67,32 @@ impl RecvStream {
             is_0rtt,
             all_data_read: false,
             reset: None,
+            held: None,
+        }
+    }
+
+    /// Keep the connection flow control credit for every byte read from now on.
+    ///
+    /// Stream credit still follows reads, so a stream window smaller than an application message
+    /// keeps the message flowing. The connection window those bytes occupy stays spent until
+    /// [`Self::release`] returns it, or this stream is dropped.
+    pub fn hold(&mut self) {
+        self.held.get_or_insert_default();
+    }
+
+    /// Return the connection credit for `bytes` of the held bytes to the peer.
+    ///
+    /// # Panics
+    /// If fewer than `bytes` read bytes are held.
+    pub fn release(&mut self, bytes: u64) {
+        let credit = self
+            .held
+            .as_mut()
+            .expect("release requires hold")
+            .split(bytes);
+        let mut conn = self.conn.state.lock("RecvStream::release");
+        if conn.inner.release(credit).should_transmit() {
+            conn.wake();
         }
     }
 
@@ -380,6 +408,9 @@ impl RecvStream {
                 let mut recv = conn.inner.recv_stream(self.stream);
                 let mut chunks = recv.read(ordered)?;
                 let status = read_fn(&mut chunks);
+                if let Some(held) = &mut self.held {
+                    held.merge(chunks.hold());
+                }
                 if chunks.finalize().should_transmit() {
                     conn.wake();
                 }
@@ -528,6 +559,12 @@ impl tokio::io::AsyncRead for RecvStream {
 
 impl Drop for RecvStream {
     fn drop(&mut self) {
+        if let Some(held) = self.held.take().filter(|held| !held.is_empty()) {
+            let mut conn = self.conn.state.lock("RecvStream::drop");
+            if conn.inner.release(held).should_transmit() {
+                conn.wake();
+            }
+        }
         if self.all_data_read {
             debug_assert!(
                 !self
