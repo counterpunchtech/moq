@@ -340,7 +340,7 @@ impl Connection {
 
 	/// How much receive credit the application holds, and how much the peer
 	/// may still send.
-	pub fn credit(&self) -> moq_quic::CreditStats {
+	pub fn credit_stats(&self) -> moq_quic::CreditStats {
 		self.shared.conn.borrow().stats().credit
 	}
 }

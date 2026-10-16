@@ -1881,8 +1881,8 @@ async fn held_reads_spend_the_connection_window() {
     let mut buf = vec![0; WINDOW];
     let mut held = read_held_exact(&mut recv, &mut buf).await;
     assert_eq!(held.len(), WINDOW as u64);
-    let credit = server.stats().credit;
-    assert_eq!((credit.held, credit.available), (WINDOW as u64, 0));
+    let stats = server.stats().credit;
+    assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
 
     // Far below the usual update threshold, and still enough to unblock.
     drop(held.split(100));
