@@ -72,4 +72,4 @@ Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges
 
 `cargo audit` cannot match the renamed crate, so security fixes are tracked by hand.
 Watch quinn-rs/quinn's [security advisories](https://github.com/quinn-rs/quinn/security/advisories) and releases (including the `0.11.x` branch, which sometimes gets a fix `main` does not need).
-For each quinn-proto or quinn-udp advisory, check whether the vulnerable code exists in this fork, and if it does, port the fix together with its regression test.
+For each quinn, quinn-proto, or quinn-udp advisory, check whether the vulnerable code exists in this fork, and if it does, port the fix together with its regression test.
