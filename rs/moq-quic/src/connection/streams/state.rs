@@ -124,6 +124,8 @@ pub struct StreamsState {
     /// Bytes read with [`Chunks::hold`](super::Chunks::hold) whose connection credit the
     /// application has not released yet
     pub(super) held: u64,
+    /// Connection credit returned for received bytes so far: read, released, or discarded
+    credited: u64,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
     /// Configured upper bound for `buffered_data`.
@@ -184,6 +186,7 @@ impl StreamsState {
             data_sent: 0,
             data_recvd: 0,
             held: 0,
+            credited: 0,
             buffered_data: 0,
             send_window,
             stream_receive_window: stream_receive_window.into(),
@@ -989,6 +992,7 @@ impl StreamsState {
     /// suppress sending further updates until the window increases significantly
     /// again.
     pub(super) fn add_read_credits(&mut self, credits: u64) -> ShouldTransmit {
+        self.credited += credits;
         if credits > self.receive_window_shrink_debt {
             let net_credits = credits - self.receive_window_shrink_debt;
             self.local_max_data = self.local_max_data.saturating_add(net_credits);
@@ -1032,6 +1036,7 @@ impl StreamsState {
         CreditStats {
             held: self.held,
             available: self.local_max_data.saturating_sub(self.data_recvd),
+            unread: self.data_recvd - self.credited - self.held,
         }
     }
 
@@ -2705,6 +2710,67 @@ mod tests {
         client.set_receive_window((client.receive_window - 16).try_into().unwrap());
         let _ = client.release(credit);
         assert_eq!(client.local_max_data, initial + 16);
+    }
+
+    /// Exhausted only once every byte the peer may send arrived and is held: unread bytes, gaps
+    /// still owed, and unadvertised credit all mean something can still move.
+    #[test]
+    fn exhausted_when_every_byte_is_held() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            64u32.into(),
+            (1024 * 1024u32).into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        assert!(!client.credit_stats().exhausted(), "nothing held");
+
+        // A readable prefix, then a gap below the last byte: the gap is still owed.
+        data(&mut client, id, 0, 32, false);
+        data(&mut client, id, 48, 16, false);
+        let prefix = read_held(&mut client, id);
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.available, stats.unread), (32, 0, 32));
+        assert!(!stats.exhausted(), "the gap can still arrive");
+
+        // The gap fills, so everything is readable, but not read yet.
+        data(&mut client, id, 32, 16, false);
+        assert!(!client.credit_stats().exhausted(), "unread bytes can still be read");
+
+        let rest = read_held(&mut client, id);
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.available, stats.unread), (64, 0, 0));
+        assert!(stats.exhausted());
+
+        // Releasing any of it lets the peer send again.
+        let _ = client.release(prefix);
+        assert!(!client.credit_stats().exhausted());
+        let _ = client.release(rest);
+        assert_eq!(client.credit_stats().unread, 0);
+    }
+
+    /// Bytes read without holding return their credit, so they never count as held or unread.
+    #[test]
+    fn plain_reads_are_neither_held_nor_unread() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, false);
+        assert_eq!(client.credit_stats().unread, 32);
+
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        let mut chunks = recv.read(true).unwrap();
+        while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+        let _ = chunks.finalize();
+
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.unread), (0, 0));
     }
 
     #[test]
