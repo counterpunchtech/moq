@@ -18,12 +18,15 @@ peer-visible QUIC flow control instead of a separate header quota error.
 The native transport primitive is a separate prerequisite; do not activate
 whole-message retention without its recovery policy in this quest.
 
-That primitive landed as a provisional seam to finalize here: `moq-quic`
-reads can hold their connection credit until released, both native drivers'
-receive streams opt in per stream and release by byte count (dropping
-releases the rest), and connection stats report held and still-available
-credit. moq-net's transport trait and the WebTransport wrappers do not carry
-it yet; reshape any of it to fit the consumer.
+That primitive landed as a provisional seam to finalize here: both native
+drivers' receive streams have a copying `poll_read_held` that yields a
+`Credit` for exactly the bytes read. Dropping a `Credit` returns it, so a
+reader buffer keeps one merged `Credit` and drops `split(n)` for each
+complete unit; read-ahead stays in the remainder. io_uring's `poll_closed`
+read-ahead keeps its credit until the application reads it. Connection stats
+report held and still-available credit. moq-net's transport trait and the
+WebTransport wrappers do not carry it yet; reshape any of it to fit the
+consumer.
 
 Hold connection credit through reader buffers, type/length prefixes, headers,
 extensions, and frame assembly. Attribute read-ahead bytes to the next unit

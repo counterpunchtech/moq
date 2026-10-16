@@ -43,7 +43,9 @@ use tracing::instrument::Instrument as _;
 use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
-use super::{ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig};
+use super::{
+    ClientConfig, Credit, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig,
+};
 
 #[test]
 fn handshake_timeout() {
@@ -1743,8 +1745,8 @@ async fn dropped_connection_cleans_up() {
     endpoint.wait_idle().await;
 }
 
-/// Held reads keep the connection window spent until released, while a stream window far
-/// smaller than it keeps replenishing; dropping the stream releases what is still held.
+/// Held reads keep the connection window spent until their credit drops, while a stream window
+/// far smaller than it keeps replenishing; credit outlives its stream.
 #[tokio::test]
 async fn held_reads_spend_the_connection_window() {
     const WINDOW: usize = 32 * 1024;
@@ -1768,23 +1770,34 @@ async fn held_reads_spend_the_connection_window() {
     });
 
     let mut recv = server.accept_uni().await.unwrap();
-    recv.hold();
     let mut buf = vec![0; WINDOW];
-    recv.read_exact(&mut buf).await.unwrap();
+    let mut held = read_held_exact(&mut recv, &mut buf).await;
+    assert_eq!(held.len(), WINDOW as u64);
     let credit = server.stats().credit;
     assert_eq!((credit.held, credit.available), (WINDOW as u64, 0));
 
     // Far below the usual update threshold, and still enough to unblock.
-    recv.release(100);
-    recv.read_exact(&mut buf[..100]).await.unwrap();
+    drop(held.split(100));
+    held.merge(read_held_exact(&mut recv, &mut buf[..100]).await);
     assert_eq!(server.stats().credit.held, WINDOW as u64);
 
-    recv.release(WINDOW as u64);
-    recv.read_exact(&mut buf[..500]).await.unwrap();
-    assert_eq!(server.stats().credit.held, 500);
+    drop(held);
+    let tail = read_held_exact(&mut recv, &mut buf[..500]).await;
     drop(recv);
-    assert_eq!(server.stats().credit.held, 0, "dropping releases the rest");
+    assert_eq!(server.stats().credit.held, 500, "credit outlives its stream");
+    drop(tail);
+    assert_eq!(server.stats().credit.held, 0);
     writer.await.unwrap();
+}
+
+/// Fill `buf` with held reads, returning the credit for all of it.
+async fn read_held_exact(recv: &mut RecvStream, buf: &mut [u8]) -> Credit {
+    let mut held = recv.read_held(buf).await.unwrap().unwrap();
+    while (held.len() as usize) < buf.len() {
+        let read = held.len() as usize;
+        held.merge(recv.read_held(&mut buf[read..]).await.unwrap().unwrap());
+    }
+    held
 }
 
 #[derive(Default)]

@@ -1,6 +1,6 @@
-//! Held receive credit through the io_uring driver: reads keep the connection
-//! window spent until the application releases them, including bytes
-//! `poll_closed` reads ahead.
+//! Held receive credit through the io_uring driver: held reads keep the
+//! connection window spent until their credit drops, and bytes `poll_closed`
+//! reads ahead keep theirs until the application reads them.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
@@ -45,6 +45,28 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 	})
 	.await
 	.unwrap_or_else(|| panic!("timed out waiting for {what}"))
+}
+
+/// Read exactly `len` bytes, keeping their credit.
+async fn read_held(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, len: usize) -> quic::Credit {
+	let mut buf = vec![0u8; len];
+	let mut held: Option<quic::Credit> = None;
+	while held.as_ref().map_or(0, quic::Credit::len) < len as u64 {
+		let filled = held.as_ref().map_or(0, |held| held.len() as usize);
+		let credit = within(
+			handle,
+			"stream data",
+			std::future::poll_fn(|cx| recv.poll_read_held(cx, &mut buf[filled..])),
+		)
+		.await
+		.expect("read")
+		.expect("not finished");
+		match &mut held {
+			Some(held) => held.merge(credit),
+			None => held = Some(credit),
+		}
+	}
+	held.expect("len > 0")
 }
 
 /// Read exactly `len` bytes.
@@ -123,19 +145,18 @@ fn held_reads_spend_the_connection_window() {
 			)
 			.await
 			.expect("accept_uni");
-			recv.hold();
 
-			read(&handle, &mut recv, WINDOW).await;
+			let mut held = read_held(&handle, &mut recv, WINDOW).await;
 			let credit = accepted.credit();
 			assert_eq!((credit.held, credit.available), (WINDOW as u64, 0));
 
 			// Far below the usual update threshold, and still enough to unblock.
-			recv.release(100);
-			read(&handle, &mut recv, 100).await;
+			drop(held.split(100));
+			held.merge(read_held(&handle, &mut recv, 100).await);
 			assert_eq!(accepted.credit().held, WINDOW as u64);
 
-			// Read-ahead holds credit the application has not seen yet.
-			recv.release(WINDOW as u64);
+			// Read-ahead keeps the credit the application has not taken yet.
+			drop(held);
 			within(
 				&handle,
 				"a window of read-ahead",
@@ -147,17 +168,19 @@ fn held_reads_spend_the_connection_window() {
 			)
 			.await;
 
-			// Only what reached the application is releasable.
+			// A plain read returns it as it takes the bytes; a held read keeps it.
 			read(&handle, &mut recv, 1000).await;
-			recv.release(1000);
+			assert_eq!(accepted.credit().held, WINDOW as u64 - 1000);
+			let taken = read_held(&handle, &mut recv, 500).await;
 			assert_eq!(accepted.credit().held, WINDOW as u64 - 1000);
 
-			// Stopping returns the read-ahead; the application still owns what it read.
-			read(&handle, &mut recv, 500).await;
+			// Stopping returns the read-ahead; the application still owns what it took.
 			recv.stop(0);
 			assert_eq!(accepted.credit().held, 500);
 			drop(recv);
-			assert_eq!(accepted.credit().held, 0, "dropping releases the rest");
+			assert_eq!(accepted.credit().held, 500, "credit outlives its stream");
+			drop(taken);
+			assert_eq!(accepted.credit().held, 0);
 		})
 		.expect("worker");
 }
