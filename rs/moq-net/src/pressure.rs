@@ -21,6 +21,7 @@
 //! always leaves room for one to complete.
 
 use std::{
+	collections::HashMap,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -136,15 +137,25 @@ fn victim(entries: &Slab<Entry>) -> Option<usize> {
 			.filter(|(_, entry)| held(entry) > 0 && !entry.slot.evicted.load(Ordering::Relaxed))
 	};
 
-	// Media: the broadcast holding the most, then its least useful stream.
-	let mut domains: Vec<(&Arc<PathOwned>, u64)> = Vec::new();
+	// Media: the broadcast holding the most, then its least useful stream. Keyed by path
+	// rather than by `Arc`, since separate subscriptions to one broadcast share no `Arc`.
+	// A run of streams sharing one `Arc` sums before it is hashed.
+	let mut domains: HashMap<&PathOwned, u64> = HashMap::new();
+	let mut run: Option<(&Arc<PathOwned>, u64)> = None;
 	for (_, entry) in holding() {
 		if let Rank::Media { broadcast, .. } = &entry.rank {
-			match domains.iter_mut().find(|(path, _)| *path == broadcast) {
-				Some((_, total)) => *total += held(entry),
-				None => domains.push((broadcast, held(entry))),
+			match &mut run {
+				Some((path, total)) if Arc::ptr_eq(path, broadcast) => *total += held(entry),
+				_ => {
+					if let Some((path, total)) = run.replace((broadcast, held(entry))) {
+						*domains.entry(path.as_ref()).or_default() += total;
+					}
+				}
 			}
 		}
+	}
+	if let Some((path, total)) = run {
+		*domains.entry(path.as_ref()).or_default() += total;
 	}
 	// The larger holder, then the lower path, so the choice never depends on order.
 	let domain = domains
@@ -153,7 +164,7 @@ fn victim(entries: &Slab<Entry>) -> Option<usize> {
 	if let Some((domain, _)) = domain {
 		return holding()
 			.filter_map(|(id, entry)| match &entry.rank {
-				Rank::Media { broadcast, priority } if broadcast == domain => Some((id, priority, entry)),
+				Rank::Media { broadcast, priority } if broadcast.as_ref() == domain => Some((id, priority, entry)),
 				_ => None,
 			})
 			// `Priority` sorts the most urgent first, so the greatest is the least useful.
@@ -369,5 +380,41 @@ mod tests {
 		assert!(pressure.evict());
 		assert_eq!(count.0.load(Ordering::Relaxed), 1);
 		assert!(ticket.poll_evicted(&Context::from_waker(&waker)));
+	}
+
+	/// Choose a victim among streams spread across broadcasts. The cost per stream must stay
+	/// flat along both axes. Run by nightly.
+	#[test]
+	#[ignore = "release benchmark, run by nightly"]
+	fn benchmark_victim() {
+		println!("streams,broadcasts,ns_per_choice,ns_per_stream");
+		for streams in [64usize, 1024, 16384] {
+			for broadcasts in [1usize, 64, 1024, 16384] {
+				if broadcasts > streams {
+					continue;
+				}
+				let paths: Vec<_> = (0..broadcasts)
+					.map(|b| Arc::new(Path::new(&format!("broadcast/{b}")).to_owned()))
+					.collect();
+				let pressure = Pressure::default();
+				let _tickets: Vec<_> = (0..streams)
+					.map(|i| {
+						let rank = Rank::Media {
+							broadcast: paths[i % broadcasts].clone(),
+							priority: Priority::new((i % 256) as u8, 0, i as u64),
+						};
+						hold(&pressure, rank, 1000 + i as u64)
+					})
+					.collect();
+				let rounds = (1 << 22) / streams;
+				let state = pressure.state.lock();
+				let start = std::time::Instant::now();
+				for _ in 0..rounds {
+					std::hint::black_box(victim(std::hint::black_box(&state.entries)));
+				}
+				let ns = start.elapsed().as_nanos() as f64 / rounds as f64;
+				println!("{streams},{broadcasts},{ns:.0},{:.1}", ns / streams as f64);
+			}
+		}
 	}
 }
