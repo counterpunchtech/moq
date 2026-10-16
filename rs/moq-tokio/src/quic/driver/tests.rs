@@ -1784,7 +1784,11 @@ async fn held_reads_spend_the_connection_window() {
     drop(held);
     let tail = read_held_exact(&mut recv, &mut buf[..500]).await;
     drop(recv);
-    assert_eq!(server.stats().credit.held, 500, "credit outlives its stream");
+    assert_eq!(
+        server.stats().credit.held,
+        500,
+        "credit outlives its stream"
+    );
     drop(tail);
     assert_eq!(server.stats().credit.held, 0);
     writer.await.unwrap();

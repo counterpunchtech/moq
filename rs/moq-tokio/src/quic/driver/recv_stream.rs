@@ -531,7 +531,11 @@ impl Drop for Credit {
             return;
         }
         let mut conn = self.conn.state.lock("Credit::drop");
-        if conn.inner.release(mem::take(&mut self.inner)).should_transmit() {
+        if conn
+            .inner
+            .release(mem::take(&mut self.inner))
+            .should_transmit()
+        {
             conn.wake();
         }
     }
