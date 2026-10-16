@@ -3937,7 +3937,10 @@ where
 
 			// A group starting partway through is the tail of one the fill began, and
 			// without that head it has a hole at the front.
-			Some(start) => match self.claim_fill(fill, track, sequence, Some(start), reading).await? {
+			Some(start) => match self
+				.claim_fill(stream, fill, track, sequence, Some(start), reading)
+				.await?
+			{
 				Some(producer) => Ok(Opened::Group(producer, start)),
 				None => {
 					tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
@@ -3947,7 +3950,7 @@ where
 
 			// A stream that ends without an object: the group is over and had nothing
 			// outside the fill's range, so the head it delivered is the whole group.
-			None => match self.claim_fill(fill, track, sequence, None, reading).await? {
+			None => match self.claim_fill(stream, fill, track, sequence, None, reading).await? {
 				Some(producer) => Ok(Opened::Group(producer, 0)),
 				None => Ok(Opened::Group(create(track)?, 0)),
 			},
@@ -3966,9 +3969,11 @@ where
 	/// with the subscription, so a publisher that promises a fill and never delivers one
 	/// costs this stream and nothing else. Meanwhile this stream stops holding the
 	/// subscription's end open: the fill's own stream holds it if its header arrived, and
-	/// the grace gives up on it if not.
+	/// the grace gives up on it if not. It still holds credit for what it read ahead, so it
+	/// also ends on eviction: the head may be the very stream that credit starves.
 	async fn claim_fill(
 		&self,
+		stream: &mut Reader<S::RecvStream, Version>,
 		fill: &kio::Producer<Fill>,
 		track: &track::Producer,
 		sequence: u64,
@@ -3979,6 +3984,9 @@ where
 		let settled = kio::wait(|waiter| {
 			if let Poll::Ready(err) = track.poll_closed(waiter) {
 				return Poll::Ready(Err(err));
+			}
+			if stream.poll_evicted(&waiter.context()) {
+				return Poll::Ready(Err(Error::Evicted));
 			}
 
 			let settled = fill.poll(waiter, |fill| match **fill {
@@ -10958,6 +10966,29 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	/// A tail parked on its head still holds credit for what it read ahead, which may be
+	/// what starves the head's stream, so eviction has to reach it there.
+	#[moq_net_sim::test]
+	async fn an_evicted_tail_stops_waiting_for_its_head() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])],
+		);
+		let pressure = crate::pressure::Pressure::default();
+		let mut tail = h.stream().await;
+		tail.track(&pressure, crate::pressure::Rank::Unidentified);
+
+		let mut subscriber = h.subscriber.clone();
+		let mut recv = std::pin::pin!(subscriber.recv_group(&mut tail));
+		assert!(futures::poll!(recv.as_mut()).is_pending(), "parked on the head");
+		assert!(pressure.evict());
+		assert!(matches!(
+			futures::poll!(recv.as_mut()),
+			Poll::Ready(Err(Error::Evicted))
+		));
+		assert_eq!(pressure.held(), 0);
 	}
 
 	/// A tail parked on its head stops holding the end open, so the finished fill does until
