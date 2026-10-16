@@ -1355,6 +1355,44 @@ async fn close_refuses_queued_incoming() {
     ));
 }
 
+/// Taking the last queued attempt and refusing it sends no event, so `accept` itself must wake a
+/// parked `wait_all_draining`.
+#[tokio::test]
+async fn refused_incoming_wakes_all_draining_waiter() {
+    let _guard = subscribe();
+    let factory = EndpointFactory::new();
+    let server = factory.endpoint();
+    let client = factory.endpoint();
+
+    let connect = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    timeout(Duration::from_secs(5), server.wait_queued())
+        .await
+        .unwrap();
+
+    let mut draining = pin!(server.wait_all_draining());
+    let (waker, wake_counter) = new_count_waker();
+    assert!(
+        draining
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert_eq!(wake_counter.wakes(), 0);
+
+    server.accept().await.unwrap().refuse();
+    assert!(wake_counter.wakes() > 0);
+    timeout(Duration::from_secs(5), draining).await.unwrap();
+
+    assert!(
+        timeout(Duration::from_secs(5), connect)
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
 /// The endpoint driver may exit while an accept runs without the lock. The connection registered
 /// afterwards must still be told that the driver is gone, so that its `Connecting` fails promptly
 /// and `wait_idle` does not wait on a connection nobody drives.

@@ -821,6 +821,11 @@ impl Future for Accept<'_> {
             return Poll::Ready(None);
         }
         if let Some(incoming) = endpoint.recv_state.incoming.pop_front() {
+            // A handed-out attempt no longer holds off `wait_all_draining`, and refusing,
+            // ignoring, or dropping it sends no event that would wake the waiter later.
+            if endpoint.all_draining() {
+                this.endpoint.inner.shared.all_draining.notify_waiters();
+            }
             // Release the mutex lock on endpoint so cloning it doesn't deadlock
             drop(endpoint);
             let incoming = Incoming::new(incoming, this.endpoint.inner.clone());
