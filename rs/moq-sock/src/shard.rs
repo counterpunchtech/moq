@@ -15,8 +15,7 @@
 //! [`bind`] is the whole entry point. It takes the port, binds every member in
 //! index order, attaches the steering filter, and returns a [`Bound`] group
 //! that hands out one serving [`Socket`] per member while retaining every
-//! underlying socket for its own lifetime. [`per_core`] is the size a server
-//! should ask for by default.
+//! underlying socket for its own lifetime.
 //!
 //! ```no_run
 //! # fn example(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
@@ -135,20 +134,6 @@ pub enum Error {
 	/// The steering filter could not be attached.
 	#[error("failed to steer the reuseport group")]
 	Steer(#[source] io::Error),
-}
-
-/// One shard per core this process may run on, or `None` where the kernel
-/// cannot steer a group, which is everywhere but Linux.
-///
-/// Counts the cores the process is allowed (its affinity mask and cgroup
-/// quota), not the machine's, so a container limited to two CPUs runs two
-/// shards. Capped at [`MAX_SHARDS`].
-pub fn per_core() -> Option<u16> {
-	if !cfg!(target_os = "linux") {
-		return None;
-	}
-	let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
-	Some(cores.min(usize::from(MAX_SHARDS)) as u16)
 }
 
 /// Bind a steered group of `count` sockets sharing `addr`.
@@ -637,15 +622,6 @@ mod tests {
 			bind(addr, MAX_SHARDS + 1),
 			Err(Error::Count { count: 257, max: 256 })
 		));
-	}
-
-	/// A group can only be steered on Linux, so a default elsewhere is a single
-	/// socket rather than a group.
-	#[test]
-	fn per_core_is_linux_only() {
-		let count = per_core();
-		assert_eq!(count.is_some(), cfg!(target_os = "linux"));
-		assert!(count.is_none_or(|count| (1..=MAX_SHARDS).contains(&count)));
 	}
 
 	/// Elsewhere the kernel cannot steer, so a group is refused at its first

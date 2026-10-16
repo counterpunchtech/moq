@@ -95,15 +95,14 @@ pub struct Relay {
 	/// Live sessions on this node, listed and nudged from the internal listener.
 	sessions: crate::session::Registry,
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
-	/// and run. `None` when QUIC stays on the shared runtime (`runtime.workers`
-	/// is `0`, or unset where a listener cannot be sharded); otherwise `server`
-	/// carries no QUIC listener of its own.
+	/// and run. `None` unless `runtime.workers` is configured, in which case
+	/// `server` carries no QUIC listener of its own.
 	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
-	/// [`serve`](crate::uring::Workers::serve). `None` unless QUIC runs on
-	/// workers and `runtime.io_uring` is set, in which case they own the QUIC
-	/// listen address instead of `workers`.
+	/// [`serve`](crate::uring::Workers::serve). `None` unless both
+	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
+	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	uring: Option<crate::uring::Workers>,
 }
@@ -160,27 +159,9 @@ impl Relay {
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
 		let io_uring = config.runtime.io_uring();
-
-		// Sharding is the default only where a group serves exactly the listener
-		// the shared runtime would have opened: a backend that can drive workers,
-		// a QUIC listen address (not a stream-only relay), and no QUIC-LB server
-		// id, whose connection IDs leave the steering filter no byte to read. An
-		// explicit count skips these and is refused below where it cannot deliver.
-		#[cfg(any(feature = "_quic", feature = "_uring"))]
-		let per_core = {
-			let backend = cfg!(feature = "_quic") || io_uring;
-			let shardable = backend
-				&& (config.listen.bind.is_some() || !config.listen.has_explicit_bind())
-				&& config.listen.load_balancer().is_none();
-			shardable.then(moq_sock::shard::per_core).flatten()
-		};
-		#[cfg(not(any(feature = "_quic", feature = "_uring")))]
-		let per_core = None;
-		let worker = config.runtime.workers(per_core);
-
 		anyhow::ensure!(
-			!io_uring || worker.is_some(),
-			"runtime.io_uring needs QUIC workers, which runtime.workers = 0 turns off"
+			!io_uring || config.runtime.workers().is_some(),
+			"runtime.io_uring requires runtime.workers"
 		);
 		#[cfg(not(target_os = "linux"))]
 		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
@@ -194,20 +175,20 @@ impl Relay {
 		// silently serving from the shared runtime instead would look like it worked.
 		#[cfg(not(feature = "_quic"))]
 		anyhow::ensure!(
-			io_uring || worker.is_none(),
+			io_uring || config.runtime.workers().is_none(),
 			"runtime.workers needs moq-relay built with the `quic` feature"
 		);
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		let served = worker.map(|_| config.listen.tls.load()).transpose()?;
+		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
 		}
 
 		#[cfg(feature = "_quic")]
-		let workers = match worker {
+		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
 				let mut server = moq_tokio::server::Config::default();
 				server.listen = listen.clone();
@@ -231,7 +212,7 @@ impl Relay {
 		let workers_certificates: Option<moq_tokio::tls::Certificates> = None;
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let uring = match worker {
+		let uring = match config.runtime.workers() {
 			Some(worker) if io_uring => {
 				let mut server = moq_tokio::server::Config::default();
 				server.listen = listen.clone();
@@ -854,50 +835,6 @@ async fn serve_listening(
 
 #[cfg(test)]
 mod tests {
-	/// A QUIC relay with no `[runtime]` section shards across every core it may
-	/// use, where the kernel can steer a group.
-	#[cfg(all(target_os = "linux", feature = "_quic"))]
-	#[tokio::test]
-	async fn quic_shards_per_core_by_default() {
-		let mut config = crate::Config::default();
-		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
-		config.listen.tls.generate = vec!["localhost".into()];
-		let relay = super::Relay::load(config).await.unwrap();
-		let workers = relay.workers.as_ref().expect("an unset count shards");
-		assert_eq!(Some(workers.len()), moq_sock::shard::per_core().map(usize::from));
-		assert_eq!(relay.addr(), Some(workers.local_addr()));
-	}
-
-	/// Each of these keeps QUIC on the shared runtime when no count is set: the
-	/// explicit opt-out, a stream-only relay (sharding would open a QUIC port
-	/// nobody asked for), and QUIC-LB, whose connection IDs leave the steering
-	/// filter nothing to read.
-	#[cfg(all(target_os = "linux", feature = "_quic"))]
-	#[tokio::test]
-	async fn quic_stays_shared_where_sharding_does_not_fit() {
-		let optout = {
-			let mut config = crate::Config::default();
-			config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
-			config.listen.tls.generate = vec!["localhost".into()];
-			config.runtime.workers = Some(0);
-			config
-		};
-		let streams = {
-			let mut config = crate::Config::default();
-			config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-			config
-		};
-		let quic_lb: crate::Config = toml::from_str(
-			"[listen]\nbind = \"127.0.0.1:0\"\ntls.generate = [\"localhost\"]\nload_balancer = { id = \"0a0b\", nonce = 4 }\n",
-		)
-		.unwrap();
-
-		for (name, config) in [("workers = 0", optout), ("stream-only", streams), ("QUIC-LB", quic_lb)] {
-			let relay = super::Relay::load(config).await.unwrap();
-			assert!(relay.workers.is_none(), "{name} sharded");
-		}
-	}
-
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};

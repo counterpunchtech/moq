@@ -34,7 +34,7 @@ quic = ["_quic", "moq-tokio/quic"]
 # The tokio QUIC listener, and the thread-per-core worker group behind
 # `runtime.workers`. Not one to enable on its own: it names no backend, so
 # moq-tokio would have nothing to bind a socket with.
-_quic = ["dep:moq-sock"]
+_quic = []
 # qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
 # congestion-control testing. Covers the io_uring workers too, so one feature

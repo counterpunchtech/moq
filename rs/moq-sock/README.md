@@ -15,8 +15,6 @@ runtimes (`moq-tokio` and `moq-uring`).
   in every connection id it issues, alongside a marker no SRT data header
   carries (`moq_quic::HashedConnectionIdGenerator::set_shard`). Anything else
   on the port, including other protocols, keeps the kernel's 4-tuple hash.
-  `shard::per_core` is the default group size: one per core on Linux, and no
-  group elsewhere.
 - **`cpu`**: pinning worker threads to cores.
 - **`udp`**: sending and receiving with GSO, GRO, and ECN, a hard fork of
   [quinn-udp](https://github.com/quinn-rs/quinn). All credit for it goes to

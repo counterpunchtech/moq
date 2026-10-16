@@ -59,8 +59,8 @@ pub struct Config {
 	#[serde(default)]
 	pub log: moq_tokio::Log,
 
-	/// How QUIC work is laid out over threads: one worker per core on Linux
-	/// unless `runtime.workers` says otherwise.
+	/// How QUIC work is laid out over threads. One shared runtime unless
+	/// `runtime.workers` is set.
 	#[usage(flatten)]
 	#[serde(default)]
 	pub runtime: crate::runtime::Config,
