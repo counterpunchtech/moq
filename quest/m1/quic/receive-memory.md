@@ -23,10 +23,11 @@ drivers' receive streams have a copying `poll_read_held` that yields a
 `Credit` for exactly the bytes read. Dropping a `Credit` returns it, so a
 reader buffer keeps one merged `Credit` and drops `split(n)` for each
 complete unit; read-ahead stays in the remainder. io_uring's `poll_closed`
-read-ahead keeps its credit until the application reads it. Connection stats
-report held and still-available credit. moq-net's transport trait and the
-WebTransport wrappers do not carry it yet; reshape any of it to fit the
-consumer.
+read-ahead keeps its credit until the application reads it. Both drivers'
+`Connection::stats().credit` reports held and still-available credit.
+`poll_read_held` stays separate until this quest folds it into `poll_read`.
+moq-net's transport trait and the WebTransport wrappers do not carry it yet;
+reshape any of it to fit the consumer.
 
 Hold connection credit through reader buffers, type/length prefixes, headers,
 extensions, and frame assembly. Attribute read-ahead bytes to the next unit
