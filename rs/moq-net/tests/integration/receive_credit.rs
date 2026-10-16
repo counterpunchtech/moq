@@ -7,7 +7,7 @@
 //! stands in for QUIC connection flow control. Without recovery each of these stalls:
 //! the sender has spent every byte of credit on messages that can never complete.
 
-mod support;
+use crate::support;
 
 use std::time::Duration;
 

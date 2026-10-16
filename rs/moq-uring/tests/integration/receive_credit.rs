@@ -10,8 +10,7 @@
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
-#[path = "support.rs"]
-mod support;
+use crate::support;
 
 use std::net::UdpSocket;
 use std::task::Poll;
