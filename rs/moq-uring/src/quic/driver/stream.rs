@@ -241,42 +241,64 @@ impl RecvStream {
 		}
 	}
 
-	/// Read into `dst`, keeping the connection flow control credit for exactly
-	/// the bytes read, or `None` once the peer has finished the stream.
+	/// Read up to `max` bytes, keeping the connection flow control credit for
+	/// exactly the bytes read, or `None` once the peer has finished the stream.
 	///
 	/// Stream credit still advances, so a stream window smaller than an
 	/// application message keeps the message flowing, while the connection
 	/// window these bytes occupy stays spent until the credit is dropped.
-	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
+	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<(Bytes, Credit)>, Error>> {
+		let waiter = self.park.hold(cx);
+		let credit = |inner| Credit {
+			shared: self.shared.clone(),
+			inner,
+		};
+		if max == 0 {
+			return Poll::Ready(Ok(Some((Bytes::new(), credit(moq_quic::Credit::default())))));
+		}
+		if !self.backlog.is_empty() {
+			let n = max.min(self.backlog.len());
+			let bytes = self.backlog.split_to(n).freeze();
+			let inner = self.backlog_credit.split(n as u64);
+			// A `poll_closed` parked at the read-ahead cap waits for this room.
+			self.shared.wake_readable(self.id);
+			return Poll::Ready(Ok(Some((bytes, credit(inner)))));
+		}
+		if self.finished {
+			return Poll::Ready(Ok(None));
+		}
 		let mut held = moq_quic::Credit::default();
-		self.poll_read_into(cx, dst, Some(&mut held)).map_ok(|read| {
-			read.map(|_| Credit {
-				shared: self.shared.clone(),
-				inner: held,
-			})
-		})
+		match Self::read(&self.shared, self.id, max, Some(&mut held)) {
+			Read::Chunk(bytes) => Poll::Ready(Ok(Some((bytes, credit(held))))),
+			Read::Finished => {
+				self.finished = true;
+				Poll::Ready(Ok(None))
+			}
+			Read::Blocked => {
+				if let Some(err) = self.shared.closed() {
+					return Poll::Ready(Err(err));
+				}
+				self.shared.park_readable(self.id, waiter);
+				Poll::Pending
+			}
+			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
+		}
 	}
 
-	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), with
-	/// the credit for the bytes read moved into `held` instead of returned to
-	/// the peer.
-	fn poll_read_into(
-		&mut self,
-		cx: &mut Context<'_>,
-		dst: &mut [u8],
-		held: Option<&mut moq_quic::Credit>,
-	) -> Poll<Result<Option<usize>, Error>> {
+	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), which
+	/// returns the credit for the bytes read to the peer.
+	fn poll_read_plain(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
 		let waiter = self.park.hold(cx);
 		if dst.is_empty() {
 			return Poll::Ready(Ok(Some(0)));
 		}
 		if !self.backlog.is_empty() {
-			return Poll::Ready(Ok(Some(self.drain(dst, held))));
+			return Poll::Ready(Ok(Some(self.drain(dst))));
 		}
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		match Self::read(&self.shared, self.id, dst.len(), held) {
+		match Self::read(&self.shared, self.id, dst.len(), None) {
 			Read::Chunk(bytes) => {
 				// moq-quic hands out at most `dst.len()`.
 				dst[..bytes.len()].copy_from_slice(&bytes);
@@ -319,6 +341,7 @@ impl RecvStream {
 			.recv_stream(self.id)
 			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
 		self.stopped = true;
+		self.shared.check_credit();
 		self.shared.kick();
 	}
 
@@ -352,23 +375,20 @@ impl RecvStream {
 		if transmit {
 			shared.kick();
 		}
+		shared.check_credit();
 		read
 	}
 
-	/// Move up to `dst.len()` read-ahead bytes out of the backlog, with their
-	/// credit moved into `held` or else returned to the peer.
+	/// Move up to `dst.len()` read-ahead bytes out of the backlog, returning
+	/// their credit to the peer.
 	///
 	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
 	/// waiting for is what this just made.
-	fn drain(&mut self, dst: &mut [u8], held: Option<&mut moq_quic::Credit>) -> usize {
+	fn drain(&mut self, dst: &mut [u8]) -> usize {
 		let n = dst.len().min(self.backlog.len());
 		dst[..n].copy_from_slice(&self.backlog[..n]);
 		self.backlog.advance(n);
-		let credit = self.backlog_credit.split(n as u64);
-		match held {
-			Some(held) => held.merge(credit),
-			None => release(&self.shared, credit),
-		}
+		release(&self.shared, self.backlog_credit.split(n as u64));
 		if n > 0 {
 			self.shared.wake_readable(self.id);
 		}
@@ -380,7 +400,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	type Error = Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		self.poll_read_into(cx, dst, None)
+		self.poll_read_plain(cx, dst)
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -459,6 +479,7 @@ fn release(shared: &Shared, credit: moq_quic::Credit) {
 	if shared.conn.borrow_mut().release(credit).should_transmit() {
 		shared.kick();
 	}
+	shared.check_credit();
 }
 
 /// Connection flow control credit for bytes read with

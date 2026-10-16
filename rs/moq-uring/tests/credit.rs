@@ -1,6 +1,7 @@
 //! Held receive credit through the io_uring driver: held reads keep the
-//! connection window spent until their credit drops, and bytes `poll_closed`
-//! reads ahead keep theirs until the application reads them.
+//! connection window spent until their credit drops, bytes `poll_closed`
+//! reads ahead keep theirs until the application reads them, and the
+//! connection reports each time held credit fills the window.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
@@ -10,7 +11,7 @@
 mod support;
 
 use std::net::UdpSocket;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
@@ -49,18 +50,18 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 
 /// Read exactly `len` bytes, keeping their credit.
 async fn read_held(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, len: usize) -> quic::Credit {
-	let mut buf = vec![0u8; len];
 	let mut held: Option<quic::Credit> = None;
 	while held.as_ref().map_or(0, quic::Credit::len) < len as u64 {
 		let filled = held.as_ref().map_or(0, |held| held.len() as usize);
-		let credit = within(
+		let (bytes, credit) = within(
 			handle,
 			"stream data",
-			std::future::poll_fn(|cx| recv.poll_read_held(cx, &mut buf[filled..])),
+			std::future::poll_fn(|cx| recv.poll_read_held(cx, len - filled)),
 		)
 		.await
 		.expect("read")
 		.expect("not finished");
+		assert_eq!(bytes.len() as u64, credit.len(), "credit covers exactly the bytes read");
 		match &mut held {
 			Some(held) => held.merge(credit),
 			None => held = Some(credit),
@@ -146,14 +147,22 @@ fn held_reads_spend_the_connection_window() {
 			.await
 			.expect("accept_uni");
 
+			let mut cx = Context::from_waker(Waker::noop());
+			let mut exhausted = |conn: &mut quic::Connection| conn.poll_credit_exhausted(&mut cx).is_ready();
+			assert!(!exhausted(&mut accepted));
+
 			let mut held = read_held(&handle, &mut recv, WINDOW).await;
 			let stats = accepted.stats().credit;
 			assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+			assert!(exhausted(&mut accepted), "held credit filled the window");
+			assert!(!exhausted(&mut accepted), "reported once per stall");
 
 			// Far below the usual update threshold, and still enough to unblock.
 			drop(held.split(100));
+			assert!(!exhausted(&mut accepted), "a release relieves the stall");
 			held.merge(read_held(&handle, &mut recv, 100).await);
 			assert_eq!(accepted.stats().credit.held, WINDOW as u64);
+			assert!(exhausted(&mut accepted), "holding the room again stalls again");
 
 			// Read-ahead keeps the credit the application has not taken yet.
 			drop(held);

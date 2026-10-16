@@ -515,6 +515,11 @@ impl Session {
 		}
 	}
 
+	/// See [`Connection::poll_credit_exhausted`].
+	pub fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		self.conn.poll_credit_exhausted(cx)
+	}
+
 	/// Rewrite error codes out of the HTTP/3 mapping in web mode.
 	fn map_err(&self, err: Error) -> Error {
 		match self.web {
@@ -966,6 +971,19 @@ impl RecvStream {
 		match self.web {
 			true => unmap_err(err),
 			false => unmap_legacy(err),
+		}
+	}
+
+	/// Read up to `max` bytes with their connection credit. See
+	/// [`super::RecvStream::poll_read_held`].
+	pub fn poll_read_held(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(bytes::Bytes, super::Credit)>, Error>> {
+		match self.inner.poll_read_held(cx, max) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
 		}
 	}
 }

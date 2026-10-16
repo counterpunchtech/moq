@@ -1,22 +1,21 @@
 //! How each backend reads with connection credit.
 
-use bytes::Bytes;
-use moq_net::transport::Unheld;
-
 /// Read a plain chunk, whose connection credit the backend returned as it read.
+#[cfg(any(test, feature = "tcp", feature = "websocket", feature = "iroh"))]
 pub(crate) async fn read_unheld<S: web_transport_trait::RecvStream>(
 	stream: &mut S,
 	max: usize,
-) -> Result<Option<(Bytes, Unheld)>, S::Error> {
+) -> Result<Option<(bytes::Bytes, moq_net::transport::Unheld)>, S::Error> {
 	let chunk = stream.read_chunk(max).await?;
 	Ok(chunk.map(|bytes| {
 		let len = bytes.len() as u64;
-		(bytes, Unheld(len))
+		(bytes, moq_net::transport::Unheld(len))
 	}))
 }
 
 /// Give a backend that returns connection credit as it reads, so never fills its window with
 /// held credit, the held interface.
+#[cfg(any(test, feature = "tcp", feature = "websocket", feature = "iroh"))]
 macro_rules! unheld {
 	($session:ty, $recv:ty) => {
 		impl $crate::transport::HeldRecvStream for $recv {
@@ -67,7 +66,7 @@ impl super::HeldRecvStream for crate::quic::web::RecvStream {
 	fn read_chunk_held(
 		&mut self,
 		max: usize,
-	) -> impl Future<Output = Result<Option<(Bytes, Self::Credit)>, Self::Error>> + Send {
+	) -> impl Future<Output = Result<Option<(bytes::Bytes, Self::Credit)>, Self::Error>> + Send {
 		crate::quic::web::RecvStream::read_chunk(self, max)
 	}
 }

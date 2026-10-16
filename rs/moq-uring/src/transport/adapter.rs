@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use moq_net::transport::{self as moq, poll};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use web_transport_trait::{self as wt, poll as backend};
 
 /// A backend failure preserving the session and stream code registries.
@@ -44,6 +44,26 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 		self.0.estimated_send_rate()
 	}
 }
+/// A backend receive stream that can keep the connection credit of what it reads.
+pub trait HeldRecvStream: backend::RecvStream {
+	/// The connection credit a read keeps until it is dropped.
+	type Credit: moq::Credit;
+
+	/// Read up to `max` bytes with their credit, or `None` once finished.
+	#[allow(clippy::type_complexity)]
+	fn poll_read_held(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Self::Credit)>, Self::Error>>;
+}
+
+/// A backend session that reports when held credit fills its receive window.
+pub trait HeldSession: backend::Session<RecvStream: HeldRecvStream> {
+	/// See [`poll_credit_exhausted`](poll::Session::poll_credit_exhausted).
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()>;
+}
+
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
 pub struct Session<S>(S, moq::Binding);
@@ -53,7 +73,7 @@ impl<S> Session<S> {
 		Self(session, binding)
 	}
 }
-impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
+impl<S: HeldSession<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
 	type SendStream = SendStream<S::SendStream>;
 	type RecvStream = RecvStream<S::RecvStream>;
 	type Error = Error<S::Error>;
@@ -98,8 +118,8 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(&mut self.0, cx).map(Error)
 	}
-	fn poll_credit_exhausted(&mut self, _: &mut Context<'_>) -> Poll<()> {
-		Poll::Pending
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		HeldSession::poll_credit_exhausted(&mut self.0, cx)
 	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
@@ -130,37 +150,35 @@ impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 }
 /// An incoming WebTransport stream adapted to moq-net.
 pub struct RecvStream<S>(S);
-// The WebTransport backend returns connection credit as it reads, so there is none to hold.
-impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
+impl<S: HeldRecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	type Error = Error<S::Error>;
-	type Credit = moq::Unheld;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
-		backend::RecvStream::poll_read(&mut self.0, cx, dst)
-			.map_err(Error)
-			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
+	type Credit = S::Credit;
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<S::Credit>, Self::Error>> {
+		let read = ready!(self.0.poll_read_held(cx, dst.len())).map_err(Error)?;
+		Poll::Ready(Ok(read.map(|(bytes, credit)| {
+			dst[..bytes.len()].copy_from_slice(&bytes);
+			credit
+		})))
 	}
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(&mut self.0, cx, buf)
-			.map_err(Error)
-			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
+	) -> Poll<Result<Option<S::Credit>, Self::Error>> {
+		// Hand over the chunk the backend owns, without zeroing a destination first.
+		let max = buf.remaining_mut().min(64 * 1024);
+		let read = ready!(self.0.poll_read_held(cx, max)).map_err(Error)?;
+		Poll::Ready(Ok(read.map(|(bytes, credit)| {
+			buf.put(bytes);
+			credit
+		})))
 	}
 	fn poll_read_chunk(
 		&mut self,
 		cx: &mut Context<'_>,
 		max: usize,
-	) -> Poll<Result<Option<(Bytes, moq::Unheld)>, Self::Error>> {
-		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max)
-			.map_err(Error)
-			.map_ok(|chunk| {
-				chunk.map(|b| {
-					let n = b.len() as u64;
-					(b, moq::Unheld(n))
-				})
-			})
+	) -> Poll<Result<Option<(Bytes, S::Credit)>, Self::Error>> {
+		self.0.poll_read_held(cx, max).map_err(Error)
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(&mut self.0, code)
@@ -221,6 +239,26 @@ mod tests {
 		}
 		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Failure>> {
 			Poll::Ready(Err(Failure))
+		}
+	}
+	impl HeldRecvStream for Stream {
+		type Credit = moq::Unheld;
+		fn poll_read_held(
+			&mut self,
+			cx: &mut Context<'_>,
+			max: usize,
+		) -> Poll<Result<Option<(Bytes, moq::Unheld)>, Failure>> {
+			backend::RecvStream::poll_read_chunk(self, cx, max).map_ok(|chunk| {
+				chunk.map(|bytes| {
+					let len = bytes.len() as u64;
+					(bytes, moq::Unheld(len))
+				})
+			})
+		}
+	}
+	impl HeldSession for Backend {
+		fn poll_credit_exhausted(&mut self, _: &mut Context<'_>) -> Poll<()> {
+			Poll::Pending
 		}
 	}
 	struct Sample;
