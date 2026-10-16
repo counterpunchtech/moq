@@ -75,15 +75,14 @@ impl RecvStream {
 
     /// Read data contiguously from the stream.
     ///
-    /// Yields the number of bytes read into `buf` on success, or `None` if the stream was finished.
+    /// Yields the [`Credit`] for exactly the bytes read into `buf`, which [`Credit::len()`]
+    /// counts, or `None` if the stream was finished. Stream credit advances on the read, while
+    /// the connection window these bytes occupy stays spent until the credit is dropped, so drop
+    /// it once the bytes are consumed.
     ///
     /// This operation is cancel-safe.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError> {
-        Read {
-            stream: self,
-            buf: ReadBuf::new(buf),
-        }
-        .await
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<Credit>, ReadError> {
+        poll_fn(|cx| self.poll_read(cx, buf)).await
     }
 
     /// Read an exact number of bytes contiguously from the stream.
@@ -99,27 +98,16 @@ impl RecvStream {
         .await
     }
 
-    /// Read data contiguously from the stream, keeping its connection flow control credit.
+    /// Attempts to read from the stream into the provided buffer
     ///
-    /// Like [`read()`], but yields the [`Credit`] for exactly the bytes read into `buf`, or `None`
-    /// if the stream was finished. Stream credit still advances, so a stream window smaller than
-    /// an application message keeps the message flowing, while the connection window these bytes
-    /// occupy stays spent until the credit is dropped.
+    /// See [`read()`] for what the yielded credit means.
     ///
-    /// This operation is cancel-safe.
+    /// If no data is available for reading, this returns `Poll::Pending` and arranges for the
+    /// current task (via `cx.waker()`) to be notified when the stream becomes readable or is
+    /// closed.
     ///
     /// [`read()`]: RecvStream::read
-    pub async fn read_held(&mut self, buf: &mut [u8]) -> Result<Option<Credit>, ReadError> {
-        poll_fn(|cx| self.poll_read_held(cx, buf)).await
-    }
-
-    /// Attempts to read from the stream into the provided buffer, keeping the bytes' connection
-    /// flow control credit.
-    ///
-    /// See [`read_held()`] for details.
-    ///
-    /// [`read_held()`]: RecvStream::read_held
-    pub fn poll_read_held(
+    pub fn poll_read(
         &mut self,
         cx: &mut Context<'_>,
         buf: &mut [u8],
@@ -143,33 +131,12 @@ impl RecvStream {
         })
     }
 
-    /// Attempts to read from the stream into the provided buffer
-    ///
-    /// On success, returns `Poll::Ready(Ok(num_bytes_read))` and places data into `buf`. If this
-    /// returns zero bytes read (and `buf` has a non-zero length), that indicates that the remote
-    /// side has [`finish`]ed the stream and the local side has already read all bytes.
-    ///
-    /// If no data is available for reading, this returns `Poll::Pending` and arranges for the
-    /// current task (via `cx.waker()`) to be notified when the stream becomes readable or is
-    /// closed.
-    ///
-    /// [`finish`]: crate::quic::driver::SendStream::finish
-    pub fn poll_read(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Result<usize, ReadError>> {
-        let mut buf = ReadBuf::new(buf);
-        ready!(self.poll_read_buf(cx, &mut buf))?;
-        Poll::Ready(Ok(buf.filled().len()))
-    }
-
     /// Attempts to read from the stream into the provided buffer, which may be uninitialized
     ///
     /// On success, returns `Poll::Ready(Ok(()))` and places data into the unfilled portion of
     /// `buf`. If this does not write any bytes to `buf` (and `buf.remaining()` is non-zero), that
     /// indicates that the remote side has [`finish`]ed the stream and the local side has already
-    /// read all bytes.
+    /// read all bytes. The bytes' connection credit returns as they are read.
     ///
     /// If no data is available for reading, this returns `Poll::Pending` and arranges for the
     /// current task (via `cx.waker()`) to be notified when the stream becomes readable or is
@@ -192,30 +159,40 @@ impl RecvStream {
     /// Read the next segment of data
     ///
     /// Yields `None` if the stream was finished. Otherwise, yields a segment of data and its
-    /// offset in the stream. If `ordered` is `true`, the chunk's offset will be immediately after
-    /// the last data yielded by `read()` or `read_chunk()`. If `ordered` is `false`, segments may
-    /// be received in any order, and the `Chunk`'s `offset` field can be used to determine
-    /// ordering in the caller. Unordered reads are less prone to head-of-line blocking within a
-    /// stream, but require the application to manage reassembling the original data.
+    /// offset in the stream, with the [`Credit`] for its bytes (see [`read()`]). If `ordered` is
+    /// `true`, the chunk's offset will be immediately after the last data yielded by `read()` or
+    /// `read_chunk()`. If `ordered` is `false`, segments may be received in any order, and the
+    /// `Chunk`'s `offset` field can be used to determine ordering in the caller. Unordered reads
+    /// are less prone to head-of-line blocking within a stream, but require the application to
+    /// manage reassembling the original data.
     ///
     /// Slightly more efficient than `read` due to not copying. Chunk boundaries do not correspond
     /// to peer writes, and hence cannot be used as framing.
     ///
     /// This operation is cancel-safe.
+    ///
+    /// [`read()`]: RecvStream::read
     pub async fn read_chunk(
         &mut self,
         max_length: usize,
         ordered: bool,
-    ) -> Result<Option<Chunk>, ReadError> {
-        ReadChunk {
-            stream: self,
-            max_length,
-            ordered,
-        }
+    ) -> Result<Option<(Chunk, Credit)>, ReadError> {
+        poll_fn(|cx| {
+            self.poll_read_generic(cx, ordered, |chunks| match chunks.next(max_length) {
+                Ok(Some(chunk)) => ReadStatus::Readable((chunk, chunks.hold())),
+                res => (None, res.err()).into(),
+            })
+            .map_ok(|read| {
+                read.map(|(chunk, inner)| {
+                    let conn = self.conn.0.clone();
+                    (chunk, Credit { conn, inner })
+                })
+            })
+        })
         .await
     }
 
-    /// Attempts to read a chunk from the stream.
+    /// Attempts to read a chunk from the stream, returning its credit as it reads.
     ///
     /// On success, returns `Poll::Ready(Ok(Some(chunk)))`. If `Poll::Ready(Ok(None))`
     /// is returned, it implies that EOF has been reached.
@@ -223,7 +200,7 @@ impl RecvStream {
     /// If no data is available for reading, the method returns `Poll::Pending`
     /// and arranges for the current task (via cx.waker()) to receive a notification
     /// when the stream becomes readable or is closed.
-    fn poll_read_chunk(
+    pub(super) fn poll_read_chunk(
         &mut self,
         cx: &mut Context<'_>,
         max_length: usize,
@@ -233,34 +210,6 @@ impl RecvStream {
             Ok(Some(chunk)) => ReadStatus::Readable(chunk),
             res => (None, res.err()).into(),
         })
-    }
-
-    /// Read the next segment of data in order, keeping its connection flow control credit.
-    ///
-    /// Like [`read_chunk()`] with `ordered`, but yields the [`Credit`] for exactly the chunk's
-    /// bytes. See [`read_held()`] for how held credit behaves.
-    ///
-    /// This operation is cancel-safe.
-    ///
-    /// [`read_chunk()`]: RecvStream::read_chunk
-    /// [`read_held()`]: RecvStream::read_held
-    pub async fn read_chunk_held(
-        &mut self,
-        max_length: usize,
-    ) -> Result<Option<(Bytes, Credit)>, ReadError> {
-        poll_fn(|cx| {
-            self.poll_read_generic(cx, true, |chunks| match chunks.next(max_length) {
-                Ok(Some(chunk)) => ReadStatus::Readable((chunk.bytes, chunks.hold())),
-                res => (None, res.err()).into(),
-            })
-            .map_ok(|read| {
-                read.map(|(bytes, inner)| {
-                    let conn = self.conn.0.clone();
-                    (bytes, Credit { conn, inner })
-                })
-            })
-        })
-        .await
     }
 
     /// Read the next segments of data
@@ -511,7 +460,8 @@ fn fill(chunks: &mut Chunks<'_>, buf: &mut ReadBuf<'_>) -> ReadStatus<()> {
     }
 }
 
-/// Connection flow control credit for bytes read with [`RecvStream::read_held`].
+/// Connection flow control credit for bytes read with [`RecvStream::read`] or
+/// [`RecvStream::read_chunk`].
 ///
 /// The peer cannot reuse the connection window these bytes occupy until this is dropped, which
 /// returns it even after the stream or connection is gone.
@@ -795,27 +745,6 @@ impl From<ResetError> for io::Error {
     }
 }
 
-/// Future produced by [`RecvStream::read()`].
-///
-/// [`RecvStream::read()`]: crate::quic::driver::RecvStream::read
-struct Read<'a> {
-    stream: &'a mut RecvStream,
-    buf: ReadBuf<'a>,
-}
-
-impl Future for Read<'_> {
-    type Output = Result<Option<usize>, ReadError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        ready!(this.stream.poll_read_buf(cx, &mut this.buf))?;
-        match this.buf.filled().len() {
-            0 if this.buf.capacity() != 0 => Poll::Ready(Ok(None)),
-            n => Poll::Ready(Ok(Some(n))),
-        }
-    }
-}
-
 /// Future produced by [`RecvStream::read_exact()`].
 ///
 /// [`RecvStream::read_exact()`]: crate::quic::driver::RecvStream::read_exact
@@ -851,23 +780,6 @@ pub enum ReadExactError {
     /// A read error occurred
     #[error(transparent)]
     ReadError(#[from] ReadError),
-}
-
-/// Future produced by [`RecvStream::read_chunk()`].
-///
-/// [`RecvStream::read_chunk()`]: crate::quic::driver::RecvStream::read_chunk
-struct ReadChunk<'a> {
-    stream: &'a mut RecvStream,
-    max_length: usize,
-    ordered: bool,
-}
-
-impl Future for ReadChunk<'_> {
-    type Output = Result<Option<Chunk>, ReadError>;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (max_length, ordered) = (self.max_length, self.ordered);
-        self.stream.poll_read_chunk(cx, max_length, ordered)
-    }
 }
 
 /// Future produced by [`RecvStream::read_chunks()`].

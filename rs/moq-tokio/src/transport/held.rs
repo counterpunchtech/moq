@@ -68,7 +68,7 @@ impl super::HeldRecvStream for crate::quic::web::RecvStream {
 		&mut self,
 		max: usize,
 	) -> impl Future<Output = Result<Option<(Bytes, Self::Credit)>, Self::Error>> + Send {
-		crate::quic::web::RecvStream::read_chunk_held(self, max)
+		crate::quic::web::RecvStream::read_chunk(self, max)
 	}
 }
 
