@@ -81,6 +81,9 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(self, cx).map(Error)
 	}
+	fn poll_credit_exhausted(&mut self, _: &mut Context<'_>) -> Poll<()> {
+		Poll::Pending
+	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(self))
 	}
@@ -106,20 +109,32 @@ impl<S: wt::SendStream + 'static> poll::SendStream for super::SendStream<S> {
 		backend::SendStream::poll_closed(self, cx).map_err(Error)
 	}
 }
+// The WebTransport backend returns connection credit as it reads, so there is none to hold.
 impl<S: wt::RecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read(self, cx, dst).map_err(Error)
+	type Credit = moq::Unheld;
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
+		backend::RecvStream::poll_read(self, cx, dst)
+			.map_err(Error)
+			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
 	}
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(self, cx, buf).map_err(Error)
+	) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
+		backend::RecvStream::poll_read_buf(self, cx, buf)
+			.map_err(Error)
+			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
 	}
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		backend::RecvStream::poll_read_chunk(self, cx, max).map_err(Error)
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, moq::Unheld)>, Self::Error>> {
+		backend::RecvStream::poll_read_chunk(self, cx, max)
+			.map_err(Error)
+			.map_ok(|chunk| chunk.map(|b| (b.clone(), moq::Unheld(b.len() as u64))))
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(self, code)
