@@ -84,11 +84,10 @@ Regression coverage must include many partial headers and frames filling the
 shared allowance, a finite stream window smaller than a frame, the largest
 supported encoded unit, read-ahead across unit boundaries, cancellation and
 late reset/data races, unidentified and control-only pressure, and continued
-progress after selecting victims. Exercise a JavaScript sender against both
-native receive paths and run all-language interop. Measure retained bytes,
-throughput, and completion latency across concurrent streams and frame sizes,
-including finite versus very large stream windows. Wire checks and benchmarks
-into CI; no wall-clock sleeps in unit tests.
+progress after selecting victims, and run all-language interop. Wire checks
+into CI; no wall-clock sleeps in unit tests. The JavaScript sender and the
+retained-bytes, throughput, and latency sweep moved to
+[their own quest](/quest/m1/quic/receive-memory-coverage.md).
 
 Public API: native receive-credit integration and validation of the existing
 window configuration; no new header-specific quota. Wire: existing QUIC
@@ -99,6 +98,7 @@ separate guide quest is needed.
 
 ## Related
 
+- [Prove receive memory](/quest/m1/quic/receive-memory-coverage.md) - a JavaScript sender against both native receivers, and the nightly benchmark sweep
 - [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - share priority semantics without requiring sender-side recovery
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance
