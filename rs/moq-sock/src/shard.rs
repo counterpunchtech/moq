@@ -37,7 +37,7 @@
 //! [`Shard::index`] modulo [`Shard::count`], and whose fourth byte has both
 //! bits of `0x18` set, a pattern no valid SRT data header carries, so a short
 //! header from another protocol on the port keeps the 4-tuple hash.
-//! `moq_quic::HashedConnectionIdGenerator::set_shard` issues exactly those.
+//! `moq_quic::RandomConnectionIdGenerator::set_shard` issues exactly those.
 //! The kernel selects `socks[A % count]` for a returned accumulator `A`, so
 //! feeding it that byte lands on the owner.
 //!

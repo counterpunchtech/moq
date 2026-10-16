@@ -7,8 +7,8 @@
 //! cluster dials at once. A single demux task receives; each connection keeps
 //! a driver task of its own for timers and egress.
 //!
-//! Every connection id this endpoint issues is moq-quic's 8-byte hashed id,
-//! fixed-length because a short header does not encode the id's length. Ids
+//! Every connection id this endpoint issues is 8 random bytes, fixed-length
+//! because a short header does not encode the id's length. Ids
 //! rotate as peers consume them (`NEW_CONNECTION_ID`), so a migrating client
 //! stays routable; an Initial for an unsupported version gets a version
 //! negotiation packet back.
@@ -18,7 +18,7 @@
 //! adopted as a member of a steered `SO_REUSEPORT` group (one worker per core
 //! on one port; see [`udp::Bound`](crate::udp::Bound)) brings its slot along,
 //! and every id the endpoint issues then names that shard
-//! (`moq_quic::HashedConnectionIdGenerator::set_shard`), so the kernel keeps
+//! (`moq_quic::RandomConnectionIdGenerator::set_shard`), so the kernel keeps
 //! delivering a connection's packets to the worker that owns it. Dials
 //! through the endpoint carry it too, which is what steers a cluster peer's
 //! responses back to the dialing worker.

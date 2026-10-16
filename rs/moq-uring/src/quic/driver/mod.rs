@@ -105,14 +105,15 @@ pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<A
 	// The steering filter recognizes short headers by their fixed bit.
 	config.grease_quic_bit(shard.is_none());
 	// moq-quic asks its generator for every id it issues, dials and rotations
-	// alike, so naming the shard here steers all of them.
-	if let Some(shard) = shard {
-		config.cid_generator(Arc::new(move || {
-			let mut cids = moq_quic::HashedConnectionIdGenerator::new();
+	// alike, so naming the shard here steers all of them. Random rather than
+	// hashed ids, so neither path gives up nonce bytes to a signature.
+	config.cid_generator(Arc::new(move || {
+		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+		if let Some(shard) = shard {
 			cids.set_shard(shard.index(), shard.count());
-			Box::new(cids)
-		}));
-	}
+		}
+		Box::new(cids)
+	}));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
 		.map_err(|err| Error::Quic(err.to_string()))?;

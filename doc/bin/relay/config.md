@@ -112,7 +112,8 @@ window, so very small values can prevent other requests from progressing.
 By default one work-stealing runtime serves every connection off one UDP
 socket. On Linux, QUIC can instead run on single-threaded workers, each with
 its own socket on the listen address (`SO_REUSEPORT`), so a connection is
-handled start to finish by one thread and its packets never cross cores.
+handled start to finish by one worker thread and its packets never cross
+threads. `pin = true` also keeps that thread on one core.
 
 ```toml
 [runtime]

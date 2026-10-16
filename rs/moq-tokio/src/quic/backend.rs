@@ -776,7 +776,7 @@ impl Server {
 				"encoding the shard in connection IDs"
 			);
 			endpoint_config.cid_generator(Arc::new(move || {
-				let mut cids = moq_quic::HashedConnectionIdGenerator::new();
+				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
 				cids.set_shard(shard.index(), shard.count());
 				Box::new(cids)
 			}));

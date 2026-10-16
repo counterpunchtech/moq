@@ -13,7 +13,7 @@ runtimes (`moq-tokio` and `moq-uring`).
   member socket, so dropping one serving handle cannot renumber the survivors.
   A `Shard` names the slot a member holds, which the endpoint serving it names
   in every connection id it issues, alongside a marker no SRT data header
-  carries (`moq_quic::HashedConnectionIdGenerator::set_shard`). Anything else
+  carries (`moq_quic::RandomConnectionIdGenerator::set_shard`). Anything else
   on the port, including other protocols, keeps the kernel's 4-tuple hash.
 - **`cpu`**: pinning worker threads to cores.
 - **`udp`**: sending and receiving with GSO, GRO, and ECN, a hard fork of
