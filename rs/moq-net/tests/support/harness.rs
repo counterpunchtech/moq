@@ -62,6 +62,8 @@ pub async fn subscribed(track: &moq_net::track::Producer) {
 pub struct MockConnectOptions {
 	/// The MoQ version to negotiate (determines the ALPN protocol string).
 	pub version: Version,
+	/// In-memory stream flow-control settings; ALPN comes from `version`.
+	pub transport: moq_net::transport::memory::Config,
 	/// Origin whose broadcasts the client publishes to the server.
 	pub client_publish: Option<origin::Consumer>,
 	/// Origin the client inserts remote broadcasts into.
@@ -84,8 +86,6 @@ pub struct MockConnectOptions {
 	pub stats: MockStats,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
-	/// Each side's connection receive allowance, unbounded when `None`.
-	pub receive_window: Option<usize>,
 }
 
 impl MockConnectOptions {
@@ -93,6 +93,7 @@ impl MockConnectOptions {
 	pub fn new(version: Version) -> Self {
 		Self {
 			version,
+			transport: Default::default(),
 			client_publish: None,
 			client_subscribe: None,
 			server_publish: None,
@@ -104,7 +105,6 @@ impl MockConnectOptions {
 			cost: None,
 			stats: MockStats::default(),
 			server_polls: None,
-			receive_window: None,
 		}
 	}
 }
@@ -131,7 +131,9 @@ pub struct MockPair {
 /// Panics if the handshake fails on either side (test-only code).
 pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let protocol = opts.version.alpn();
-	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol), opts.receive_window);
+	let mut transport = opts.transport;
+	transport.protocol = Some(protocol.to_string());
+	let (client_transport, server_transport) = create_mock_session_pair(transport);
 	client_transport.set_latency(opts.latency);
 	client_transport.set_stats(opts.stats);
 	server_transport.set_stats(opts.stats);
