@@ -147,13 +147,13 @@ fn held_reads_spend_the_connection_window() {
 			.expect("accept_uni");
 
 			let mut held = read_held(&handle, &mut recv, WINDOW).await;
-			let stats = accepted.credit_stats();
+			let stats = accepted.stats().credit;
 			assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
 
 			// Far below the usual update threshold, and still enough to unblock.
 			drop(held.split(100));
 			held.merge(read_held(&handle, &mut recv, 100).await);
-			assert_eq!(accepted.credit_stats().held, WINDOW as u64);
+			assert_eq!(accepted.stats().credit.held, WINDOW as u64);
 
 			// Read-ahead keeps the credit the application has not taken yet.
 			drop(held);
@@ -162,7 +162,7 @@ fn held_reads_spend_the_connection_window() {
 				"a window of read-ahead",
 				std::future::poll_fn(|cx| match recv.poll_closed(cx) {
 					Poll::Ready(res) => panic!("stream ended early: {res:?}"),
-					Poll::Pending if accepted.credit_stats().held == WINDOW as u64 => Poll::Ready(()),
+					Poll::Pending if accepted.stats().credit.held == WINDOW as u64 => Poll::Ready(()),
 					Poll::Pending => Poll::Pending,
 				}),
 			)
@@ -170,17 +170,17 @@ fn held_reads_spend_the_connection_window() {
 
 			// A plain read returns it as it takes the bytes; a held read keeps it.
 			read(&handle, &mut recv, 1000).await;
-			assert_eq!(accepted.credit_stats().held, WINDOW as u64 - 1000);
+			assert_eq!(accepted.stats().credit.held, WINDOW as u64 - 1000);
 			let taken = read_held(&handle, &mut recv, 500).await;
-			assert_eq!(accepted.credit_stats().held, WINDOW as u64 - 1000);
+			assert_eq!(accepted.stats().credit.held, WINDOW as u64 - 1000);
 
 			// Stopping returns the read-ahead; the application still owns what it took.
 			recv.stop(0);
-			assert_eq!(accepted.credit_stats().held, 500);
+			assert_eq!(accepted.stats().credit.held, 500);
 			drop(recv);
-			assert_eq!(accepted.credit_stats().held, 500, "credit outlives its stream");
+			assert_eq!(accepted.stats().credit.held, 500, "credit outlives its stream");
 			drop(taken);
-			assert_eq!(accepted.credit_stats().held, 0);
+			assert_eq!(accepted.stats().credit.held, 0);
 		})
 		.expect("worker");
 }
