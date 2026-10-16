@@ -1000,6 +1000,13 @@ impl StreamsState {
     /// again.
     pub(super) fn add_read_credits(&mut self, credits: u64) -> ShouldTransmit {
         self.credited += credits;
+        debug_assert!(
+            self.credited + self.held <= self.data_recvd,
+            "credited {} and held {} past the {} bytes received",
+            self.credited,
+            self.held,
+            self.data_recvd
+        );
         if credits > self.receive_window_shrink_debt {
             let net_credits = credits - self.receive_window_shrink_debt;
             self.local_max_data = self.local_max_data.saturating_add(net_credits);
@@ -2356,6 +2363,8 @@ mod tests {
 
         // credit, expecting all of them added to local_max_data
         let credits = 1024u64;
+        // As if that many bytes arrived and were read: credit never outruns what was received.
+        server.data_recvd += credits;
         let should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, prev_local_max_data + credits);
@@ -2381,6 +2390,7 @@ mod tests {
         let credits = 1024u64;
         for _ in 0..2 {
             let expected_receive_window_shrink_debt = server.receive_window_shrink_debt - credits;
+            server.data_recvd += credits;
             let should_transmit = server.add_read_credits(credits);
             assert_eq!(
                 server.receive_window_shrink_debt,
@@ -2395,6 +2405,7 @@ mod tests {
         let prev_local_max_data = server.local_max_data;
         let expected_local_max_data =
             server.local_max_data + (credits - server.receive_window_shrink_debt);
+        server.data_recvd += credits;
         let _should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, expected_local_max_data);
@@ -2403,6 +2414,7 @@ mod tests {
         // credit again, all should be added to local_max_data
         let credits = 1024 * 512;
         let expected_local_max_data = server.local_max_data + credits;
+        server.data_recvd += credits;
         let should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, expected_local_max_data);
@@ -2587,6 +2599,7 @@ mod tests {
         Stop,
         Reset,
         StopThenReset,
+        ResetThenStop,
     }
 
     fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
@@ -2632,7 +2645,13 @@ mod tests {
     /// it takes and whether the held bytes are released before or after its state is reclaimed.
     #[test]
     fn held_credit_returns_once() {
-        for end in [End::Fin, End::Stop, End::Reset, End::StopThenReset] {
+        for end in [
+            End::Fin,
+            End::Stop,
+            End::Reset,
+            End::StopThenReset,
+            End::ResetThenStop,
+        ] {
             let mut client = make(Side::Client);
             let initial = client.local_max_data;
             let id = StreamId::new(Side::Server, Dir::Uni, 0);
@@ -2696,6 +2715,19 @@ mod tests {
                     reset(&mut client, id, 128);
                     // A duplicate reset after reclamation changes nothing.
                     reset(&mut client, id, 128);
+                    128
+                }
+                End::ResetThenStop => {
+                    // The reset returned everything past the held prefix; the stop adds nothing.
+                    reset(&mut client, id, 128);
+                    let mut pending = Retransmits::default();
+                    RecvStream {
+                        id,
+                        state: &mut client,
+                        pending: &mut pending,
+                    }
+                    .stop(0u32.into())
+                    .unwrap();
                     128
                 }
             };
