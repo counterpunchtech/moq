@@ -624,6 +624,7 @@ impl ReadToEndBuffer {
 
 /// Errors from [`RecvStream::read_to_end`]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadToEndError {
     /// An error occurred during reading
     #[error("read error: {0}")]
@@ -676,6 +677,7 @@ impl Drop for RecvStream {
 
 /// Errors that arise from reading from a stream.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadError {
     /// The peer abandoned transmitting data on this stream
     ///
@@ -736,6 +738,7 @@ impl From<ReadError> for io::Error {
 
 /// Errors that arise while waiting for a stream to be reset
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResetError {
     /// The connection was lost
     #[error("connection lost")]
@@ -809,6 +812,7 @@ impl Future for ReadExact<'_> {
 
 /// Errors that arise from reading from a stream.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadExactError {
     /// The stream finished before all bytes were read
     #[error("stream finished early ({0} bytes read)")]
