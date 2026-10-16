@@ -621,7 +621,9 @@ fn validate_windows(quic: &Config) -> crate::Result<()> {
 	if let Some(window) = quic.receive_window
 		&& window < moq_net::transport::MIN_RECEIVE_WINDOW
 	{
-		return Err(crate::Error::ReceiveWindowTooSmall(moq_net::transport::MIN_RECEIVE_WINDOW));
+		return Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		));
 	}
 	for (name, window, wire) in [
 		("receive_window", quic.receive_window, true),

@@ -2744,7 +2744,10 @@ mod tests {
 
         // The gap fills, so everything is readable, but not read yet.
         data(&mut client, id, 32, 16, false);
-        assert!(!client.credit_stats().exhausted(), "unread bytes can still be read");
+        assert!(
+            !client.credit_stats().exhausted(),
+            "unread bytes can still be read"
+        );
 
         let rest = read_held(&mut client, id);
         let stats = client.credit_stats();
