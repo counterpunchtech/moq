@@ -12,7 +12,9 @@ runtimes (`moq-tokio` and `moq-uring`).
   before any socket is released for serving. The bound group retains every
   member socket, so dropping one serving handle cannot renumber the survivors.
   A `Shard` names the slot a member holds, which the endpoint serving it names
-  in every connection id it issues (`moq_quic::HashedConnectionIdGenerator::set_shard`).
+  in every connection id it issues, alongside a marker no SRT data header
+  carries (`moq_quic::HashedConnectionIdGenerator::set_shard`). Anything else
+  on the port, including other protocols, keeps the kernel's 4-tuple hash.
   `shard::per_core` is the default group size: one per core on Linux, and no
   group elsewhere.
 - **`cpu`**: pinning worker threads to cores.

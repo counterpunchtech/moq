@@ -102,6 +102,8 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// largest datagram we tell peers we can receive.
 pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
+	// The steering filter recognizes short headers by their fixed bit.
+	config.grease_quic_bit(shard.is_none());
 	// moq-quic asks its generator for every id it issues, dials and rotations
 	// alike, so naming the shard here steers all of them.
 	if let Some(shard) = shard {

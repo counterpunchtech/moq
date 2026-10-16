@@ -152,9 +152,11 @@ impl HashedConnectionIdGenerator {
     ///
     /// The byte is congruent to `index` modulo `count`, so a `SO_REUSEPORT` steering filter that
     /// reduces a packet's first destination CID byte modulo the group size delivers it to the
-    /// endpoint that issued the CID. [`validate`](ConnectionIdGenerator::validate) then also
-    /// refuses another shard's CIDs, so a stray packet is dropped rather than answered with a
-    /// stateless reset for a connection a sibling owns.
+    /// endpoint that issued the CID. The fourth byte also sets both bits of `0x18`, which overlay
+    /// the reserved key-encryption pattern of an SRT data header, so the filter can tell a short
+    /// header from another protocol sharing the port. [`validate`](ConnectionIdGenerator::validate)
+    /// then also refuses another shard's CIDs, so a stray packet is dropped rather than answered
+    /// with a stateless reset for a connection a sibling owns.
     ///
     /// Panics unless `index < count <= 256`: one byte cannot name more shards than that.
     pub fn set_shard(&mut self, index: u16, count: u16) -> &mut Self {
@@ -164,6 +166,19 @@ impl HashedConnectionIdGenerator {
         );
         self.shard = Some(Shard { index, count });
         self
+    }
+
+    /// The keyed hash of `nonce`, carrying the shard marker in its first byte when sharded.
+    fn signature(&self, nonce: &[u8]) -> [u8; SIGNATURE_LEN] {
+        let mut hasher = rustc_hash::FxHasher::default();
+        hasher.write_u64(self.key);
+        hasher.write(nonce);
+        let mut signature = [0; SIGNATURE_LEN];
+        signature.copy_from_slice(&hasher.finish().to_le_bytes()[..SIGNATURE_LEN]);
+        if self.shard.is_some() {
+            signature[0] |= SHARD_MARKER;
+        }
+        signature
     }
 }
 
@@ -180,10 +195,8 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
         if let Some(shard) = self.shard {
             bytes_arr[0] = shard.prefix();
         }
-        let mut hasher = rustc_hash::FxHasher::default();
-        hasher.write_u64(self.key);
-        hasher.write(&bytes_arr[..NONCE_LEN]);
-        bytes_arr[NONCE_LEN..].copy_from_slice(&hasher.finish().to_le_bytes()[..SIGNATURE_LEN]);
+        let signature = self.signature(&bytes_arr[..NONCE_LEN]);
+        bytes_arr[NONCE_LEN..].copy_from_slice(&signature);
         ConnectionId::new(&bytes_arr)
     }
 
@@ -194,11 +207,7 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
             return Err(InvalidCid);
         }
         let (nonce, signature) = cid.split_at(NONCE_LEN);
-        let mut hasher = rustc_hash::FxHasher::default();
-        hasher.write_u64(self.key);
-        hasher.write(nonce);
-        let expected = hasher.finish().to_le_bytes();
-        match expected[..SIGNATURE_LEN] == signature[..] {
+        match self.signature(nonce) == signature {
             true => Ok(()),
             false => Err(InvalidCid),
         }
@@ -215,6 +224,9 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
 
 const NONCE_LEN: usize = 3; // Good for more than 16 million connections
 const SIGNATURE_LEN: usize = 8 - NONCE_LEN; // 8-byte total CID length
+/// Set in a sharded CID's fourth byte, the signature's first; see
+/// [`HashedConnectionIdGenerator::set_shard`].
+const SHARD_MARKER: u8 = 0x18;
 
 #[cfg(test)]
 mod tests {
@@ -239,6 +251,7 @@ mod tests {
                     let cid = generator.generate_cid();
                     assert_eq!(cid.len(), generator.cid_len());
                     assert_eq!(u16::from(cid[0]) % count, index);
+                    assert_eq!(cid[3] & 0x18, 0x18, "CID lacks the non-SRT marker");
                     generator.validate(cid).unwrap();
                 }
             }

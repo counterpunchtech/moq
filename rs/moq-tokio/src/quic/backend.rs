@@ -764,6 +764,8 @@ impl Server {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
+			// The steering filter recognizes short headers by their fixed bit.
+			endpoint_config.grease_quic_bit(false);
 			tracing::debug!(
 				index = shard.index(),
 				count = shard.count(),
