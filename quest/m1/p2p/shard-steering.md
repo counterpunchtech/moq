@@ -12,9 +12,8 @@ off so their peers' short headers stay recognizable.
 
 ## Plan
 
-The filter (`moq_sock::shard`, which stays in `moq-sock` under
-[quic/shard](/quest/m1/quic/shard.md)) reads byte 1 or byte 6 by the
-long-header bit and reduces it modulo the group size. A non-QUIC datagram
+The filter (`moq_sock::shard`, the one copy both runtimes use) reads byte 1
+or byte 6 by the long-header bit and reduces it modulo the group size. A non-QUIC datagram
 goes through the same arithmetic: RTP and RTCP are steered by timestamp and
 SSRC bytes and scatter across shards, SRT data is steered by a sequence
 byte, and STUN and DTLS, whose byte 1 or 6 barely varies, pile onto one shard.
@@ -42,9 +41,9 @@ bytes can:
   destination connection ID carries a fixed relay magic of N bytes beside the
   existing shard byte. This is a CID-format change: every CID the relay
   issues, the initial source CID and every NEW_CONNECTION_ID, embeds the
-  magic. Its owner is the shard CID generator (moq-tokio's and moq-uring's
-  today, `moq-quic`'s once [quic/shard](/quest/m1/quic/shard.md) replaces
-  them). Say whether the CID grows past today's 8 bytes or the magic takes
+  magic. Its owner is the shard CID generator,
+  `moq_quic::HashedConnectionIdGenerator::set_shard`, which both runtimes
+  use. Say whether the CID grows past today's 8 bytes or the magic takes
   random bytes from it.
 - Everything else returns an out-of-range index, which the kernel answers
   with its 4-tuple hash.
@@ -75,7 +74,3 @@ flow includes retransmissions (R set) of the same packets. QUIC v1 and v2
 long headers and short headers still reach their CID's shard. A client
 talking to each backend receives transport parameters without
 `grease_quic_bit`, and every short header it sends reaches its CID's shard.
-
-## Related
-
-- [Shard the QUIC endpoint](/quest/m1/quic/shard.md) - makes `moq_sock::shard` the one filter both runtimes use, and moves the CID generator into `moq-quic`

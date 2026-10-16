@@ -238,24 +238,6 @@ pub struct Server {
 	websocket: Option<crate::websocket::Listener>,
 }
 
-/// A worker member's QUIC socket, kept in the reuseport group after the serving
-/// [`Server`] is gone.
-///
-/// Dropping or closing a serving server closes its socket, which renumbers the
-/// survivors. The worker group holds one of these per member until serving has
-/// stopped, so a dropped or finished member leaves the steering intact. The
-/// fields are never read: holding the sockets is what keeps them open.
-///
-/// Only compiled with a QUIC backend, matching the worker group that is its
-/// only caller.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
-#[cfg(feature = "quic")]
-pub(crate) struct SocketRetainer {
-	#[cfg(feature = "quic")]
-	quic: Option<std::sync::Arc<tokio::net::UdpSocket>>,
-}
-
 impl Server {
 	/// Build a server from its config, binding the QUIC socket up front.
 	///
@@ -516,19 +498,6 @@ impl Server {
 		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`): no certificates.
 		crate::tls::Certificates::empty()
-	}
-
-	/// Clone this server's QUIC endpoint, keeping its socket in the reuseport
-	/// group after this server is gone.
-	///
-	/// Crate-private: only the worker group retains sockets this way. A worker
-	/// member serves the same QUIC backend as the tokio listener.
-	#[cfg(feature = "quic")]
-	pub(crate) fn retain(&self) -> SocketRetainer {
-		SocketRetainer {
-			#[cfg(feature = "quic")]
-			quic: self.quic.as_ref().and_then(|server| server.retain()),
-		}
 	}
 
 	#[cfg(not(any(

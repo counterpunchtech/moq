@@ -134,8 +134,8 @@ Decided (maintainer, 2026-10-14, baseline follow-up):
 Decided (maintainer, 2026-10-14, per-thread follow-up):
 
 - Per-worker sharding is no longer ruled out; two spikes decide. Both run on
-  the thread-per-core workers (`--runtime-workers`, the default once
-  [Shard](/quest/m1/quic/shard.md) lands) and link workers over an
+  the thread-per-core workers (`--runtime-workers`, the default on Linux)
+  and link workers over an
   in-memory transport (`moq_net::transport::memory`),
   never real QUIC. The
   [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)

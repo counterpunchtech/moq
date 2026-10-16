@@ -100,6 +100,28 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 pub struct HashedConnectionIdGenerator {
     key: u64,
     lifetime: Option<Duration>,
+    shard: Option<Shard>,
+}
+
+/// One endpoint's slot in a group sharing a port, which its connection IDs name.
+#[derive(Debug, Clone, Copy)]
+struct Shard {
+    index: u16,
+    count: u16,
+}
+
+impl Shard {
+    /// A first byte congruent to `index` modulo `count`, keeping as much of the byte random as
+    /// the group size leaves: `256 / count` values.
+    fn prefix(self) -> u8 {
+        let count = u32::from(self.count);
+        let stride = rand::rng().random_range(0..256 / count);
+        (stride * count + u32::from(self.index)) as u8
+    }
+
+    fn owns(self, first: u8) -> bool {
+        u16::from(first) % self.count == self.index
+    }
 }
 
 impl HashedConnectionIdGenerator {
@@ -116,12 +138,31 @@ impl HashedConnectionIdGenerator {
         Self {
             key,
             lifetime: None,
+            shard: None,
         }
     }
 
     /// Set the lifetime of CIDs created by this generator
     pub fn set_lifetime(&mut self, d: Duration) -> &mut Self {
         self.lifetime = Some(d);
+        self
+    }
+
+    /// Name shard `index` of a `count`-endpoint group in the first byte of every CID
+    ///
+    /// The byte is congruent to `index` modulo `count`, so a `SO_REUSEPORT` steering filter that
+    /// reduces a packet's first destination CID byte modulo the group size delivers it to the
+    /// endpoint that issued the CID. [`validate`](ConnectionIdGenerator::validate) then also
+    /// refuses another shard's CIDs, so a stray packet is dropped rather than answered with a
+    /// stateless reset for a connection a sibling owns.
+    ///
+    /// Panics unless `index < count <= 256`: one byte cannot name more shards than that.
+    pub fn set_shard(&mut self, index: u16, count: u16) -> &mut Self {
+        assert!(
+            index < count && count <= 256,
+            "shard {index} of {count} cannot be named by one byte"
+        );
+        self.shard = Some(Shard { index, count });
         self
     }
 }
@@ -136,6 +177,9 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
     fn generate_cid(&mut self) -> ConnectionId {
         let mut bytes_arr = [0; NONCE_LEN + SIGNATURE_LEN];
         rand::rng().fill_bytes(&mut bytes_arr[..NONCE_LEN]);
+        if let Some(shard) = self.shard {
+            bytes_arr[0] = shard.prefix();
+        }
         let mut hasher = rustc_hash::FxHasher::default();
         hasher.write_u64(self.key);
         hasher.write(&bytes_arr[..NONCE_LEN]);
@@ -144,6 +188,11 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
     }
 
     fn validate(&self, cid: ConnectionId) -> Result<(), InvalidCid> {
+        if let Some(shard) = self.shard
+            && !cid.first().is_some_and(|&first| shard.owns(first))
+        {
+            return Err(InvalidCid);
+        }
         let (nonce, signature) = cid.split_at(NONCE_LEN);
         let mut hasher = rustc_hash::FxHasher::default();
         hasher.write_u64(self.key);
@@ -176,5 +225,48 @@ mod tests {
         let mut generator = HashedConnectionIdGenerator::new();
         let cid = generator.generate_cid();
         generator.validate(cid).unwrap();
+    }
+
+    /// The steering filter's only requirement: whatever first byte a shard issues reduces back
+    /// to that shard, at every group size including the one-value-per-shard ceiling.
+    #[test]
+    fn a_shard_cid_names_its_shard() {
+        for count in [1u16, 2, 3, 7, 8, 64, 255, 256] {
+            for index in 0..count {
+                let mut generator = HashedConnectionIdGenerator::new();
+                generator.set_shard(index, count);
+                for _ in 0..32 {
+                    let cid = generator.generate_cid();
+                    assert_eq!(cid.len(), generator.cid_len());
+                    assert_eq!(u16::from(cid[0]) % count, index);
+                    generator.validate(cid).unwrap();
+                }
+            }
+        }
+    }
+
+    /// A shard refuses a sibling's CIDs even under the same key, so a misrouted packet is dropped
+    /// rather than reset.
+    #[test]
+    fn a_shard_refuses_a_sibling_cid() {
+        let mut first = HashedConnectionIdGenerator::from_key(7);
+        first.set_shard(0, 4);
+        let mut second = HashedConnectionIdGenerator::from_key(7);
+        second.set_shard(1, 4);
+        let cid = second.generate_cid();
+        second.validate(cid).unwrap();
+        assert!(first.validate(cid).is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_shard_past_the_group_is_refused() {
+        HashedConnectionIdGenerator::new().set_shard(4, 4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_group_past_one_byte_is_refused() {
+        HashedConnectionIdGenerator::new().set_shard(0, 257);
     }
 }

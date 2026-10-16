@@ -59,8 +59,8 @@ pub struct Config {
 	#[serde(default)]
 	pub log: moq_tokio::Log,
 
-	/// How QUIC work is laid out over threads. One shared runtime unless
-	/// `runtime.workers` is set.
+	/// How QUIC work is laid out over threads: one worker per core on Linux
+	/// unless `runtime.workers` says otherwise.
 	#[usage(flatten)]
 	#[serde(default)]
 	pub runtime: crate::runtime::Config,
@@ -1351,12 +1351,12 @@ uid = [1001]
 			},
 			Case {
 				name: "declared-default-true-false-from-file",
-				toml: "[runtime]\npin = false\n",
+				toml: "[web]\nws = false\n",
 				env: &[],
 				cli: &[],
-				key: "runtime.pin",
-				check: |config| assert!(!config.runtime.pin, "file false must beat a declared true default"),
-				source: "pin",
+				key: "web.ws",
+				check: |config| assert!(!config.web.ws, "file false must beat a declared true default"),
+				source: "ws",
 			},
 			Case {
 				name: "optional-with-default-from-file",

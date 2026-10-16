@@ -12,6 +12,7 @@ relay serves video, audio, and data alike.
 ## Features
 
 - **QUIC, WebTransport, and WebSocket** listeners, so browsers and native clients connect to one process.
+- **Thread-per-core QUIC** on Linux by default: one worker and socket per core, with packets steered by connection ID. See [`[runtime]`](/bin/relay/config#runtime).
 - **Path-scoped authentication** with JWTs, mTLS for peers, and anonymous patterns, decided by an auth server or a static grant. See [Authentication](/bin/relay/auth).
 - **Clustering** across hosts and regions with hop-list routing, per-link costs, LAN discovery, and dynamic peer lists. See [Clustering](/bin/relay/cluster).
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.

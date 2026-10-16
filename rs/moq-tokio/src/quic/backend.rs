@@ -597,14 +597,10 @@ impl Socket {
 		})
 	}
 
-	/// Close the socket, unless a [`crate::server::SocketRetainer`] still holds it.
+	/// Close the socket. A reuseport member stays in its group regardless: the
+	/// group retains a handle of its own.
 	fn release(&self) {
 		self.io.write().unwrap().take();
-	}
-
-	/// A handle keeping the socket open after it is released, or `None` once it is.
-	fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.io.read().unwrap().clone()
 	}
 }
 
@@ -773,7 +769,11 @@ impl Server {
 				count = shard.count(),
 				"encoding the shard in connection IDs"
 			);
-			endpoint_config.cid_generator(Arc::new(move || Box::new(ShardIdGenerator::new(shard))));
+			endpoint_config.cid_generator(Arc::new(move || {
+				let mut cids = moq_quic::HashedConnectionIdGenerator::new();
+				cids.set_shard(shard.index(), shard.count());
+				Box::new(cids)
+			}));
 		} else if let Some(load_balancer) = load_balancer {
 			let server_id = load_balancer.id;
 			let nonce_len = load_balancer.nonce;
@@ -839,11 +839,6 @@ impl Server {
 		// period: that only repeats the close to a peer that already has it.
 		self.quic.wait_all_draining().await;
 		self.socket.release();
-	}
-
-	/// A handle keeping the socket open after this server is gone.
-	pub fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.socket.retain()
 	}
 }
 
@@ -944,41 +939,6 @@ pub(crate) async fn accept(
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),
-	}
-}
-
-// ── ShardIdGenerator ────────────────────────────────────────────────
-
-/// Connection IDs whose first byte names the reuseport member that owns them,
-/// so the group's steering filter can route later packets back to it.
-struct ShardIdGenerator {
-	shard: crate::listen::Shard,
-}
-
-impl ShardIdGenerator {
-	/// Only the first byte is spoken for; the rest stays random.
-	const LEN: usize = 8;
-
-	fn new(shard: crate::listen::Shard) -> Self {
-		Self { shard }
-	}
-}
-
-impl driver::ConnectionIdGenerator for ShardIdGenerator {
-	fn generate_cid(&mut self) -> driver::ConnectionId {
-		use rand::RngExt;
-		let mut cid = Vec::with_capacity(Self::LEN);
-		cid.push(moq_sock::shard::cid_prefix(self.shard));
-		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
-		driver::ConnectionId::new(cid.as_slice())
-	}
-
-	fn cid_len(&self) -> usize {
-		Self::LEN
-	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
 	}
 }
 

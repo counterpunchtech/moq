@@ -23,8 +23,15 @@ relay_config() {
     fi
 
     case $runtime in
-        '' | tokio-shared)
+        '')
             runtime_config=()
+            ;;
+        tokio-shared)
+            runtime_config=(
+                ''
+                '[runtime]'
+                'workers = 0'
+            )
             ;;
         tokio-workers)
             runtime_config=(

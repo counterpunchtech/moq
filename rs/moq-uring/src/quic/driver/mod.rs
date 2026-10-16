@@ -27,7 +27,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, SEGMENT, Transport, client, endpoint::CID_LEN, server};
+use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
 use crate::udp;
 
 /// Per-stream flow control credit.
@@ -102,35 +102,19 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// largest datagram we tell peers we can receive.
 pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
-	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
+	// moq-quic asks its generator for every id it issues, dials and rotations
+	// alike, so naming the shard here steers all of them.
+	if let Some(shard) = shard {
+		config.cid_generator(Arc::new(move || {
+			let mut cids = moq_quic::HashedConnectionIdGenerator::new();
+			cids.set_shard(shard.index(), shard.count());
+			Box::new(cids)
+		}));
+	}
 	config
 		.max_udp_payload_size(SEGMENT as u16)
 		.map_err(|err| Error::Quic(err.to_string()))?;
 	Ok(Arc::new(config))
-}
-
-/// Mints the endpoint's connection ids, steering prefix included.
-///
-/// moq-quic asks its generator for every id it issues, dials and rotations
-/// alike, so this is the one place the reuseport group's byte has to be
-/// stamped.
-#[derive(Debug)]
-struct Cids {
-	shard: Option<moq_sock::shard::Shard>,
-}
-
-impl moq_quic::ConnectionIdGenerator for Cids {
-	fn generate_cid(&mut self) -> moq_quic::ConnectionId {
-		moq_quic::ConnectionId::new(&super::endpoint::cid(self.shard))
-	}
-
-	fn cid_len(&self) -> usize {
-		CID_LEN
-	}
-
-	fn cid_lifetime(&self) -> Option<std::time::Duration> {
-		None
-	}
 }
 
 /// Dial as `config` says.
