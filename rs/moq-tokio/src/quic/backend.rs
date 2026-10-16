@@ -836,11 +836,27 @@ impl Server {
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {
-		self.close();
+		self.closer().close().await;
+		self.socket.release();
+	}
+
+	/// A handle that closes this server's connections from wherever its owner
+	/// went, for a worker that has to flush them before its runtime is dropped.
+	pub fn closer(&self) -> Closer {
+		Closer(self.quic.clone())
+	}
+}
+
+/// Closes a [`Server`]'s connections without owning it; see [`Server::closer`].
+pub(crate) struct Closer(driver::Endpoint);
+
+impl Closer {
+	/// Close every connection and wait until each has sent its close to the peer.
+	pub async fn close(self) {
+		self.0.close(driver::VarInt::from_u32(0), b"server shutdown");
 		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
 		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
-		self.socket.release();
+		self.0.wait_all_draining().await;
 	}
 }
 

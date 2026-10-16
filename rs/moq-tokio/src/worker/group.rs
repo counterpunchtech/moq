@@ -753,6 +753,7 @@ fn run(
 			return;
 		}
 	};
+	let closer = server.quic_closer();
 
 	if ready
 		.send(Ok(Ready {
@@ -777,6 +778,13 @@ fn run(
 				_ = shared.stopped() => break,
 				Some(spawn) = spawn.recv() => spawn(),
 			}
+		}
+
+		// Dropping the runtime drops the endpoint driver with it, so every
+		// connection's close has to be sent first. Otherwise a peer only learns
+		// the session is gone at its idle timeout.
+		if let Some(closer) = closer {
+			closer.close().await;
 		}
 	});
 	tracing::debug!(index, "QUIC worker stopped");

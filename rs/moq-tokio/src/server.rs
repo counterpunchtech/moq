@@ -788,6 +788,12 @@ impl Server {
 		Err(Error::NoBackend("no QUIC listener configured"))
 	}
 
+	/// Closes the QUIC connections once this server has been handed away.
+	#[cfg(feature = "quic")]
+	pub(crate) fn quic_closer(&self) -> Option<crate::quic::Closer> {
+		self.quic.as_ref().map(crate::quic::Server::closer)
+	}
+
 	/// The address the WebSocket listener from [`Config::websocket`] bound to, if one was set.
 	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
