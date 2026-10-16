@@ -57,7 +57,7 @@ async fn setup(version: Version) -> Setup {
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(publisher.consume());
 	options.server_subscribe = Some(subscriber.clone());
-	options.receive_window = Some(WINDOW);
+	options.transport.receive_window = Some(WINDOW);
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
