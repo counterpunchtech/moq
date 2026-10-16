@@ -76,6 +76,21 @@ use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
+
+/// Identifies one connection, so state handed out by it cannot be returned to another.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectionTag(u64);
+
+impl ConnectionTag {
+    /// No connection, for state that has not come from one yet.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// A tag no other connection in this process has.
+    pub(crate) fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
 pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
@@ -1369,8 +1384,7 @@ impl Connection {
     /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
     ///
     /// # Panics
-    /// If more credit is released than this connection's reads have held, which means `credit`
-    /// came from another connection.
+    /// If `credit` came from another connection.
     pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
         let transmit = self.streams.release(credit);
         self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();

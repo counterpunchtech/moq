@@ -6,6 +6,7 @@ use tracing::debug;
 
 use super::state::get_or_insert_recv;
 use super::{ClosedStream, Retransmits, ShouldTransmit, StreamId, StreamsState};
+use crate::connection::ConnectionTag;
 use crate::connection::assembler::{Assembler, Chunk, IllegalOrderedRead};
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
@@ -344,7 +345,10 @@ impl<'a> Chunks<'a> {
     pub fn hold(&mut self) -> Credit {
         let bytes = mem::take(&mut self.read);
         self.streams.held += bytes;
-        Credit { bytes }
+        Credit {
+            bytes,
+            tag: self.streams.tag,
+        }
     }
 
     /// Mark the read data as consumed from the stream.
@@ -404,11 +408,13 @@ impl Drop for Chunks<'_> {
 ///
 /// The peer cannot reuse this credit until it is passed to
 /// [`Connection::release()`][crate::Connection::release] on the connection it came from, so
-/// dropping it leaks receive window.
+/// dropping it leaks receive window. A default `Credit` is empty and belongs to no connection
+/// until it merges one that does.
 #[must_use = "dropping Credit leaks connection flow control credit"]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Credit {
     bytes: u64,
+    pub(super) tag: ConnectionTag,
 }
 
 impl Credit {
@@ -433,11 +439,26 @@ impl Credit {
             self.bytes
         );
         self.bytes -= bytes;
-        Self { bytes }
+        Self {
+            bytes,
+            tag: self.tag,
+        }
     }
 
     /// Take over the bytes covered by `other`.
+    ///
+    /// # Panics
+    /// If `other` came from another connection.
     pub fn merge(&mut self, other: Self) {
+        if other.tag != self.tag {
+            assert!(
+                self.tag == ConnectionTag::NONE || other.tag == ConnectionTag::NONE,
+                "merged credit from another connection"
+            );
+            if self.tag == ConnectionTag::NONE {
+                self.tag = other.tag;
+            }
+        }
         self.bytes += other.bytes;
     }
 

@@ -15,6 +15,7 @@ use super::{
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
     coding::BufMutExt,
+    connection::ConnectionTag,
     connection::stats::{CreditStats, FrameStats},
     frame::{self, FrameStruct, StreamMetaVec},
     transport_parameters::TransportParameters,
@@ -128,6 +129,8 @@ pub struct StreamsState {
     credited: u64,
     /// Held credit was left filling the window since the application last asked
     pub(crate) stalled: bool,
+    /// Which connection [`Credit`]s handed out here belong to
+    pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
     /// Configured upper bound for `buffered_data`.
@@ -190,6 +193,7 @@ impl StreamsState {
             held: 0,
             credited: 0,
             stalled: false,
+            tag: ConnectionTag::next(),
             buffered_data: 0,
             send_window,
             stream_receive_window: stream_receive_window.into(),
@@ -1013,6 +1017,10 @@ impl StreamsState {
 
     /// Return the connection credit held by `credit` to the peer.
     pub(crate) fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        assert!(
+            credit.is_empty() || credit.tag == self.tag,
+            "released credit from another connection"
+        );
         let bytes = credit.into_bytes();
         assert!(
             bytes <= self.held,
@@ -2814,14 +2822,43 @@ mod tests {
         assert_eq!((stats.held, stats.unread), (0, 0));
     }
 
+    /// Another connection holding at least as much credit still refuses it.
     #[test]
-    #[should_panic(expected = "only 0 held")]
+    #[should_panic(expected = "released credit from another connection")]
     fn release_from_another_connection() {
-        let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        data(&mut client, id, 0, 32, false);
-        let credit = read_held(&mut client, id);
-        let _ = make(Side::Client).release(credit);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let credit = read_held(&mut a, id);
+        let mut b = make(Side::Client);
+        data(&mut b, id, 0, 32, false);
+        let _held = read_held(&mut b, id);
+        let _ = b.release(credit);
+    }
+
+    #[test]
+    #[should_panic(expected = "merged credit from another connection")]
+    fn merge_from_another_connection() {
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let mut b = make(Side::Client);
+        data(&mut b, id, 0, 32, false);
+        let mut credit = read_held(&mut a, id);
+        credit.merge(read_held(&mut b, id));
+    }
+
+    /// An empty default credit takes on the connection of the first credit merged into it.
+    #[test]
+    fn default_credit_adopts_its_connection() {
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut a = make(Side::Client);
+        data(&mut a, id, 0, 32, false);
+        let mut credit = Credit::default();
+        credit.merge(read_held(&mut a, id));
+        assert_eq!(credit.len(), 32);
+        let _ = a.release(credit);
+        assert_eq!(a.credit_stats().held, 0);
     }
 
     /// Ingest and read rounds across many streams, with and without holding and releasing each
