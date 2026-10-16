@@ -1162,17 +1162,18 @@ struct Chunks {
 
 impl crate::transport::poll::RecvStream for Chunks {
 	type Error = NoError;
+	type Credit = crate::transport::Unheld;
 
 	fn poll_read(
 		&mut self,
 		cx: &mut std::task::Context<'_>,
 		dst: &mut [u8],
-	) -> std::task::Poll<Result<Option<usize>, NoError>> {
+	) -> std::task::Poll<Result<Option<crate::transport::Unheld>, NoError>> {
 		let max = dst.len();
 		self.poll_read_chunk(cx, max).map_ok(|chunk| {
-			chunk.map(|chunk| {
+			chunk.map(|(chunk, credit)| {
 				dst[..chunk.len()].copy_from_slice(&chunk);
-				chunk.len()
+				credit
 			})
 		})
 	}
@@ -1182,7 +1183,7 @@ impl crate::transport::poll::RecvStream for Chunks {
 		&mut self,
 		_cx: &mut std::task::Context<'_>,
 		max: usize,
-	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
+	) -> std::task::Poll<Result<Option<(bytes::Bytes, crate::transport::Unheld)>, NoError>> {
 		self.ready = !self.ready;
 		if self.ready {
 			return std::task::Poll::Pending;
@@ -1191,7 +1192,8 @@ impl crate::transport::poll::RecvStream for Chunks {
 			return std::task::Poll::Ready(Ok(None));
 		}
 		let n = self.chunk.min(max).min(self.payload.len());
-		std::task::Poll::Ready(Ok(Some(self.payload.split_to(n))))
+		std::task::Poll::Ready(Ok(Some((self.payload.split_to(n), crate::transport::Unheld(n as u64)))))
+
 	}
 
 	fn stop(&mut self, _code: u32) {}

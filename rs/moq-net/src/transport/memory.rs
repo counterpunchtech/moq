@@ -6,7 +6,13 @@
 //!
 //! Each stream's channel is bounded by [`Config::stream_buffer`] queued bytes, and a write
 //! pends while it is full, so a slow reader throttles only its own stream. A write is
-//! never split: one accepted while the channel has room may overshoot the bound.
+//! never split for it: one accepted while the channel has room may overshoot the bound.
+//!
+//! [`Config::receive_window`] optionally bounds each side's incoming bytes across every
+//! stream, like QUIC's connection flow control: queued bytes and bytes whose read
+//! [`Credit`] is still held count against it, a write takes only what fits, and
+//! [`poll_credit_exhausted`](poll::Session::poll_credit_exhausted) reports each time held
+//! credit fills it.
 //!
 //! [`finish`](poll::SendStream::finish) closes the channel cleanly once its messages are
 //! read. A [`reset`](poll::SendStream::reset) or [`stop`](poll::RecvStream::stop) closes it
@@ -42,6 +48,9 @@ pub struct Config {
 	pub stream_buffer: usize,
 	/// The application protocol both sides report, standing in for a negotiated ALPN.
 	pub protocol: Option<String>,
+	/// Incoming bytes, queued or held by an undropped [`Credit`], each side accepts across
+	/// all of its streams before the peer's writes pend. `None` is unbounded.
+	pub receive_window: Option<usize>,
 }
 
 impl Default for Config {
@@ -51,15 +60,23 @@ impl Default for Config {
 		Self {
 			stream_buffer: 1024 * 1024,
 			protocol: None,
+			receive_window: None,
 		}
 	}
 }
 
 /// Create two connected sessions: streams one opens, the other accepts.
 pub fn pair(config: Config) -> (Session, Session) {
+	let window = || {
+		kio::Shared::new(Window {
+			limit: config.receive_window,
+			..Default::default()
+		})
+	};
 	let conn = Arc::new(Conn {
 		close: Default::default(),
 		incoming: [Incoming::default(), Incoming::default()],
+		windows: [window(), window()],
 		config,
 	});
 
@@ -72,6 +89,7 @@ pub fn pair(config: Config) -> (Session, Session) {
 		accept_bi: Default::default(),
 		datagram: Default::default(),
 		closed: Default::default(),
+		exhausted: Default::default(),
 	};
 
 	(side(0), side(1))
@@ -144,6 +162,95 @@ struct Conn {
 	close: Close,
 	/// What each side has yet to accept.
 	incoming: [Incoming; 2],
+	/// Each side's receive allowance.
+	windows: [kio::Shared<Window>; 2],
+}
+
+/// One side's receive allowance, shared by every stream it reads.
+#[derive(Default)]
+struct Window {
+	/// The most bytes `queued + held` may reach, if bounded.
+	limit: Option<usize>,
+	/// Bytes written to this side's streams and not yet read.
+	queued: usize,
+	/// Bytes read whose credit is not dropped yet.
+	held: usize,
+	/// Held credit fills the limit.
+	exhausted: bool,
+	/// A fill not yet reported to [`poll::Session::poll_credit_exhausted`].
+	unreported: bool,
+}
+
+impl Window {
+	/// How many more bytes a writer may queue.
+	fn room(&self) -> usize {
+		match self.limit {
+			Some(limit) => limit.saturating_sub(self.queued + self.held),
+			None => usize::MAX,
+		}
+	}
+
+	/// Latch a fill: everything the peer may send is held.
+	fn check(&mut self) {
+		let full = self.limit.is_some_and(|limit| self.held > 0 && self.held >= limit);
+		if full && !self.exhausted {
+			self.unreported = true;
+		}
+		self.exhausted = full;
+	}
+}
+
+/// The receive allowance taken by bytes read from an in-memory stream, returned on drop.
+pub struct Credit {
+	window: kio::Shared<Window>,
+	bytes: usize,
+}
+
+impl Credit {
+	fn new(window: &kio::Shared<Window>, bytes: usize) -> Self {
+		Self {
+			window: window.clone(),
+			bytes,
+		}
+	}
+}
+
+impl super::Credit for Credit {
+	fn len(&self) -> u64 {
+		self.bytes as u64
+	}
+
+	fn split(&mut self, bytes: u64) -> Self {
+		let bytes = bytes as usize;
+		assert!(bytes <= self.bytes, "split {bytes} of {} bytes", self.bytes);
+		self.bytes -= bytes;
+		Self::new(&self.window, bytes)
+	}
+
+	fn merge(&mut self, mut other: Self) {
+		assert!(
+			self.window.same_channel(&other.window),
+			"merged credit from another session"
+		);
+		self.bytes += std::mem::take(&mut other.bytes);
+	}
+}
+
+impl Drop for Credit {
+	fn drop(&mut self) {
+		if self.bytes == 0 {
+			return;
+		}
+		let mut window = self.window.lock();
+		window.held -= self.bytes;
+		window.check();
+	}
+}
+
+impl std::fmt::Debug for Credit {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Credit").field("len", &self.bytes).finish()
+	}
 }
 
 impl Conn {
@@ -154,10 +261,13 @@ impl Conn {
 		}
 	}
 
-	fn stream(&self) -> (SendStream, RecvStream) {
+	/// A stream that side `reader` reads.
+	fn stream(&self, reader: usize) -> (SendStream, RecvStream) {
 		let channel = kio::Shared::<Channel>::default();
+		let window = self.windows[reader].clone();
 		let send = SendStream {
 			channel: channel.clone(),
+			window: window.clone(),
 			close: self.close.clone(),
 			buffer: self.config.stream_buffer,
 			done: false,
@@ -165,6 +275,7 @@ impl Conn {
 		};
 		let recv = RecvStream {
 			channel,
+			window,
 			close: self.close.clone(),
 			stopped: false,
 			park: Default::default(),
@@ -238,6 +349,7 @@ pub struct Session {
 	accept_bi: kio::Park,
 	datagram: kio::Park,
 	closed: kio::Park,
+	exhausted: kio::Park,
 }
 
 impl Session {
@@ -283,13 +395,13 @@ impl poll::Session for Session {
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<SendStream, Error>> {
-		let (send, recv) = self.conn().stream();
+		let (send, recv) = self.conn().stream(1 - self.side.local);
 		Poll::Ready(self.open(&self.side.outgoing().uni, recv).map(|()| send))
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		let (send, peer_recv) = self.conn().stream();
-		let (peer_send, recv) = self.conn().stream();
+		let (send, peer_recv) = self.conn().stream(1 - self.side.local);
+		let (peer_send, recv) = self.conn().stream(self.side.local);
 		let opened = self.open(&self.side.outgoing().bi, (peer_send, peer_recv));
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
@@ -331,6 +443,17 @@ impl poll::Session for Session {
 		poll_close(&self.side.conn.close, self.closed.hold(cx))
 	}
 
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		let waiter = self.exhausted.hold(cx);
+		let window = &self.side.conn.windows[self.side.local];
+		let mut window = ready!(window.poll(waiter, |window| match window.unreported {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}));
+		window.unreported = false;
+		Poll::Ready(())
+	}
+
 	fn stats(&self) -> impl super::Stats {
 		StatsUnavailable
 	}
@@ -357,13 +480,16 @@ enum End {
 }
 
 impl Channel {
-	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
-	/// unless it was a finish the reader has not fully read.
-	fn abort(&mut self, end: End) {
+	/// Close with a reset or stop code and drop what is queued, returning its room to
+	/// `window`. An earlier end stands, unless it was a finish the reader has not fully read.
+	fn abort(&mut self, end: End, window: &kio::Shared<Window>) {
 		if self.end.is_none() || !self.messages.is_empty() {
 			self.end = Some(end);
 		}
 		self.messages.clear();
+		if self.queued > 0 {
+			window.lock().queued -= self.queued;
+		}
 		self.queued = 0;
 	}
 
@@ -381,6 +507,8 @@ impl Channel {
 /// The writing half of an in-memory stream.
 pub struct SendStream {
 	channel: kio::Shared<Channel>,
+	/// The reading side's receive allowance.
+	window: kio::Shared<Window>,
 	close: Close,
 	buffer: usize,
 	/// This side finished or reset the stream.
@@ -396,7 +524,8 @@ impl poll::SendStream for SendStream {
 		self.poll_write_buf(cx, &mut buf)
 	}
 
-	/// Queue all of `buf` as one message, waiting while the channel is full.
+	/// Queue as much of `buf` as the receive window allows as one message, waiting while
+	/// the channel or the window is full.
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
 		if self.done {
 			return Poll::Ready(Err(Error::Closed));
@@ -420,9 +549,20 @@ impl poll::SendStream for SendStream {
 		if let Some(End::Stop(code)) = channel.end {
 			return Poll::Ready(Err(Error::Stopped(code)));
 		}
+		// A reset stream's bytes are dropped, never read, so they take no room. Otherwise
+		// wait for some; the channel lock keeps the stream from ending meanwhile.
+		let mut window = match channel.end {
+			Some(_) => self.window.lock(),
+			None => ready!(self.window.poll(waiter, |window| match window.room() > 0 {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})),
+		};
 
 		// Take ownership rather than copy: free for a `Bytes` source.
-		let size = buf.remaining();
+		let size = buf.remaining().min(window.room());
+		window.queued += size;
+		drop(window);
 		channel.messages.push_back(buf.copy_to_bytes(size));
 		channel.queued += size;
 
@@ -456,7 +596,7 @@ impl poll::SendStream for SendStream {
 		// close is checked under the channel lock so a concurrent close can't land between.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Reset(code));
+			channel.abort(End::Reset(code), &self.window);
 		}
 	}
 
@@ -484,6 +624,8 @@ impl Drop for SendStream {
 /// The reading half of an in-memory stream.
 pub struct RecvStream {
 	channel: kio::Shared<Channel>,
+	/// This side's receive allowance.
+	window: kio::Shared<Window>,
 	close: Close,
 	/// This side stopped the stream.
 	stopped: bool,
@@ -492,33 +634,33 @@ pub struct RecvStream {
 
 impl poll::RecvStream for RecvStream {
 	type Error = Error;
+	type Credit = Credit;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
+		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
 			return Poll::Ready(Ok(None));
 		};
 		dst[..chunk.len()].copy_from_slice(&chunk);
-		Poll::Ready(Ok(Some(chunk.len())))
+		Poll::Ready(Ok(Some(credit)))
 	}
 
-	fn poll_read_buf<B: BufMut>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<Option<usize>, Error>> {
+	fn poll_read_buf<B: BufMut>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<Option<Credit>, Error>> {
 		// The same cap the default uses, but without zeroing a destination first.
 		let max = buf.remaining_mut().min(64 * 1024);
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
+		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, max))? else {
 			return Poll::Ready(Ok(None));
 		};
-		let size = chunk.len();
 		buf.put(chunk);
-		Poll::Ready(Ok(Some(size)))
+		Poll::Ready(Ok(Some(credit)))
 	}
 
 	/// Pop the next message, or split off its first `max` bytes.
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<(Bytes, Credit)>, Error>> {
 		if self.stopped {
 			return Poll::Ready(Err(Error::Closed));
 		}
 		if max == 0 {
-			return Poll::Ready(Ok(Some(Bytes::new())));
+			return Poll::Ready(Ok(Some((Bytes::new(), Credit::new(&self.window, 0)))));
 		}
 
 		let waiter = self.park.hold(cx);
@@ -547,7 +689,15 @@ impl poll::RecvStream for RecvStream {
 		};
 		channel.queued -= chunk.len();
 
-		Poll::Ready(Ok(Some(chunk)))
+		// Read bytes move from queued to held, still spending the window.
+		let mut window = self.window.lock();
+		window.queued -= chunk.len();
+		window.held += chunk.len();
+		window.check();
+		drop(window);
+
+		let credit = Credit::new(&self.window, chunk.len());
+		Poll::Ready(Ok(Some((chunk, credit))))
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -558,9 +708,10 @@ impl poll::RecvStream for RecvStream {
 		// as in `reset`.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Stop(code));
+			channel.abort(End::Stop(code), &self.window);
 		}
 	}
+
 
 	/// Ready once the writer finished or reset the stream, or this side stopped it.
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -638,9 +789,12 @@ mod tests {
 		send.poll_write_buf(&mut noop(), &mut chunk.clone())
 	}
 
+	/// Read a chunk, returning its credit straight away.
 	fn read(recv: &mut RecvStream, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		recv.poll_read_chunk(&mut noop(), max)
+			.map_ok(|chunk| chunk.map(|(chunk, _)| chunk))
 	}
+
 
 	fn text(chunk: Poll<Result<Option<Bytes>, Error>>) -> Bytes {
 		ready(chunk).unwrap().unwrap()

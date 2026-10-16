@@ -6,7 +6,13 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::{Error, StreamError, coding::*};
+use crate::{
+	Error, StreamError,
+	coding::*,
+	pressure::{Pressure, Rank, Ticket},
+
+	transport::Credit,
+};
 
 /// A reader for decoding messages from a stream.
 ///
@@ -14,10 +20,24 @@ use crate::{Error, StreamError, coding::*};
 /// wrappers, so the reader can be driven from another poll function without
 /// pinning a future. Partial bytes accumulate in the internal buffer, so a
 /// `Pending` (or a cancelled wrapper) never desynchronizes the stream.
+///
+/// A [tracked](Self::track) reader holds the transport's connection credit for its
+/// buffered bytes and for the unit it is assembling, releasing each unit's bytes once
+/// it is decoded and handed off, so read-ahead stays with the next unit. An untracked
+/// reader returns credit as soon as it reads.
 pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
+	/// Covers `buffer` plus `unit`, less `free`, while tracked.
+	credit: Option<S::Credit>,
+	/// Bytes of the incomplete frame already taken out of `buffer`.
+	unit: u64,
+	/// Leading bytes read before tracking began, whose credit already returned.
+	free: u64,
+	ticket: Option<Ticket>,
+	/// The receive allowance filled and this stream was chosen to free it.
+	evicted: bool,
 }
 
 /// How much payload may pile up behind a parked consumer before
@@ -37,7 +57,77 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream,
 			buffer: Default::default(),
 			version,
+			credit: None,
+			unit: 0,
+			free: 0,
+			ticket: None,
+			evicted: false,
 		}
+	}
+
+	/// Hold connection credit until each unit completes, cancellable by `pressure` at
+	/// `rank`.
+	pub(crate) fn track(&mut self, pressure: &Pressure, rank: Rank) {
+		if self.ticket.is_some() {
+			return self.rank(rank);
+		}
+		self.free = self.buffer.len() as u64 + self.unit;
+		self.ticket = Some(pressure.track(rank));
+	}
+
+	/// Re-rank a tracked stream once its header identifies it.
+	pub(crate) fn rank(&self, rank: Rank) {
+		if let Some(ticket) = &self.ticket {
+			ticket.rank(rank);
+		}
+	}
+
+	/// Keep the credit for bytes just read, if tracked; otherwise it returns now.
+	fn take(&mut self, credit: S::Credit) {
+		let Some(ticket) = &self.ticket else { return };
+		let held = match &mut self.credit {
+			Some(held) => {
+				held.merge(credit);
+				held.len()
+			}
+			None => {
+				let len = credit.len();
+				self.credit = Some(credit);
+				len
+			}
+		};
+		ticket.held(held);
+	}
+
+	/// Return the credit for `bytes` that completed a unit.
+	fn release(&mut self, bytes: u64) {
+		let free = self.free.min(bytes);
+		self.free -= free;
+		let (Some(ticket), Some(credit)) = (&self.ticket, &mut self.credit) else {
+			return;
+		};
+		drop(credit.split(bytes - free));
+		ticket.held(credit.len());
+	}
+
+	/// Drop `used` decoded bytes from the buffer, returning their credit.
+	fn consume(&mut self, used: usize) {
+		self.buffer.advance(used);
+		self.release(used as u64);
+	}
+
+	/// Whether this stream was chosen to free the receive allowance. The first time,
+	/// stop it and let go of everything it holds.
+	fn poll_evicted(&mut self, cx: &Context<'_>) -> bool {
+		if self.evicted {
+			return true;
+		}
+		if !self.ticket.as_ref().is_some_and(|ticket| ticket.poll_evicted(cx)) {
+			return false;
+		}
+		self.evicted = true;
+		self.abort(&Error::Evicted);
+		true
 	}
 
 	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
@@ -57,7 +147,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 				Ok(value) => {
 					if consume {
 						let used = self.buffer.len() - r.remaining();
-						self.buffer.advance(used);
+						self.consume(used);
 					}
 					return Poll::Ready(Ok(value));
 				}
@@ -190,22 +280,42 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		std::future::poll_fn(|cx| self.poll_varint_peek(cx)).await
 	}
 
-	/// Poll for the next chunk, draining the reader's internal buffer first.
+	/// Poll for the next chunk, draining the reader's internal buffer first. The chunk is
+	/// a complete unit: its credit returns as it is handed over.
 	pub fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+		let chunk = ready!(self.poll_unit_chunk(cx, max))?;
+		let size = chunk.as_ref().map_or(0, |chunk| chunk.len() as u64);
+		self.release(size);
+		self.unit -= size;
+		Poll::Ready(Ok(chunk))
+	}
+
+	/// The next chunk of the current unit, draining the buffer first. Its credit stays
+	/// held in `unit` until the caller releases it.
+	fn poll_unit_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		if !self.buffer.is_empty() {
 			let n = cmp::min(self.buffer.len(), max);
+			self.unit += n as u64;
 			return Poll::Ready(Ok(Some(self.buffer.split_to(n).freeze())));
 		}
-		self.stream
-			.poll_read_chunk(cx, max)
-			.map_err(|err| self.version.transport_error(err))
+		if self.poll_evicted(cx) {
+			return Poll::Ready(Err(Error::Evicted));
+		}
+		let Some((chunk, credit)) = ready!(self.stream.poll_read_chunk(cx, max)).map_err(|err| self.version.transport_error(err))?
+		else {
+			return Poll::Ready(Ok(None));
+		};
+		self.unit += chunk.len() as u64;
+		self.take(credit);
+		Poll::Ready(Ok(Some(chunk)))
 	}
 
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// `Ready(Ok(()))` means the frame is full and the caller should commit it; an error
 	/// means the caller should abort it. Either way the frame is untouched otherwise, so
-	/// the caller keeps ownership of the commit/abort decision.
+	/// the caller keeps ownership of the commit/abort decision. The payload's credit is
+	/// held until then, whichever way the frame ends.
 	///
 	/// Consumers are woken where the loop yields rather than once per chunk. The wire
 	/// hands over everything it has already buffered in one turn, and each wake pays a
@@ -227,7 +337,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 				break Ok(());
 			}
 
-			match self.poll_read_chunk(cx, frame.remaining()) {
+			match self.poll_unit_chunk(cx, frame.remaining()) {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
@@ -250,6 +360,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			}
 		};
 
+		// The frame is handed off or discarded either way.
+		let unit = std::mem::take(&mut self.unit);
+		self.release(unit);
 		Poll::Ready(result)
 	}
 
@@ -260,7 +373,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 				return Poll::Ready(Err(DecodeError::Short.into()));
 			}
 		}
-		Poll::Ready(Ok(self.buffer.split_to(size).freeze()))
+		let bytes = self.buffer.split_to(size).freeze();
+		self.release(size as u64);
+		Poll::Ready(Ok(bytes))
 	}
 
 	/// Poll to discard `remaining` bytes, counting it down as they arrive. Nothing is
@@ -269,7 +384,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
 		loop {
 			let skipped = self.buffer.len().min(*remaining);
-			self.buffer.advance(skipped);
+			self.consume(skipped);
 			*remaining -= skipped;
 			if *remaining == 0 {
 				return Poll::Ready(Ok(()));
@@ -306,19 +421,31 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll for more data from the stream. `true` if data was read, `false` if the
 	/// stream finished.
 	fn poll_read_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
+		if self.poll_evicted(cx) {
+			return Poll::Ready(Err(Error::Evicted));
+		}
 		match ready!(self.stream.poll_read_buf(cx, &mut self.buffer)) {
-			Ok(Some(_)) => Poll::Ready(Ok(true)),
+			Ok(Some(credit)) => {
+				self.take(credit);
+				Poll::Ready(Ok(true))
+			}
 			Ok(None) => Poll::Ready(Ok(false)),
 			Err(e) => Poll::Ready(Err(self.version.transport_error(e))),
 		}
 	}
 
-	/// Abort the stream with the given error.
+	/// Abort the stream with the given error, returning the credit it holds.
 	pub fn abort(&mut self, err: impl Into<StreamError>) {
 		// STOP_SENDING is a stream operation, so it carries a stream code from the
 		// negotiated protocol's registry. A session code, or the other protocol's, would be
 		// read against the wrong table and mean something else.
 		self.stream.stop(self.version.encode_stream_code(&err.into()));
+		// What is buffered stays readable, but nothing more is worth holding for.
+		self.free = self.buffer.len() as u64 + self.unit;
+		self.credit = None;
+		if let Some(ticket) = &self.ticket {
+			ticket.held(0);
+		}
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.
@@ -327,6 +454,11 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			credit: self.credit,
+			unit: self.unit,
+			free: self.free,
+			ticket: self.ticket,
+			evicted: self.evicted,
 		}
 	}
 }
@@ -348,12 +480,13 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for StopLog {
 		type Error = crate::lite::test_transport::SinkError;
+		type Credit = crate::transport::Unheld;
 
 		fn poll_read(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
 			_dst: &mut [u8],
-		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
+		) -> std::task::Poll<Result<Option<Self::Credit>, Self::Error>> {
 			std::task::Poll::Ready(Ok(None))
 		}
 
@@ -454,8 +587,9 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for Chunks {
 		type Error = crate::lite::test_transport::SinkError;
+		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			let Some(chunk) = self.0.pop_front() else {
 				return Poll::Pending;
 			};
@@ -467,7 +601,7 @@ mod tests {
 				self.0.push_front(&chunk[n..]);
 			}
 
-			Poll::Ready(Ok(Some(n)))
+			Poll::Ready(Ok(Some(crate::transport::Unheld(n as u64))))
 		}
 
 		fn stop(&mut self, _code: u32) {}
@@ -655,8 +789,9 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for Burst {
 		type Error = crate::lite::test_transport::SinkError;
+		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			// Start each turn with none of the last turn's registrations left.
 			self.waiter = kio::Waiter::new(self.waiter.waker().clone());
 			while self.payload.poll_read_chunk(&self.waiter).is_ready() {}
