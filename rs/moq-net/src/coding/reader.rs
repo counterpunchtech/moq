@@ -9,7 +9,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use crate::{
 	Error, StreamError,
 	coding::*,
-	pressure::{Pressure, Rank, Ticket},
+	pressure::{Eviction, Pressure, Rank, Ticket},
 	transport::Credit,
 };
 
@@ -115,11 +115,11 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		self.release(used as u64);
 	}
 
-	/// Whether this stream was chosen to free the receive allowance, registering `cx` to
-	/// hear when it is. A caller that parks the reader on something else races this, since
-	/// only a pending read registers on its own.
-	pub(crate) fn poll_evicted(&mut self, cx: &Context<'_>) -> bool {
-		self.evicted(Some(cx))
+	/// Hear this stream's eviction without borrowing the reader. Only a pending read
+	/// registers on its own, so a handler that parks the reader on something else races
+	/// this with [`Eviction::guard`].
+	pub(crate) fn eviction(&self) -> Eviction {
+		self.ticket.as_ref().map_or_else(Eviction::none, Ticket::eviction)
 	}
 
 	/// Whether this stream was evicted, registering `cx` when given. The first time, stop
