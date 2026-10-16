@@ -126,6 +126,8 @@ pub struct StreamsState {
     pub(super) held: u64,
     /// Connection credit returned for received bytes so far: read, released, or discarded
     credited: u64,
+    /// Held credit was left filling the window since the application last asked
+    pub(crate) stalled: bool,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
     /// Configured upper bound for `buffered_data`.
@@ -187,6 +189,7 @@ impl StreamsState {
             data_recvd: 0,
             held: 0,
             credited: 0,
+            stalled: false,
             buffered_data: 0,
             send_window,
             stream_receive_window: stream_receive_window.into(),
@@ -1000,6 +1003,10 @@ impl StreamsState {
         } else {
             self.receive_window_shrink_debt -= credits;
         }
+
+        // Every change to held or returned credit ends here, a hold included (its `finalize`
+        // returns nothing), so this sees each moment that leaves the window stalled.
+        self.stalled |= self.held > 0 && self.credit_stats().exhausted();
 
         ShouldTransmit(self.max_data_due())
     }
@@ -2749,6 +2756,37 @@ mod tests {
         assert!(!client.credit_stats().exhausted());
         let _ = client.release(rest);
         assert_eq!(client.credit_stats().unread, 0);
+    }
+
+    /// A stall reports once, and again whenever credit moves without relieving it.
+    #[test]
+    fn stall_reports_once_per_change() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            64u32.into(),
+            (1024 * 1024u32).into(),
+        );
+        let take = |state: &mut StreamsState| {
+            mem::take(&mut state.stalled) && state.credit_stats().exhausted()
+        };
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 64, false);
+        let mut held = read_held(&mut client, id);
+        assert!(take(&mut client));
+        assert!(!take(&mut client), "reported already");
+
+        // Shrinking the window absorbs a release, so the peer still may send nothing.
+        client.set_receive_window(32u32.into());
+        let _ = client.release(held.split(16));
+        assert!(take(&mut client), "still stalled after a release");
+
+        // A release past the debt relieves it.
+        let _ = client.release(held.split(32));
+        assert!(!take(&mut client));
+        let _ = client.release(held);
     }
 
     /// Bytes read without holding return their credit, so they never count as held or unread.

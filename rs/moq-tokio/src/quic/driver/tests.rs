@@ -1902,6 +1902,51 @@ async fn held_reads_spend_the_connection_window() {
     writer.await.unwrap();
 }
 
+/// Held chunks filling the window resolve `poll_credit_exhausted` once, and plain reads after the
+/// credit drops never do.
+#[tokio::test]
+async fn filling_the_window_with_held_credit_is_reported_once() {
+    const WINDOW: usize = 32 * 1024;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.receive_window((WINDOW as u32).into());
+    let endpoint = endpoint_with_config(transport);
+
+    let (client, server) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send = client.open_uni().await.unwrap();
+    let writer = tokio::spawn(async move {
+        // The receiver walks away before this finishes.
+        let _ = send.write_all(&[7; 4 * WINDOW]).await;
+    });
+
+    let (waker, counter) = new_count_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+
+    let mut recv = server.accept_uni().await.unwrap();
+    let mut held = recv.read_chunk_held(usize::MAX).await.unwrap().unwrap().1;
+    while (held.len() as usize) < WINDOW {
+        held.merge(recv.read_chunk_held(usize::MAX).await.unwrap().unwrap().1);
+    }
+    assert_eq!(counter.wakes(), 1);
+    assert!(server.poll_credit_exhausted(&mut cx).is_ready());
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+
+    drop(held);
+    let mut buf = vec![0; WINDOW];
+    recv.read_exact(&mut buf).await.unwrap();
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+    assert_eq!(counter.wakes(), 1);
+    drop(recv);
+    writer.await.unwrap();
+}
+
 /// Fill `buf` with held reads, returning the credit for all of it.
 async fn read_held_exact(recv: &mut RecvStream, buf: &mut [u8]) -> Credit {
     let mut held = recv.read_held(buf).await.unwrap().unwrap();

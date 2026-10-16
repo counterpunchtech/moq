@@ -67,6 +67,18 @@ impl RecvStream {
 			.map_err(|e| self.map_error(e))
 	}
 
+	/// Read a chunk of data, keeping its connection flow control credit until the credit is
+	/// dropped. See [`crate::quic::driver::RecvStream::read_chunk_held`].
+	pub async fn read_chunk_held(
+		&mut self,
+		max_length: usize,
+	) -> Result<Option<(Bytes, crate::quic::driver::Credit)>, ReadError> {
+		self.inner
+			.read_chunk_held(max_length)
+			.await
+			.map_err(|e| self.map_error(e))
+	}
+
 	/// Read until the end of the stream or the limit is hit. See [`crate::quic::driver::RecvStream::read_to_end`].
 	pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ReadToEndError> {
 		self.inner.read_to_end(size_limit).await.map_err(|e| match e {

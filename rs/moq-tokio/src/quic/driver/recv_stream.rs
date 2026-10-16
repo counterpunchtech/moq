@@ -235,6 +235,34 @@ impl RecvStream {
         })
     }
 
+    /// Read the next segment of data in order, keeping its connection flow control credit.
+    ///
+    /// Like [`read_chunk()`] with `ordered`, but yields the [`Credit`] for exactly the chunk's
+    /// bytes. See [`read_held()`] for how held credit behaves.
+    ///
+    /// This operation is cancel-safe.
+    ///
+    /// [`read_chunk()`]: RecvStream::read_chunk
+    /// [`read_held()`]: RecvStream::read_held
+    pub async fn read_chunk_held(
+        &mut self,
+        max_length: usize,
+    ) -> Result<Option<(Bytes, Credit)>, ReadError> {
+        poll_fn(|cx| {
+            self.poll_read_generic(cx, true, |chunks| match chunks.next(max_length) {
+                Ok(Some(chunk)) => ReadStatus::Readable((chunk.bytes, chunks.hold())),
+                res => (None, res.err()).into(),
+            })
+            .map_ok(|read| {
+                read.map(|(bytes, inner)| {
+                    let conn = self.conn.0.clone();
+                    (bytes, Credit { conn, inner })
+                })
+            })
+        })
+        .await
+    }
+
     /// Read the next segments of data
     ///
     /// Fills `bufs` with the segments of data beginning immediately after the
@@ -308,6 +336,7 @@ impl RecvStream {
             return Ok(());
         }
         conn.inner.recv_stream(self.stream).stop(error_code)?;
+        conn.check_credit();
         conn.wake();
         self.all_data_read = true;
         // Clean up shared state that might be left over from a cancalled read
@@ -416,6 +445,7 @@ impl RecvStream {
                 if chunks.finalize().should_transmit() {
                     conn.wake();
                 }
+                conn.check_credit();
                 status
             }
         };
@@ -538,6 +568,7 @@ impl Drop for Credit {
         {
             conn.wake();
         }
+        conn.check_credit();
     }
 }
 
