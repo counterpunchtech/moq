@@ -367,10 +367,10 @@ impl Channel {
 		self.queued = 0;
 	}
 
-	/// How the writer sees the channel close: reset, stopped, or FIN delivered.
+	/// How the writer sees the channel close: reset, stopped, or finished and drained.
 	fn sent(&self) -> Poll<Result<(), Error>> {
 		match self.end {
-			Some(End::Fin) => Poll::Ready(Ok(())),
+			Some(End::Fin) if self.messages.is_empty() => Poll::Ready(Ok(())),
 			Some(End::Reset(_)) => Poll::Ready(Ok(())),
 			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
 			_ => Poll::Pending,
@@ -460,9 +460,9 @@ impl poll::SendStream for SendStream {
 		}
 	}
 
-	/// Ready once this side reset the stream, the reader stopped it, or FIN was delivered
-	/// into the channel. Like a QUIC acknowledgement, delivery does not wait for the
-	/// receiving application to read the buffered data.
+	/// Ready once this side reset the stream, the reader stopped it, or the reader took
+	/// every message of a finished stream. That stands in for a FIN acknowledgement, so a
+	/// writer that waits for it before closing the session knows the peer has the data.
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		let waiter = self.park.hold(cx);
 		// Check the close first, so a drain that happened before it is still seen below.
@@ -735,7 +735,7 @@ mod tests {
 	}
 
 	#[test]
-	fn finish_acknowledges_delivery_before_the_reader_drains() {
+	fn finish_closes_once_drained() {
 		let (mut a, mut b) = pair(Config::default());
 		let (mut send, mut recv) = uni(&mut a, &mut b);
 
@@ -744,8 +744,8 @@ mod tests {
 		assert!(matches!(send.finish(), Err(Error::Closed)));
 		assert!(ready(recv.poll_closed(&mut noop())).is_ok());
 
-		// FIN acknowledges delivery, while the payload remains buffered for the reader.
-		assert!(ready(send.poll_closed(&mut noop())).is_ok());
+		// The writer's close waits for the reader to take every message.
+		assert!(send.poll_closed(&mut noop()).is_pending());
 		assert_eq!(text(read(&mut recv, usize::MAX)), "done");
 		assert!(ready(send.poll_closed(&mut noop())).is_ok());
 		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap(), None);
