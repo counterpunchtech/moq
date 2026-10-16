@@ -479,7 +479,15 @@ impl poll::Session for Session {
 	}
 
 	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		self.side.conn.fills[self.side.local].poll(cx)
+		let local = self.side.local;
+		// A fill whose credit returned before this poll relieves nothing, as in the QUIC
+		// drivers: report it only while the window is still exhausted.
+		loop {
+			ready!(self.side.conn.fills[local].poll(cx));
+			if self.side.conn.windows[local].read().exhausted {
+				return Poll::Ready(());
+			}
+		}
 	}
 
 	fn stats(&self) -> impl super::Stats {
@@ -1112,6 +1120,25 @@ mod tests {
 
 		// The other direction has its own window.
 		assert!(a.poll_credit_exhausted(&mut noop()).is_pending());
+		drop((held, more));
+	}
+
+	/// A fill whose credit returns before the monitor polls is not reported, so nothing is
+	/// cancelled once progress is possible again.
+	#[test]
+	fn a_fill_released_before_the_poll_is_not_reported() {
+		let (mut a, mut b) = pair(window(8));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 8]))).unwrap(), 8);
+		let (_, mut held) = ready(recv.poll_read_chunk(&mut noop(), 8)).unwrap().unwrap();
+		drop(held.split(4));
+		assert!(b.poll_credit_exhausted(&mut noop()).is_pending());
+
+		// Filling the window again is still reported.
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 8]))).unwrap(), 4);
+		let (_, more) = ready(recv.poll_read_chunk(&mut noop(), 8)).unwrap().unwrap();
+		ready(b.poll_credit_exhausted(&mut noop()));
 		drop((held, more));
 	}
 
