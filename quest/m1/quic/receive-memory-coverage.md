@@ -4,8 +4,8 @@
 
 A JavaScript sender drives both native receivers into receive-credit
 exhaustion and they recover, and nightly measures what bounded receive memory
-costs. This is coverage for the [message assembly](/quest/m1/quic/receive-memory.md)
-work, with no new transport behavior.
+costs. This is coverage for the message-assembly work in #5735, with no new
+transport behavior.
 
 ## Plan
 
@@ -37,7 +37,3 @@ latency. Sweep streams and frame sizes on separate axes, so a cost that grows
 with the stream count shows up as a slope. Wire it into `sh/gh/nightly.sh`
 next to `benchmark_held_reads`. Unit tests stay on mocked time; the benchmark
 is the only wall-clock part.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - the native credit, recovery, and window validation this exercises
