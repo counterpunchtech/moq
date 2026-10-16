@@ -6,10 +6,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use proto::{ConnectionError, ConnectionId, ServerConfig};
+use moq_quic::{ConnectionError, ConnectionId, ServerConfig};
 use thiserror::Error;
 
-use crate::{
+use crate::quic::driver::{
     connection::{Connecting, Connection},
     endpoint::EndpointRef,
 };
@@ -19,7 +19,7 @@ use crate::{
 pub struct Incoming(Option<State>);
 
 impl Incoming {
-    pub(crate) fn new(inner: proto::Incoming, endpoint: EndpointRef) -> Self {
+    pub(crate) fn new(inner: moq_quic::Incoming, endpoint: EndpointRef) -> Self {
         Self(Some(State { inner, endpoint }))
     }
 
@@ -111,7 +111,7 @@ impl Drop for Incoming {
 
 #[derive(Debug)]
 struct State {
-    inner: proto::Incoming,
+    inner: moq_quic::Incoming,
     endpoint: EndpointRef,
 }
 

@@ -171,7 +171,7 @@ impl Relay {
 		#[cfg(not(feature = "_quic"))]
 		anyhow::ensure!(
 			io_uring || config.runtime.workers().is_none(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
+			"runtime.workers needs moq-relay built with the `quic` feature"
 		);
 
 		// Workers and the stream server split one relay across listeners, so they share
@@ -552,7 +552,7 @@ impl Relay {
 
 		// Before the readiness notify, for the same reason the cluster starts
 		// before it: an unsupported kernel, a refused ring, or a certificate
-		// certificate identity noq will not load fails here, and reporting ready first would
+		// certificate identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let mut uring = uring;
@@ -929,7 +929,7 @@ mod tests {
 		};
 		assert_eq!(
 			error.to_string(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
+			"runtime.workers needs moq-relay built with the `quic` feature"
 		);
 	}
 }

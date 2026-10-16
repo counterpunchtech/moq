@@ -1,8 +1,8 @@
-#![cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#![cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 
-#[cfg(all(feature = "rustls-aws-lc-rs", not(feature = "rustls-ring")))]
+#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
 use rustls::crypto::aws_lc_rs::default_provider;
-#[cfg(feature = "rustls-ring")]
+#[cfg(feature = "ring")]
 use rustls::crypto::ring::default_provider;
 
 use std::{
@@ -19,15 +19,16 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::runtime::{AsyncTimer, AsyncUdpSocket, Runtime as _, TokioRuntime, UdpSender};
-use crate::{Duration, Instant};
+use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender, wrap_udp_socket};
+use crate::quic::driver::{Duration, Instant};
 use bytes::Bytes;
-use proto::{
+use moq_quic::{
     ConnectionId, RandomConnectionIdGenerator,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
     crypto::{Keys, ServerConfig as ProtoServerConfig, Session, UnsupportedVersion},
     transport_parameters::TransportParameters,
 };
+use moq_sock::udp::RecvMeta;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustls::{
     RootCertStore,
@@ -41,7 +42,6 @@ use tokio::{
 use tracing::instrument::Instrument as _;
 use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
-use udp::RecvMeta;
 
 use super::{ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig};
 
@@ -64,6 +64,7 @@ fn handshake_timeout() {
     let mut transport_config = TransportConfig::default();
     transport_config
         .max_idle_timeout(Some(IDLE_TIMEOUT.try_into().unwrap()))
+        .handshake_idle_timeout(IDLE_TIMEOUT)
         .initial_rtt(Duration::from_millis(10));
     client_config.transport_config(Arc::new(transport_config));
 
@@ -78,7 +79,7 @@ fn handshake_timeout() {
             .unwrap()
             .await
         {
-            Err(crate::ConnectionError::TimedOut) => {}
+            Err(crate::quic::driver::ConnectionError::TimedOut) => {}
             Err(e) => panic!("unexpected error: {e:?}"),
             Ok(_) => panic!("unexpected success"),
         }
@@ -119,7 +120,7 @@ async fn close_endpoint() {
         .unwrap();
     endpoint.close(0u32.into(), &[]);
     match conn.await {
-        Err(crate::ConnectionError::LocallyClosed) => (),
+        Err(crate::quic::driver::ConnectionError::LocallyClosed) => (),
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => {
             panic!("unexpected success");
@@ -134,7 +135,7 @@ fn local_addr() {
     let runtime = rt_basic();
     let ep = {
         let _guard = runtime.enter();
-        Endpoint::new(Default::default(), None, socket, Arc::new(TokioRuntime)).unwrap()
+        Endpoint::new(Default::default(), None, socket).unwrap()
     };
     assert_eq!(
         addr,
@@ -254,7 +255,7 @@ async fn ip_blocking() {
                 .await
                 .expect_err("server should have blocked this");
             assert!(
-                matches!(e, crate::ConnectionError::ConnectionClosed(_)),
+                matches!(e, crate::quic::driver::ConnectionError::ConnectionClosed(_)),
                 "wrong error"
             );
         },
@@ -299,8 +300,11 @@ impl EndpointFactory {
     fn endpoint_with_config(&self, transport_config: TransportConfig) -> Endpoint {
         let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
         let transport_config = Arc::new(transport_config);
-        let mut server_config =
-            crate::ServerConfig::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
+        let mut server_config = crate::quic::driver::ServerConfig::with_single_cert(
+            vec![self.cert.cert.der().clone()],
+            key,
+        )
+        .unwrap();
         server_config.transport_config(transport_config.clone());
 
         let mut roots = RootCertStore::empty();
@@ -309,7 +313,6 @@ impl EndpointFactory {
             self.endpoint_config.clone(),
             Some(server_config),
             UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap(),
-            Arc::new(TokioRuntime),
         )
         .unwrap();
         let mut client_config = ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
@@ -448,43 +451,8 @@ impl AsyncUdpSocket for FailingSocket {
     }
 }
 
-/// Poll a connection driver before its registration returns, once the endpoint has failed.
-#[derive(Debug)]
-struct DriverLossRuntime {
-    failure: Arc<SocketFailure>,
-    stopped_on_first_poll: AtomicBool,
-}
-
-impl crate::runtime::Runtime for DriverLossRuntime {
-    fn new_timer(&self, deadline: Instant) -> Pin<Box<dyn AsyncTimer>> {
-        TokioRuntime.new_timer(deadline)
-    }
-
-    fn spawn(&self, mut future: Pin<Box<dyn Future<Output = ()> + Send>>) {
-        if self.failure.armed.load(Ordering::SeqCst) {
-            let mut cx = Context::from_waker(Waker::noop());
-            if future.as_mut().poll(&mut cx).is_ready() {
-                self.stopped_on_first_poll.store(true, Ordering::SeqCst);
-                return;
-            }
-        }
-        TokioRuntime.spawn(future);
-    }
-
-    fn wrap_udp_socket(&self, socket: UdpSocket) -> io::Result<Box<dyn AsyncUdpSocket>> {
-        TokioRuntime.wrap_udp_socket(socket)
-    }
-
-    fn now(&self) -> Instant {
-        TokioRuntime.now()
-    }
-}
-
 fn localhost_socket() -> Box<dyn AsyncUdpSocket> {
-    TokioRuntime
-        .wrap_udp_socket(
-            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap(),
-        )
+    wrap_udp_socket(UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap())
         .unwrap()
 }
 
@@ -492,7 +460,6 @@ fn blocking_server_pair(
     server_alpn: &[u8],
     client_alpn: &[u8],
     server_socket: Box<dyn AsyncUdpSocket>,
-    server_runtime: Arc<dyn crate::runtime::Runtime>,
 ) -> (Endpoint, Endpoint, Arc<HandshakeBlocker>) {
     let factory = EndpointFactory::new();
     let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
@@ -503,7 +470,7 @@ fn blocking_server_pair(
         .with_single_cert(vec![factory.cert.cert.der().clone()], key)
         .unwrap();
     server_crypto.alpn_protocols = vec![server_alpn.to_vec()];
-    let mut server_config = crate::ServerConfig::with_crypto(Arc::new(
+    let mut server_config = crate::quic::driver::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(server_crypto).unwrap(),
     ));
     let blocker = Arc::new(HandshakeBlocker::default());
@@ -516,14 +483,20 @@ fn blocking_server_pair(
         factory.endpoint_config.clone(),
         Some(server_config),
         server_socket,
-        server_runtime,
     )
     .unwrap();
 
     let mut roots = RootCertStore::empty();
     roots.add(factory.cert.cert.der().clone()).unwrap();
     let client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
-    let mut client_crypto = rustls::ClientConfig::builder_with_provider(default_provider().into())
+    // One classical key share keeps the ClientHello in the first Initial, so a handshake failure
+    // surfaces from `accept` itself. aws-lc-rs's default post-quantum share spills it into a
+    // second packet, which only reaches the connection after it is registered.
+    let mut provider = default_provider();
+    provider
+        .kx_groups
+        .retain(|group| group.name() == rustls::NamedGroup::X25519);
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_root_certificates(roots)
@@ -544,7 +517,7 @@ async fn wait_for_blocked_handshake(blocker: Arc<HandshakeBlocker>) {
 
 async fn accept_with_blocked_start_session(
     server: Endpoint,
-) -> Result<crate::Connection, crate::ConnectionError> {
+) -> Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError> {
     let incoming = server.accept().await.unwrap();
     // The test crypto provider intentionally blocks in `start_session`, so run
     // accept on the blocking pool rather than parking a Tokio worker thread.
@@ -559,8 +532,12 @@ struct BlockedHandshake {
     server: Endpoint,
     blocker: Arc<HandshakeBlocker>,
     release_guard: HandshakeReleaseGuard,
-    accept: tokio::task::JoinHandle<Result<crate::Connection, crate::ConnectionError>>,
-    connect: tokio::task::JoinHandle<Result<crate::Connection, crate::ConnectionError>>,
+    accept: tokio::task::JoinHandle<
+        Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>,
+    >,
+    connect: tokio::task::JoinHandle<
+        Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>,
+    >,
 }
 
 fn blocked_handshake(server_alpn: &[u8], client_alpn: &[u8]) -> BlockedHandshake {
@@ -572,22 +549,7 @@ fn blocked_handshake_with_socket(
     client_alpn: &[u8],
     server_socket: Box<dyn AsyncUdpSocket>,
 ) -> BlockedHandshake {
-    blocked_handshake_with_runtime(
-        server_alpn,
-        client_alpn,
-        server_socket,
-        Arc::new(TokioRuntime),
-    )
-}
-
-fn blocked_handshake_with_runtime(
-    server_alpn: &[u8],
-    client_alpn: &[u8],
-    server_socket: Box<dyn AsyncUdpSocket>,
-    server_runtime: Arc<dyn crate::runtime::Runtime>,
-) -> BlockedHandshake {
-    let (client, server, blocker) =
-        blocking_server_pair(server_alpn, client_alpn, server_socket, server_runtime);
+    let (client, server, blocker) = blocking_server_pair(server_alpn, client_alpn, server_socket);
     let server_addr = server.local_addr().unwrap();
 
     let accept = tokio::spawn({
@@ -610,8 +572,10 @@ fn blocked_handshake_with_runtime(
 }
 
 async fn await_connection(
-    task: tokio::task::JoinHandle<Result<crate::Connection, crate::ConnectionError>>,
-) -> Result<crate::Connection, crate::ConnectionError> {
+    task: tokio::task::JoinHandle<
+        Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError>,
+    >,
+) -> Result<crate::quic::driver::Connection, crate::quic::driver::ConnectionError> {
     timeout(Duration::from_secs(5), task)
         .await
         .unwrap()
@@ -713,7 +677,9 @@ fn wait_idle_returns_when_the_driver_is_dropped() {
     let _ = waiter.join();
 }
 
-async fn wait_closed(conn: &crate::Connection) -> crate::ConnectionError {
+async fn wait_closed(
+    conn: &crate::quic::driver::Connection,
+) -> crate::quic::driver::ConnectionError {
     timeout(Duration::from_secs(5), conn.closed())
         .await
         .unwrap()
@@ -914,7 +880,8 @@ fn run_echo(args: EchoArgs) {
         let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         let cert = CertificateDer::from(cert.cert);
         let mut server_config =
-            crate::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+            crate::quic::driver::ServerConfig::with_single_cert(vec![cert.clone()], key.into())
+                .unwrap();
 
         server_config.transport = transport_config.clone();
         let server_sock = UdpSocket::bind(args.server_addr).unwrap();
@@ -922,13 +889,7 @@ fn run_echo(args: EchoArgs) {
         let server = {
             let _guard = runtime.enter();
             let _guard = error_span!("server").entered();
-            Endpoint::new(
-                Default::default(),
-                Some(server_config),
-                server_sock,
-                Arc::new(TokioRuntime),
-            )
-            .unwrap()
+            Endpoint::new(Default::default(), Some(server_config), server_sock).unwrap()
         };
 
         let mut roots = RootCertStore::empty();
@@ -1144,7 +1105,8 @@ async fn rebind_recv() {
     client.set_default_client_config(client_config);
 
     let server_config =
-        crate::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+        crate::quic::driver::ServerConfig::with_single_cert(vec![cert.clone()], key.into())
+            .unwrap();
     let server = {
         let _guard = tracing::error_span!("server").entered();
         Endpoint::server(
@@ -1254,8 +1216,8 @@ async fn split_accept_failure_wakes_idle_waiter() {
     let error = await_connection(accept).await.unwrap_err();
     assert!(matches!(
         error,
-        crate::ConnectionError::TransportError(error)
-            if error.code == proto::TransportErrorCode::crypto(0x78)
+        crate::quic::driver::ConnectionError::TransportError(error)
+            if error.code == moq_quic::TransportErrorCode::crypto(0x78)
     ));
     // Repolling wait_idle alone would hide a missing notification now that the endpoint is
     // idle. Verify that the waiter registered before the failure was actually woken.
@@ -1291,18 +1253,30 @@ async fn split_accept_close_during_pending_accept() {
     match await_connection(accept).await {
         Ok(conn) => {
             let err = wait_closed(&conn).await;
-            assert!(matches!(err, crate::ConnectionError::LocallyClosed));
+            assert!(matches!(
+                err,
+                crate::quic::driver::ConnectionError::LocallyClosed
+            ));
         }
-        Err(err) => assert!(matches!(err, crate::ConnectionError::LocallyClosed)),
+        Err(err) => assert!(matches!(
+            err,
+            crate::quic::driver::ConnectionError::LocallyClosed
+        )),
     }
 
     match await_connection(connect).await {
         Ok(conn) => {
             let err = wait_closed(&conn).await;
-            assert!(matches!(err, crate::ConnectionError::ConnectionClosed(_)));
+            assert!(matches!(
+                err,
+                crate::quic::driver::ConnectionError::ConnectionClosed(_)
+            ));
         }
         Err(err) => {
-            assert!(matches!(err, crate::ConnectionError::ConnectionClosed(_)));
+            assert!(matches!(
+                err,
+                crate::quic::driver::ConnectionError::ConnectionClosed(_)
+            ));
         }
     }
 
@@ -1358,51 +1332,6 @@ async fn split_accept_driver_lost_during_handshake() {
     assert!(await_connection(accept).await.is_err());
     assert!(wake_counter.wakes() > 0);
     timeout(Duration::from_secs(5), idle).await.unwrap();
-
-    client.close(0u32.into(), b"done");
-    assert!(await_connection(connect).await.is_err());
-    wait_idle(&client).await;
-}
-
-#[tokio::test]
-async fn split_accept_driver_lost_before_connection_spawn() {
-    let _guard = subscribe();
-    let failure = Arc::new(SocketFailure::default());
-    let runtime = Arc::new(DriverLossRuntime {
-        failure: failure.clone(),
-        stopped_on_first_poll: AtomicBool::new(false),
-    });
-    let socket = Box::new(FailingSocket {
-        inner: localhost_socket(),
-        failure: failure.clone(),
-    });
-    let BlockedHandshake {
-        client,
-        server,
-        blocker,
-        release_guard: _release_guard,
-        accept,
-        connect,
-    } = blocked_handshake_with_runtime(b"test", b"test", socket, runtime.clone());
-
-    wait_for_blocked_handshake(blocker.clone()).await;
-    failure.trigger();
-    assert!(
-        timeout(Duration::from_secs(5), server.accept())
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    blocker.release();
-    // The runtime polls the connection driver before registration returns. It must observe the
-    // closed event channel immediately, before transmitting any handshake packets.
-    assert!(await_connection(accept).await.is_err());
-    assert!(
-        runtime.stopped_on_first_poll.load(Ordering::SeqCst),
-        "connection driver ran before its event channel was closed"
-    );
-    wait_idle(&server).await;
 
     client.close(0u32.into(), b"done");
     assert!(await_connection(connect).await.is_err());
@@ -1782,8 +1711,8 @@ async fn dropped_endpoint_cleans_up() {
     let _guard = subscribe();
 
     let mut endpoint_factory = EndpointFactory::new();
-    let cid_generator = Arc::new(|| -> Box<dyn proto::ConnectionIdGenerator> {
-        Box::<proto::HashedConnectionIdGenerator>::default()
+    let cid_generator = Arc::new(|| -> Box<dyn moq_quic::ConnectionIdGenerator> {
+        Box::<moq_quic::HashedConnectionIdGenerator>::default()
     });
     endpoint_factory
         .endpoint_config

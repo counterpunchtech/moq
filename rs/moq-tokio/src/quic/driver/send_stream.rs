@@ -6,10 +6,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use proto::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
+use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
-use crate::{
+use crate::quic::driver::{
     VarInt,
     connection::{ConnectionRef, State},
 };
@@ -140,9 +140,9 @@ impl SendStream {
         write_fn: F,
     ) -> Poll<Result<R, WriteError>>
     where
-        F: FnOnce(&mut proto::SendStream<'_>) -> Result<R, proto::WriteError>,
+        F: FnOnce(&mut moq_quic::SendStream<'_>) -> Result<R, moq_quic::WriteError>,
     {
-        use proto::WriteError::*;
+        use moq_quic::WriteError::*;
         let mut conn = self.conn.state.lock("SendStream::poll_write");
         if self.is_0rtt {
             conn.check_0rtt()
@@ -315,25 +315,6 @@ fn send_stream_stopped(
     }
 }
 
-#[cfg(feature = "futures-io")]
-impl futures_io::AsyncWrite for SendStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.poll_write(cx, buf).map_err(Into::into)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(self.get_mut().finish().map_err(Into::into))
-    }
-}
-
 impl tokio::io::AsyncWrite for SendStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -394,7 +375,7 @@ pub enum WriteError {
     /// Can only occur on clients for 0-RTT streams, which can be opened using
     /// [`Connecting::into_0rtt()`].
     ///
-    /// [`Connecting::into_0rtt()`]: crate::Connecting::into_0rtt()
+    /// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
     #[error("0-RTT rejected")]
     ZeroRttRejected,
 }
@@ -437,7 +418,7 @@ pub enum StoppedError {
     /// Can only occur on clients for 0-RTT streams, which can be opened using
     /// [`Connecting::into_0rtt()`].
     ///
-    /// [`Connecting::into_0rtt()`]: crate::Connecting::into_0rtt()
+    /// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
     #[error("0-RTT rejected")]
     ZeroRttRejected,
 }

@@ -1,4 +1,4 @@
-use crate::{Duration, Instant};
+use crate::quic::driver::{Duration, Instant};
 
 /// Limits the amount of time spent on a certain type of work in a cycle
 ///

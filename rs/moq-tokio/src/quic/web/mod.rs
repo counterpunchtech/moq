@@ -3,7 +3,7 @@
 //!
 //! WebTransport is layered on top of HTTP/3 which is then layered on top of QUIC.
 //! This library hides that detail and tries to expose only the QUIC API, delegating as much as
-//! possible to the underlying implementation. See the [Noq documentation](https://docs.rs/moq-noq/latest/moq_noq/) for more documentation.
+//! possible to the underlying implementation. See [`crate::quic::driver`] for more documentation.
 //!
 //! QUIC provides two primary APIs:
 //!
@@ -43,12 +43,13 @@ pub use session::*;
 
 // Internal
 mod connect;
+mod fan;
 mod settings;
 
 use connect::*;
 use settings::*;
 
-// Required to access web_transport_moq::proto::ConnectError wrapped in ClientError
+// Required to access proto::ConnectError wrapped in ClientError
 pub use connect::ConnectError;
 
 /// The HTTP/3 ALPN is required when negotiating a QUIC connection.
@@ -57,15 +58,8 @@ pub const ALPN: &str = "h3";
 /// Export our simple crypto provider.
 pub mod crypto;
 
-/// Re-export the underlying QUIC implementation.
-pub use noq;
-
 /// Re-export the http crate because it's in the public API.
 pub use http;
-
-/// Re-export kio, whose [`Waiter`](kio::Waiter) is how a caller of
-/// [`SessionAccept`]'s poll methods holds its place in the accept queue.
-pub use kio;
 
 /// Re-export the WebTransport protocol implementation.
 pub use web_transport_proto as proto;

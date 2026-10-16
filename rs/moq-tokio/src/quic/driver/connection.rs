@@ -23,15 +23,11 @@ use tokio::sync::{
 };
 use tracing::{Instrument, Span, debug_span};
 
-use crate::{
-    ConnectionEvent, Duration, Instant, VarInt,
-    mutex::Mutex,
-    recv_stream::RecvStream,
-    runtime::{AsyncTimer, Runtime, UdpSender},
-    send_stream::SendStream,
-    udp_transmit,
+use crate::quic::driver::{
+    ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
+    runtime::UdpSender, send_stream::SendStream, udp_transmit,
 };
-use proto::{
+use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
     StreamId, TransportError, TransportErrorCode, congestion::Controller,
 };
@@ -53,11 +49,10 @@ pub struct Connecting {
 impl Connecting {
     pub(crate) fn new(
         handle: ConnectionHandle,
-        conn: proto::Connection,
+        conn: moq_quic::Connection,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
         sender: Pin<Box<dyn UdpSender>>,
-        runtime: Arc<dyn Runtime>,
     ) -> Self {
         let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
 
@@ -69,21 +64,20 @@ impl Connecting {
                 conn_events,
                 on_handshake_data_send,
                 sender,
-                runtime.clone(),
             )),
             shared: Shared::default(),
         }));
         let connected = Box::pin(conn.shared.connected.clone().notified_owned());
 
         let driver = ConnectionDriver::new(conn.clone());
-        runtime.spawn(Box::pin(
+        tokio::spawn(
             async {
                 if let Err(e) = driver.await {
                     tracing::error!("I/O error: {e}");
                 }
             }
             .instrument(Span::current()),
-        ));
+        );
 
         Self {
             conn: Some(conn),
@@ -104,7 +98,7 @@ impl Connecting {
     /// ## Outgoing
     ///
     /// For outgoing connections, the initial attempt to convert to a [`Connection`] which sends
-    /// 0-RTT data will proceed if the [`crypto::ClientConfig`][crate::crypto::ClientConfig]
+    /// 0-RTT data will proceed if the [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig]
     /// attempts to resume a previous TLS session. However, **the remote endpoint may not actually
     /// _accept_ the 0-RTT data**--yet still accept the connection attempt in general. This
     /// possibility is conveyed through `ZeroRttRejected` errors on stream I/O methods, which may
@@ -119,14 +113,14 @@ impl Connecting {
     /// relevant resumption state to be stored in the server, which servers may limit or lose for
     /// various reasons including not persisting resumption state across server restarts.
     ///
-    /// If manually providing a [`crypto::ClientConfig`][crate::crypto::ClientConfig], check your
+    /// If manually providing a [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig], check your
     /// implementation's docs for 0-RTT pitfalls.
     ///
     /// ## Incoming
     ///
     /// For incoming connections, conversion to 0.5-RTT will always succeed.
     ///
-    /// If manually providing a [`crypto::ServerConfig`][crate::crypto::ServerConfig], check your
+    /// If manually providing a [`crypto::ServerConfig`][crate::quic::driver::crypto::ServerConfig], check your
     /// implementation's docs for 0-RTT pitfalls.
     ///
     /// ## Security
@@ -156,9 +150,9 @@ impl Connecting {
     /// Parameters negotiated during the handshake
     ///
     /// The dynamic type returned is determined by the configured
-    /// [`Session`](proto::crypto::Session). For the default `rustls` session, the return value can
+    /// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
     /// be [`downcast`](Box::downcast) to a
-    /// [`crypto::rustls::HandshakeData`](crate::crypto::rustls::HandshakeData).
+    /// [`crypto::rustls::HandshakeData`](crate::quic::driver::crypto::rustls::HandshakeData).
     ///
     /// Peer certificates are not available at this stage; see [`Connection::peer_identity()`].
     ///
@@ -194,7 +188,7 @@ impl Connecting {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](udp::RecvMeta::dst_ip) for a list of
+    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
     /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
     ///
     /// Will panic if called after `poll` has returned `Ready`.
@@ -341,9 +335,9 @@ impl Connection {
     /// actually used. Calling [`open_bi()`] then waiting on the [`RecvStream`] without writing
     /// anything to [`SendStream`] will never succeed.
     ///
-    /// [`open_bi()`]: crate::Connection::open_bi
-    /// [`SendStream`]: crate::SendStream
-    /// [`RecvStream`]: crate::RecvStream
+    /// [`open_bi()`]: crate::quic::driver::Connection::open_bi
+    /// [`SendStream`]: crate::quic::driver::SendStream
+    /// [`RecvStream`]: crate::quic::driver::RecvStream
     pub fn open_bi(&self) -> OpenBi<'_> {
         OpenBi {
             conn: &self.0,
@@ -369,10 +363,10 @@ impl Connection {
     /// before the other `Connection` is able to `accept_bi()`. Calling [`open_bi()`] then
     /// waiting on the [`RecvStream`] without writing anything to [`SendStream`] will never succeed.
     ///
-    /// [`accept_bi()`]: crate::Connection::accept_bi
-    /// [`open_bi()`]: crate::Connection::open_bi
-    /// [`SendStream`]: crate::SendStream
-    /// [`RecvStream`]: crate::RecvStream
+    /// [`accept_bi()`]: crate::quic::driver::Connection::accept_bi
+    /// [`open_bi()`]: crate::quic::driver::Connection::open_bi
+    /// [`SendStream`]: crate::quic::driver::SendStream
+    /// [`RecvStream`]: crate::quic::driver::RecvStream
     ///
     /// # Cancel safety
     ///
@@ -462,8 +456,8 @@ impl Connection {
     /// undelivered to the application, including data that was acknowledged as received to
     /// the local endpoint.
     ///
-    /// [`ConnectionError::LocallyClosed`]: crate::ConnectionError::LocallyClosed
-    /// [`Endpoint::wait_idle()`]: crate::Endpoint::wait_idle
+    /// [`ConnectionError::LocallyClosed`]: crate::quic::driver::ConnectionError::LocallyClosed
+    /// [`Endpoint::wait_idle()`]: crate::quic::driver::Endpoint::wait_idle
     /// [`close()`]: Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let conn = &mut *self.0.state.lock("close");
@@ -515,7 +509,7 @@ impl Connection {
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        use proto::SendDatagramError::*;
+        use moq_quic::SendDatagramError::*;
         match conn.inner.datagrams().send(data, true) {
             Ok(()) => {
                 conn.wake();
@@ -614,7 +608,7 @@ impl Connection {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](udp::RecvMeta::dst_ip) for a list of
+    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
     /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
     pub fn local_ip(&self) -> Option<IpAddr> {
         self.0.state.lock("local_ip").inner.local_ip()
@@ -678,7 +672,7 @@ impl Connection {
     /// [`Connecting::handshake_data()`] succeeds. See that method's documentations for details on
     /// the returned value.
     ///
-    /// [`Connection::handshake_data()`]: crate::Connecting::handshake_data
+    /// [`Connection::handshake_data()`]: crate::quic::driver::Connecting::handshake_data
     pub fn handshake_data(&self) -> Option<Box<dyn Any>> {
         self.0
             .state
@@ -691,7 +685,7 @@ impl Connection {
     /// Cryptographic identity of the peer
     ///
     /// The dynamic type returned is determined by the configured
-    /// [`Session`](proto::crypto::Session). For the default `rustls` session, the return value can
+    /// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
     /// be [`downcast`](Box::downcast) to a <code>Vec<[rustls::pki_types::CertificateDer]></code>.
     ///
     /// For custom asynchronous validation (e.g. checking a certificate against an external
@@ -738,7 +732,7 @@ impl Connection {
         output: &mut [u8],
         label: &[u8],
         context: &[u8],
-    ) -> Result<(), proto::crypto::ExportKeyingMaterialError> {
+    ) -> Result<(), moq_quic::crypto::ExportKeyingMaterialError> {
         self.0
             .state
             .lock("export_keying_material")
@@ -758,14 +752,14 @@ impl Connection {
         conn.wake();
     }
 
-    /// See [`proto::TransportConfig::send_window()`]
+    /// See [`moq_quic::TransportConfig::send_window()`]
     pub fn set_send_window(&self, send_window: u64) {
         let mut conn = self.0.state.lock("set_send_window");
         conn.inner.set_send_window(send_window);
         conn.wake();
     }
 
-    /// See [`proto::TransportConfig::receive_window()`]
+    /// See [`moq_quic::TransportConfig::receive_window()`]
     pub fn set_receive_window(&self, receive_window: VarInt) {
         let mut conn = self.0.state.lock("set_receive_window");
         conn.inner.set_receive_window(receive_window);
@@ -970,7 +964,7 @@ impl Future for SendDatagram<'_> {
         if let Some(e) = &state.error {
             return Poll::Ready(Err(SendDatagramError::ConnectionLost(e.clone())));
         }
-        use proto::SendDatagramError::*;
+        use moq_quic::SendDatagramError::*;
         match state
             .inner
             .datagrams()
@@ -1084,13 +1078,13 @@ pub(crate) struct Shared {
 }
 
 pub(crate) struct State {
-    pub(crate) inner: proto::Connection,
+    pub(crate) inner: moq_quic::Connection,
     driver: Option<Waker>,
     handle: ConnectionHandle,
     on_handshake_data: Option<oneshot::Sender<()>>,
     connected: bool,
     handshake_confirmed: bool,
-    timer: Option<Pin<Box<dyn AsyncTimer>>>,
+    timer: Option<moq_clock::Sleep>,
     timer_deadline: Option<Instant>,
     conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
@@ -1100,23 +1094,21 @@ pub(crate) struct State {
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     sender: Pin<Box<dyn UdpSender>>,
-    runtime: Arc<dyn Runtime>,
     send_buffer: Vec<u8>,
     /// We buffer a transmit when the underlying I/O would block
-    buffered_transmit: Option<proto::Transmit>,
+    buffered_transmit: Option<moq_quic::Transmit>,
     remote_address: watch::Sender<SocketAddr>,
 }
 
 impl State {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        inner: proto::Connection,
+        inner: moq_quic::Connection,
         handle: ConnectionHandle,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
         on_handshake_data: oneshot::Sender<()>,
         sender: Pin<Box<dyn UdpSender>>,
-        runtime: Arc<dyn Runtime>,
     ) -> Self {
         let remote_address = inner.remote_address();
 
@@ -1136,7 +1128,6 @@ impl State {
             stopped: FxHashMap::default(),
             error: None,
             sender,
-            runtime,
             send_buffer: Vec::new(),
             buffered_transmit: None,
             remote_address: watch::Sender::new(remote_address),
@@ -1144,7 +1135,7 @@ impl State {
     }
 
     fn drive_transmit(&mut self, cx: &mut Context<'_>) -> io::Result<bool> {
-        let now = self.runtime.now();
+        let now = Instant::now();
         let mut transmits = 0;
 
         let max_datagrams = self
@@ -1241,7 +1232,7 @@ impl State {
 
     fn forward_app_events(&mut self, shared: &Shared) {
         while let Some(event) = self.inner.poll() {
-            use proto::Event::*;
+            use moq_quic::Event::*;
             match event {
                 HandshakeDataReady => {
                     if let Some(x) = self.on_handshake_data.take() {
@@ -1310,7 +1301,7 @@ impl State {
         // Use the clock rather than the async timer to detect expiry: Sleep::poll
         // respects Tokio's cooperative budget and can return Pending for elapsed
         // deadlines.
-        let now = self.runtime.now();
+        let now = Instant::now();
         if now >= deadline {
             self.inner.handle_timeout(now);
             self.timer_deadline = None;
@@ -1320,26 +1311,22 @@ impl State {
         match &mut self.timer {
             // Avoid resetting the timer when the deadline is unchanged.
             Some(delay) if self.timer_deadline != Some(deadline) => {
-                delay.as_mut().reset(deadline);
+                delay.reset(deadline);
             }
             None => {
-                self.timer = Some(self.runtime.new_timer(deadline));
+                self.timer = Some(moq_clock::sleep_until(deadline));
             }
             _ => {}
         }
         self.timer_deadline = Some(deadline);
 
-        let delay = self
-            .timer
-            .as_mut()
-            .expect("timer must exist in this state")
-            .as_mut();
-        if delay.poll(cx).is_pending() {
+        let delay = self.timer.as_mut().expect("timer must exist in this state");
+        if Pin::new(delay).poll(cx).is_pending() {
             return false;
         }
 
         // The deadline elapsed in the window between the clock check and poll.
-        self.inner.handle_timeout(self.runtime.now());
+        self.inner.handle_timeout(Instant::now());
         self.timer_deadline = None;
         true
     }
@@ -1372,7 +1359,7 @@ impl State {
     }
 
     fn close(&mut self, error_code: VarInt, reason: Bytes, shared: &Shared) {
-        self.inner.close(self.runtime.now(), error_code, reason);
+        self.inner.close(Instant::now(), error_code, reason);
         self.terminate(ConnectionError::LocallyClosed, shared);
         self.wake();
     }

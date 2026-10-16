@@ -1,5 +1,3 @@
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-smol"))]
-use std::sync::Arc;
 use std::{
     fmt::{self, Debug},
     future::Future,
@@ -10,35 +8,9 @@ use std::{
     time::Duration,
 };
 
-use udp::{RecvMeta, Transmit};
+use moq_sock::udp::{RecvMeta, Transmit};
 
-use crate::Instant;
-
-/// Abstracts I/O and timer operations for runtime independence
-pub trait Runtime: Send + Sync + Debug + 'static {
-    /// Construct a timer that will expire at `i`
-    fn new_timer(&self, i: Instant) -> Pin<Box<dyn AsyncTimer>>;
-    /// Drive `future` to completion in the background
-    #[track_caller]
-    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>);
-    /// Convert `t` into the socket type used by this runtime
-    #[cfg(not(wasm_browser))]
-    fn wrap_udp_socket(&self, t: std::net::UdpSocket) -> io::Result<Box<dyn AsyncUdpSocket>>;
-    /// Look up the current time
-    ///
-    /// Allows simulating the flow of time for testing.
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
-
-/// Abstract implementation of an async timer for runtime independence
-pub trait AsyncTimer: Send + Debug + 'static {
-    /// Update the timer to expire at `i`
-    fn reset(self: Pin<&mut Self>, i: Instant);
-    /// Check whether the timer has expired, and register to be woken if not
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()>;
-}
+use crate::quic::driver::Instant;
 
 /// Abstract implementation of a UDP socket for runtime independence
 pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
@@ -143,7 +115,6 @@ impl<Socket, MakeWritableFutFn, WriteableFut>
     /// that resolves once the socket is write-ready.
     ///
     /// See also the bounds on this struct's [`UdpSender`] implementation.
-    #[cfg(any(feature = "runtime-smol", feature = "runtime-tokio",))]
     fn new(inner: Socket, make_fut: MakeWritableFutFn) -> Self {
         Self {
             socket: inner,
@@ -215,7 +186,7 @@ fn log_sendmsg_error(
 ) {
     #[cfg(unix)]
     // Unix `EMSGSIZE` is expected for MTU probes.
-    if udp::is_msg_size_err(error) {
+    if moq_sock::udp::is_msg_size_err(error) {
         return;
     }
 
@@ -253,41 +224,10 @@ trait UdpSenderHelperSocket: Send + Sync + 'static {
     fn max_transmit_segments(&self) -> usize;
 }
 
-/// Automatically select an appropriate runtime from those enabled at compile time
-///
-/// If `runtime-tokio` is enabled and this function is called from within a Tokio runtime context,
-/// then `TokioRuntime` is returned. Otherwise, if `runtime-smol` is enabled, `SmolRuntime` is
-/// returned. Otherwise, `None` is returned.
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-smol"))]
-#[allow(clippy::needless_return)] // Be sure we return the right thing
-pub fn default_runtime() -> Option<Arc<dyn Runtime>> {
-    #[cfg(feature = "runtime-tokio")]
-    {
-        if ::tokio::runtime::Handle::try_current().is_ok() {
-            return Some(Arc::new(TokioRuntime));
-        }
-    }
-
-    #[cfg(feature = "runtime-smol")]
-    {
-        return Some(Arc::new(SmolRuntime));
-    }
-
-    #[cfg(not(feature = "runtime-smol"))]
-    None
-}
-
-#[cfg(feature = "runtime-tokio")]
 mod tokio;
-#[cfg(feature = "runtime-tokio")]
-pub use tokio::TokioRuntime;
+pub(crate) use tokio::wrap_udp_socket;
 
-#[cfg(feature = "runtime-smol")]
-mod smol;
-#[cfg(feature = "runtime-smol")]
-pub use smol::*;
-
-#[cfg(all(test, any(feature = "runtime-tokio", feature = "runtime-smol")))]
+#[cfg(test)]
 mod tests {
     use std::{future, task::Waker};
 

@@ -6,11 +6,11 @@ use std::{
 };
 
 use bytes::Bytes;
-use proto::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamId};
+use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamId};
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
-use crate::{VarInt, connection::ConnectionRef};
+use crate::quic::driver::{VarInt, connection::ConnectionRef};
 
 /// A stream that can only be used to receive data
 ///
@@ -42,12 +42,12 @@ use crate::{VarInt, connection::ConnectionRef};
 /// bidirectional stream 1, the first stream yielded by [`Connection::accept_bi`] on the receiver
 /// will be bidirectional stream 0.
 ///
-/// [`ReadError`]: crate::ReadError
+/// [`ReadError`]: crate::quic::driver::ReadError
 /// [`stop()`]: RecvStream::stop
-/// [`SendStream::finish`]: crate::SendStream::finish
-/// [`WriteError::Stopped`]: crate::WriteError::Stopped
+/// [`SendStream::finish`]: crate::quic::driver::SendStream::finish
+/// [`WriteError::Stopped`]: crate::quic::driver::WriteError::Stopped
 /// [`id`]: RecvStream::id
-/// [`Connection::accept_bi`]: crate::Connection::accept_bi
+/// [`Connection::accept_bi`]: crate::quic::driver::Connection::accept_bi
 #[derive(Debug)]
 pub struct RecvStream {
     conn: ConnectionRef,
@@ -104,7 +104,7 @@ impl RecvStream {
     /// current task (via `cx.waker()`) to be notified when the stream becomes readable or is
     /// closed.
     ///
-    /// [`finish`]: crate::SendStream::finish
+    /// [`finish`]: crate::quic::driver::SendStream::finish
     pub fn poll_read(
         &mut self,
         cx: &mut Context<'_>,
@@ -126,7 +126,7 @@ impl RecvStream {
     /// current task (via `cx.waker()`) to be notified when the stream becomes readable or is
     /// closed.
     ///
-    /// [`finish`]: crate::SendStream::finish
+    /// [`finish`]: crate::quic::driver::SendStream::finish
     pub fn poll_read_buf(
         &mut self,
         cx: &mut Context<'_>,
@@ -256,7 +256,7 @@ impl RecvStream {
     ///
     /// This operation is *not* cancel-safe.
     ///
-    /// [`ReadToEndError::TooLong`]: crate::ReadToEndError::TooLong
+    /// [`ReadToEndError::TooLong`]: crate::quic::driver::ReadToEndError::TooLong
     pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ReadToEndError> {
         ReadToEnd {
             stream: self,
@@ -286,13 +286,13 @@ impl RecvStream {
     /// Check if this stream predates completion of the handshake on an incoming connection.
     ///
     /// True only if the stream was accepted before the handshake completed, which is only possible
-    /// if you successfully called [`Connecting::into_0rtt`](crate::Connecting::into_0rtt) and the
+    /// if you successfully called [`Connecting::into_0rtt`](crate::quic::driver::Connecting::into_0rtt) and the
     /// client chose to send 0-RTT data.
     ///
     /// Under those conditions, depending on cryptographic layer configuration, 0-RTT application
     /// data may be a replay attack. To guard against this, applications should not execute
     /// non-idempotent operations until
-    /// [`Connection::authenticated`](crate::Connection::authenticated) succeeds.
+    /// [`Connection::authenticated`](crate::quic::driver::Connection::authenticated) succeeds.
     pub fn is_0rtt(&self) -> bool {
         self.is_0rtt
     }
@@ -306,7 +306,7 @@ impl RecvStream {
     ///
     /// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
     /// when the stream was previously [`stop()`](Self::stop)ed, or when the stream was
-    /// [`finish()`](crate::SendStream::finish)ed by the peer and all data has been received, after
+    /// [`finish()`](crate::quic::driver::SendStream::finish)ed by the peer and all data has been received, after
     /// which it is no longer meaningful for the stream to be reset.
     ///
     /// This operation is cancel-safe.
@@ -360,7 +360,7 @@ impl RecvStream {
     where
         T: FnMut(&mut Chunks<'_>) -> ReadStatus<U>,
     {
-        use proto::ReadError::*;
+        use moq_quic::ReadError::*;
         use std::collections::hash_map::Entry;
 
         if self.all_data_read {
@@ -432,11 +432,11 @@ impl RecvStream {
 enum ReadStatus<T> {
     Readable(T),
     Finished(Option<T>),
-    Failed(Option<T>, proto::ReadError),
+    Failed(Option<T>, moq_quic::ReadError),
 }
 
-impl<T> From<(Option<T>, Option<proto::ReadError>)> for ReadStatus<T> {
-    fn from(status: (Option<T>, Option<proto::ReadError>)) -> Self {
+impl<T> From<(Option<T>, Option<moq_quic::ReadError>)> for ReadStatus<T> {
+    fn from(status: (Option<T>, Option<moq_quic::ReadError>)) -> Self {
         match status {
             (read, None) => Self::Finished(read),
             (read, Some(e)) => Self::Failed(read, e),
@@ -446,7 +446,7 @@ impl<T> From<(Option<T>, Option<proto::ReadError>)> for ReadStatus<T> {
 
 /// Future produced by [`RecvStream::read_to_end()`].
 ///
-/// [`RecvStream::read_to_end()`]: crate::RecvStream::read_to_end
+/// [`RecvStream::read_to_end()`]: crate::quic::driver::RecvStream::read_to_end
 struct ReadToEnd<'a> {
     stream: &'a mut RecvStream,
     buffer: ReadToEndBuffer,
@@ -515,19 +515,6 @@ pub enum ReadToEndError {
     TooLong,
 }
 
-#[cfg(feature = "futures-io")]
-impl futures_io::AsyncRead for RecvStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let mut buf = ReadBuf::new(buf);
-        ready!(Self::poll_read_buf(self.get_mut(), cx, &mut buf))?;
-        Poll::Ready(Ok(buf.filled().len()))
-    }
-}
-
 impl tokio::io::AsyncRead for RecvStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -594,7 +581,7 @@ pub enum ReadError {
     /// Can only occur on clients for 0-RTT streams, which can be opened using
     /// [`Connecting::into_0rtt()`].
     ///
-    /// [`Connecting::into_0rtt()`]: crate::Connecting::into_0rtt()
+    /// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
     #[error("0-RTT rejected")]
     ZeroRttRejected,
 }
@@ -640,7 +627,7 @@ pub enum ResetError {
     /// Can only occur on clients for 0-RTT streams, which can be opened using
     /// [`Connecting::into_0rtt()`].
     ///
-    /// [`Connecting::into_0rtt()`]: crate::Connecting::into_0rtt()
+    /// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
     #[error("0-RTT rejected")]
     ZeroRttRejected,
 }
@@ -658,7 +645,7 @@ impl From<ResetError> for io::Error {
 
 /// Future produced by [`RecvStream::read()`].
 ///
-/// [`RecvStream::read()`]: crate::RecvStream::read
+/// [`RecvStream::read()`]: crate::quic::driver::RecvStream::read
 struct Read<'a> {
     stream: &'a mut RecvStream,
     buf: ReadBuf<'a>,
@@ -679,7 +666,7 @@ impl Future for Read<'_> {
 
 /// Future produced by [`RecvStream::read_exact()`].
 ///
-/// [`RecvStream::read_exact()`]: crate::RecvStream::read_exact
+/// [`RecvStream::read_exact()`]: crate::quic::driver::RecvStream::read_exact
 struct ReadExact<'a> {
     stream: &'a mut RecvStream,
     buf: ReadBuf<'a>,
@@ -715,7 +702,7 @@ pub enum ReadExactError {
 
 /// Future produced by [`RecvStream::read_chunk()`].
 ///
-/// [`RecvStream::read_chunk()`]: crate::RecvStream::read_chunk
+/// [`RecvStream::read_chunk()`]: crate::quic::driver::RecvStream::read_chunk
 struct ReadChunk<'a> {
     stream: &'a mut RecvStream,
     max_length: usize,
@@ -732,7 +719,7 @@ impl Future for ReadChunk<'_> {
 
 /// Future produced by [`RecvStream::read_chunks()`].
 ///
-/// [`RecvStream::read_chunks()`]: crate::RecvStream::read_chunks
+/// [`RecvStream::read_chunks()`]: crate::quic::driver::RecvStream::read_chunks
 struct ReadChunks<'a> {
     stream: &'a mut RecvStream,
     bufs: &'a mut [Bytes],

@@ -50,14 +50,11 @@ mod runtime;
 mod send_stream;
 mod work_limiter;
 
-#[cfg(not(wasm_browser))]
-pub(crate) use std::time::{Duration, Instant};
-#[cfg(wasm_browser)]
-pub(crate) use web_time::{Duration, Instant};
+pub(crate) use moq_clock::Instant;
+pub(crate) use std::time::Duration;
 
-#[cfg(feature = "bloom")]
-pub use proto::BloomTokenLog;
-pub use proto::{
+pub use moq_quic::BloomTokenLog;
+pub use moq_quic::{
     AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError,
     ConnectError, ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator,
     ConnectionStats, Dir, EcnCodepoint, EndpointConfig, FrameStats, FrameType, IdleTimeout,
@@ -67,42 +64,37 @@ pub use proto::{
     VarIntBoundsExceeded, Written, congestion, crypto,
 };
 #[cfg(feature = "qlog")]
-pub use proto::{QlogConfig, QlogStream};
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
-pub use rustls;
-pub use udp;
+pub use moq_quic::{QlogConfig, QlogStream};
 
-pub use crate::connection::{
+pub use crate::quic::driver::connection::{
     AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram,
     RemoteAddressWatcher, SendDatagram, SendDatagramError,
 };
-pub use crate::endpoint::{Accept, Endpoint, EndpointStats};
-pub use crate::incoming::{Incoming, IncomingFuture, RetryError};
-pub use crate::recv_stream::{ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError};
-#[cfg(feature = "runtime-smol")]
-pub use crate::runtime::SmolRuntime;
-#[cfg(feature = "runtime-tokio")]
-pub use crate::runtime::TokioRuntime;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-smol"))]
-pub use crate::runtime::default_runtime;
-pub use crate::runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpSender};
-pub use crate::send_stream::{SendStream, StoppedError, WriteError};
+pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
+pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
+pub use crate::quic::driver::recv_stream::{
+    ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
+};
+#[cfg(test)]
+pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
+pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
+pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Debug)]
-enum ConnectionEvent {
+pub(crate) enum ConnectionEvent {
     Close {
         error_code: VarInt,
         reason: bytes::Bytes,
     },
-    Proto(proto::ConnectionEvent),
+    Proto(moq_quic::ConnectionEvent),
     Rebind(Pin<Box<dyn UdpSender>>),
 }
 
-fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> udp::Transmit<'a> {
-    udp::Transmit {
+fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> moq_sock::udp::Transmit<'a> {
+    moq_sock::udp::Transmit {
         destination: t.destination,
         ecn: t.ecn.map(udp_ecn),
         contents: buffer,
@@ -111,11 +103,11 @@ fn udp_transmit<'a>(t: &Transmit, buffer: &'a [u8]) -> udp::Transmit<'a> {
     }
 }
 
-fn udp_ecn(ecn: EcnCodepoint) -> udp::EcnCodepoint {
+fn udp_ecn(ecn: EcnCodepoint) -> moq_sock::udp::EcnCodepoint {
     match ecn {
-        EcnCodepoint::Ect0 => udp::EcnCodepoint::Ect0,
-        EcnCodepoint::Ect1 => udp::EcnCodepoint::Ect1,
-        EcnCodepoint::Ce => udp::EcnCodepoint::Ce,
+        EcnCodepoint::Ect0 => moq_sock::udp::EcnCodepoint::Ect0,
+        EcnCodepoint::Ect1 => moq_sock::udp::EcnCodepoint::Ect1,
+        EcnCodepoint::Ce => moq_sock::udp::EcnCodepoint::Ce,
     }
 }
 
