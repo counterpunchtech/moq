@@ -119,7 +119,11 @@ impl Pressure {
 	#[cfg(test)]
 	pub fn held(&self) -> u64 {
 		let state = self.state.lock();
-		state.entries.iter().map(|(_, e)| e.slot.held.load(Ordering::Relaxed)).sum()
+		state
+			.entries
+			.iter()
+			.map(|(_, e)| e.slot.held.load(Ordering::Relaxed))
+			.sum()
 	}
 }
 
@@ -238,5 +242,132 @@ impl<S: crate::transport::poll::Session> Monitor<S> {
 			}
 		}
 		Poll::Pending
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{Path, track::Order};
+
+	fn media(broadcast: &str, track: u8, group: u64) -> Rank {
+		Rank::Media {
+			broadcast: Arc::new(Path::new(broadcast).to_owned()),
+			priority: Priority::new(track, 0, group),
+		}
+	}
+
+	/// Track a receiver holding `held` bytes.
+	fn hold(pressure: &Pressure, rank: Rank, held: u64) -> Ticket {
+		let ticket = pressure.track(rank);
+		ticket.held(held);
+		ticket
+	}
+
+	/// Evict once, returning every ticket chosen so far.
+	fn evict(pressure: &Pressure, tickets: &[&Ticket]) -> Vec<usize> {
+		assert!(pressure.evict());
+		tickets
+			.iter()
+			.enumerate()
+			.filter(|(_, ticket)| ticket.is_evicted())
+			.map(|(i, _)| i)
+			.collect()
+	}
+
+	#[test]
+	fn media_goes_before_unidentified_before_control() {
+		let pressure = Pressure::default();
+		let control = hold(&pressure, Rank::Control, 100);
+		let unidentified = hold(&pressure, Rank::Unidentified, 50);
+		let media = hold(&pressure, media("room", 255, 0), 10);
+		let all = [&control, &unidentified, &media];
+
+		assert_eq!(evict(&pressure, &all), [2]);
+		assert_eq!(evict(&pressure, &all), [1, 2]);
+		assert_eq!(evict(&pressure, &all), [0, 1, 2]);
+		// Everything holding was chosen already.
+		assert!(!pressure.evict());
+	}
+
+	#[test]
+	fn the_least_urgent_stream_of_the_fullest_broadcast_goes() {
+		let pressure = Pressure::default();
+		// `small` holds less in total, so its less urgent track is not compared.
+		let small = hold(&pressure, media("small", 0, 0), 30);
+		let urgent = hold(&pressure, media("big", 200, 0), 20);
+		let lax = hold(&pressure, media("big", 100, 0), 20);
+		let all = [&small, &urgent, &lax];
+
+		assert_eq!(evict(&pressure, &all), [2]);
+		// `big` is left with 20, now less than `small`.
+		assert_eq!(evict(&pressure, &all), [0, 2]);
+	}
+
+	#[test]
+	fn group_order_ranks_within_a_subscription() {
+		let pressure = Pressure::default();
+		let old = hold(&pressure, media("room", 1, 1), 10);
+		let new = hold(&pressure, media("room", 1, 2), 10);
+		// Newest first by default, so the older group is the less useful one.
+		assert_eq!(evict(&pressure, &[&old, &new]), [0]);
+
+		let ascending = |group| Rank::Media {
+			broadcast: Arc::new(Path::new("room").to_owned()),
+			priority: Priority::new(1, 0, group).with_order(Order::Ascending),
+		};
+		let pressure = Pressure::default();
+		let old = hold(&pressure, ascending(1), 10);
+		let new = hold(&pressure, ascending(2), 10);
+		assert_eq!(evict(&pressure, &[&old, &new]), [1]);
+	}
+
+	#[test]
+	fn ties_go_to_the_larger_then_the_newer() {
+		let pressure = Pressure::default();
+		let first = hold(&pressure, Rank::Unidentified, 10);
+		let larger = hold(&pressure, Rank::Unidentified, 20);
+		let newest = hold(&pressure, Rank::Unidentified, 10);
+		let all = [&first, &larger, &newest];
+		assert_eq!(evict(&pressure, &all), [1]);
+		assert_eq!(evict(&pressure, &all), [1, 2]);
+	}
+
+	#[test]
+	fn empty_and_dropped_receivers_are_never_chosen() {
+		let pressure = Pressure::default();
+		let idle = hold(&pressure, media("room", 0, 0), 0);
+		drop(hold(&pressure, media("room", 0, 0), 10));
+		assert!(!pressure.evict());
+		assert!(!idle.is_evicted());
+	}
+
+	#[test]
+	fn rerank_once_identified() {
+		let pressure = Pressure::default();
+		let header = hold(&pressure, Rank::Unidentified, 10);
+		let control = hold(&pressure, Rank::Control, 10);
+		header.rank(media("room", 0, 0));
+		assert_eq!(evict(&pressure, &[&header, &control]), [0]);
+	}
+
+	#[test]
+	fn eviction_wakes_the_reader() {
+		#[derive(Default)]
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let pressure = Pressure::default();
+		let ticket = hold(&pressure, Rank::Unidentified, 10);
+		let count = Arc::new(Count::default());
+		let waker = Waker::from(count.clone());
+		assert!(!ticket.poll_evicted(&Context::from_waker(&waker)));
+		assert!(pressure.evict());
+		assert_eq!(count.0.load(Ordering::Relaxed), 1);
+		assert!(ticket.poll_evicted(&Context::from_waker(&waker)));
 	}
 }

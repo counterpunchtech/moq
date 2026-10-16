@@ -67,16 +67,19 @@ impl Default for Config {
 
 /// Create two connected sessions: streams one opens, the other accepts.
 pub fn pair(config: Config) -> (Session, Session) {
-	let window = || {
+	let fills = [Arc::new(Fills::default()), Arc::new(Fills::default())];
+	let window = |fills: &Arc<Fills>| {
 		kio::Shared::new(Window {
 			limit: config.receive_window,
+			fills: fills.clone(),
 			..Default::default()
 		})
 	};
 	let conn = Arc::new(Conn {
 		close: Default::default(),
 		incoming: [Incoming::default(), Incoming::default()],
-		windows: [window(), window()],
+		windows: [window(&fills[0]), window(&fills[1])],
+		fills,
 		config,
 	});
 
@@ -89,7 +92,6 @@ pub fn pair(config: Config) -> (Session, Session) {
 		accept_bi: Default::default(),
 		datagram: Default::default(),
 		closed: Default::default(),
-		exhausted: Default::default(),
 	};
 
 	(side(0), side(1))
@@ -164,6 +166,8 @@ struct Conn {
 	incoming: [Incoming; 2],
 	/// Each side's receive allowance.
 	windows: [kio::Shared<Window>; 2],
+	/// Each side's fills of that allowance, not yet reported.
+	fills: [Arc<Fills>; 2],
 }
 
 /// One side's receive allowance, shared by every stream it reads.
@@ -177,8 +181,9 @@ struct Window {
 	held: usize,
 	/// Held credit fills the limit.
 	exhausted: bool,
-	/// A fill not yet reported to [`poll::Session::poll_credit_exhausted`].
-	unreported: bool,
+	/// Where a new fill is reported. Its own lock and waker, so the session's monitor
+	/// is not woken by every read and write that changes the window.
+	fills: Arc<Fills>,
 }
 
 impl Window {
@@ -194,9 +199,40 @@ impl Window {
 	fn check(&mut self) {
 		let full = self.limit.is_some_and(|limit| self.held > 0 && self.held >= limit);
 		if full && !self.exhausted {
-			self.unreported = true;
+			self.fills.report();
 		}
 		self.exhausted = full;
+	}
+}
+
+/// Fills of one side's receive allowance, waiting for
+/// [`poll::Session::poll_credit_exhausted`].
+#[derive(Default)]
+struct Fills {
+	unreported: std::sync::atomic::AtomicBool,
+	waker: std::sync::Mutex<Option<std::task::Waker>>,
+}
+
+impl Fills {
+	fn report(&self) {
+		self.unreported.store(true, std::sync::atomic::Ordering::Release);
+		let waker = self.waker.lock().unwrap_or_else(|err| err.into_inner()).take();
+		if let Some(waker) = waker {
+			waker.wake();
+		}
+	}
+
+	fn poll(&self, cx: &Context<'_>) -> Poll<()> {
+		use std::sync::atomic::Ordering;
+		if self.unreported.swap(false, Ordering::AcqRel) {
+			return Poll::Ready(());
+		}
+		*self.waker.lock().unwrap_or_else(|err| err.into_inner()) = Some(cx.waker().clone());
+		// Checked again: a fill between the swap and the store took no waker.
+		match self.unreported.swap(false, Ordering::AcqRel) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
 	}
 }
 
@@ -349,7 +385,6 @@ pub struct Session {
 	accept_bi: kio::Park,
 	datagram: kio::Park,
 	closed: kio::Park,
-	exhausted: kio::Park,
 }
 
 impl Session {
@@ -444,14 +479,7 @@ impl poll::Session for Session {
 	}
 
 	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		let waiter = self.exhausted.hold(cx);
-		let window = &self.side.conn.windows[self.side.local];
-		let mut window = ready!(window.poll(waiter, |window| match window.unreported {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}));
-		window.unreported = false;
-		Poll::Ready(())
+		self.side.conn.fills[self.side.local].poll(cx)
 	}
 
 	fn stats(&self) -> impl super::Stats {
@@ -712,7 +740,6 @@ impl poll::RecvStream for RecvStream {
 		}
 	}
 
-
 	/// Ready once the writer finished or reset the stream, or this side stopped it.
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		if self.stopped {
@@ -749,6 +776,7 @@ mod tests {
 	};
 
 	use super::*;
+	use crate::transport::Credit as _;
 	use poll::{RecvStream as _, SendStream as _, Session as _};
 
 	/// Counts its wakes.
@@ -794,7 +822,6 @@ mod tests {
 		recv.poll_read_chunk(&mut noop(), max)
 			.map_ok(|chunk| chunk.map(|(chunk, _)| chunk))
 	}
-
 
 	fn text(chunk: Poll<Result<Option<Bytes>, Error>>) -> Bytes {
 		ready(chunk).unwrap().unwrap()
@@ -1032,5 +1059,87 @@ mod tests {
 			assert_eq!(ready(b.poll_recv_datagram(&mut noop())).unwrap(), "one");
 		}
 		assert!(b.poll_recv_datagram(&mut noop()).is_pending());
+	}
+
+	fn window(receive_window: usize) -> Config {
+		Config {
+			receive_window: Some(receive_window),
+			..Default::default()
+		}
+	}
+
+	/// Queued bytes and held credit both spend the window; dropping the credit returns it.
+	#[test]
+	fn the_window_bounds_queued_and_held_bytes() {
+		let (mut a, mut b) = pair(window(10));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (mut other, _other_recv) = uni(&mut a, &mut b);
+
+		// A write takes only what fits, and the window is shared by every stream.
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 16]))).unwrap(), 10);
+		assert!(write(&mut other, &Bytes::from_static(b"x")).is_pending());
+
+		// Reading moves bytes from queued to held, which still spends the window.
+		let (chunk, credit) = ready(recv.poll_read_chunk(&mut noop(), 4)).unwrap().unwrap();
+		assert_eq!(chunk.len(), 4);
+		assert!(write(&mut other, &Bytes::from_static(b"x")).is_pending());
+
+		drop(credit);
+		assert_eq!(ready(write(&mut other, &Bytes::from(vec![2u8; 8]))).unwrap(), 4);
+	}
+
+	/// A fill is reported once, and again only after some credit returned and the window
+	/// filled again.
+	#[test]
+	fn exhaustion_is_reported_once_per_fill() {
+		let (mut a, mut b) = pair(window(8));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 8]))).unwrap(), 8);
+		// Unread bytes are still on their way to the application, so nothing is stuck.
+		assert!(b.poll_credit_exhausted(&mut noop()).is_pending());
+
+		let (_, mut held) = ready(recv.poll_read_chunk(&mut noop(), 8)).unwrap().unwrap();
+		ready(b.poll_credit_exhausted(&mut noop()));
+		assert!(b.poll_credit_exhausted(&mut noop()).is_pending());
+
+		// Returning some credit clears the fill; spending it again is a new one.
+		drop(held.split(2));
+		assert!(b.poll_credit_exhausted(&mut noop()).is_pending());
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 8]))).unwrap(), 2);
+		let (_, more) = ready(recv.poll_read_chunk(&mut noop(), 8)).unwrap().unwrap();
+		ready(b.poll_credit_exhausted(&mut noop()));
+
+		// The other direction has its own window.
+		assert!(a.poll_credit_exhausted(&mut noop()).is_pending());
+		drop((held, more));
+	}
+
+	/// The peer waiting on a fill wakes when it happens.
+	#[test]
+	fn exhaustion_wakes_the_monitor() {
+		let (mut a, mut b) = pair(window(4));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+
+		let count = Arc::new(Count::default());
+		let waker = Waker::from(count.clone());
+		assert!(b.poll_credit_exhausted(&mut Context::from_waker(&waker)).is_pending());
+
+		ready(write(&mut send, &Bytes::from(vec![1u8; 4]))).unwrap();
+		let _held = ready(recv.poll_read_chunk(&mut noop(), 4)).unwrap().unwrap();
+		assert!(count.0.load(Ordering::Relaxed) > 0);
+	}
+
+	/// Stopping a stream returns the window its queued bytes took.
+	#[test]
+	fn stop_returns_queued_room() {
+		let (mut a, mut b) = pair(window(8));
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+		let (mut other, _other_recv) = uni(&mut a, &mut b);
+
+		assert_eq!(ready(write(&mut send, &Bytes::from(vec![1u8; 8]))).unwrap(), 8);
+		assert!(write(&mut other, &Bytes::from_static(b"x")).is_pending());
+		recv.stop(1);
+		assert_eq!(ready(write(&mut other, &Bytes::from(vec![2u8; 8]))).unwrap(), 8);
 	}
 }

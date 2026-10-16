@@ -233,6 +233,7 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Clock,
 	session: S,

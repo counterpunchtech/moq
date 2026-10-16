@@ -414,7 +414,6 @@ impl poll::RecvStream for MockRecvStream {
 		Poll::Ready(Ok(Some(chunk)))
 	}
 
-
 	fn stop(&mut self, code: u32) {
 		self.stop_after_latency(code);
 	}
@@ -619,8 +618,8 @@ impl poll::Session for MockSession {
 		self.inner.poll_closed(cx)
 	}
 
-	fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-		std::task::Poll::Pending
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		self.inner.poll_credit_exhausted(cx)
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {
@@ -799,9 +798,13 @@ impl MockSession {
 /// Both sides report the given `protocol` from
 /// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
-pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
+pub fn create_mock_session_pair(
+	protocol: Option<&'static str>,
+	receive_window: Option<usize>,
+) -> (MockSession, MockSession) {
 	let mut config = memory::Config::default();
 	config.protocol = protocol.map(str::to_string);
+	config.receive_window = receive_window;
 	let (client, server) = memory::pair(config);
 
 	let conn = Arc::new(Conn::default());

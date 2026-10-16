@@ -4201,6 +4201,8 @@ impl<S: crate::transport::poll::Session> SubStream<S> {
 	}
 }
 
+// One per subscribed track, and the big variant is the working state.
+#[allow(clippy::large_enum_variant)]
 enum Sub<S: crate::transport::poll::Session> {
 	None,
 	Active(SubStream<S>),

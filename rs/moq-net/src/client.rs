@@ -709,7 +709,11 @@ mod tests {
 		type Error = FakeError;
 		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			_cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
@@ -1075,7 +1079,11 @@ mod tests {
 		type Error = FakeError;
 		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			self.inner.poll_read(cx, dst)
 		}
 

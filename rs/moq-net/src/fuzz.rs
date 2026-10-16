@@ -1193,7 +1193,6 @@ impl crate::transport::poll::RecvStream for Chunks {
 		}
 		let n = self.chunk.min(max).min(self.payload.len());
 		std::task::Poll::Ready(Ok(Some((self.payload.split_to(n), crate::transport::Unheld(n as u64)))))
-
 	}
 
 	fn stop(&mut self, _code: u32) {}

@@ -155,7 +155,12 @@ impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	) -> Poll<Result<Option<(Bytes, moq::Unheld)>, Self::Error>> {
 		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max)
 			.map_err(Error)
-			.map_ok(|chunk| chunk.map(|b| { let n = b.len() as u64; (b, moq::Unheld(n)) }))
+			.map_ok(|chunk| {
+				chunk.map(|b| {
+					let n = b.len() as u64;
+					(b, moq::Unheld(n))
+				})
+			})
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(&mut self.0, code)

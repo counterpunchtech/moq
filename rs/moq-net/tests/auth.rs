@@ -221,7 +221,7 @@ struct Pair {
 
 async fn connect(opts: Options) -> Pair {
 	let version: Version = opts.version.unwrap_or(LITE_07).parse().unwrap();
-	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
+	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()), None);
 
 	let mut client = Client::new().with_versions(version.into());
 	if let Some(publish) = &opts.client_publish {

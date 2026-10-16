@@ -84,6 +84,8 @@ pub struct MockConnectOptions {
 	pub stats: MockStats,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
+	/// Each side's connection receive allowance, unbounded when `None`.
+	pub receive_window: Option<usize>,
 }
 
 impl MockConnectOptions {
@@ -102,6 +104,7 @@ impl MockConnectOptions {
 			cost: None,
 			stats: MockStats::default(),
 			server_polls: None,
+			receive_window: None,
 		}
 	}
 }
@@ -128,7 +131,7 @@ pub struct MockPair {
 /// Panics if the handshake fails on either side (test-only code).
 pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let protocol = opts.version.alpn();
-	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol));
+	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol), opts.receive_window);
 	client_transport.set_latency(opts.latency);
 	client_transport.set_stats(opts.stats);
 	server_transport.set_stats(opts.stats);

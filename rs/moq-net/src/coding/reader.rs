@@ -608,7 +608,11 @@ mod tests {
 		type Error = crate::lite::test_transport::SinkError;
 		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			_cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			let Some(chunk) = self.0.pop_front() else {
 				return Poll::Pending;
 			};
@@ -810,7 +814,11 @@ mod tests {
 		type Error = crate::lite::test_transport::SinkError;
 		type Credit = crate::transport::Unheld;
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			// Start each turn with none of the last turn's registrations left.
 			self.waiter = kio::Waiter::new(self.waiter.waker().clone());
 			while self.payload.poll_read_chunk(&self.waiter).is_ready() {}
@@ -849,5 +857,176 @@ mod tests {
 
 		// Two budgets' worth, and the boundary is owed nothing by the time it arrives.
 		assert_eq!(wakes.count(), 2, "the burst was withheld past its budget");
+	}
+
+	mod credit {
+		use std::task::Waker;
+
+		use super::*;
+		use crate::lite::Version;
+		use crate::transport::{
+			memory,
+			poll::{SendStream as _, Session as _},
+		};
+
+		fn noop() -> Context<'static> {
+			Context::from_waker(Waker::noop())
+		}
+
+		/// A memory stream whose writer stays open, read by a reader the returned pressure
+		/// tracks. `window` bounds what the reader's side accepts.
+		fn tracked(
+			window: Option<usize>,
+		) -> (
+			memory::SendStream,
+			Reader<memory::RecvStream, Version>,
+			Pressure,
+			(memory::Session, memory::Session),
+		) {
+			let (mut a, mut b) = memory::pair(memory::Config {
+				receive_window: window,
+				..Default::default()
+			});
+			let Poll::Ready(Ok(send)) = a.poll_open_uni(&mut noop()) else {
+				panic!("open")
+			};
+			let Poll::Ready(Ok(recv)) = b.poll_accept_uni(&mut noop()) else {
+				panic!("accept")
+			};
+			let pressure = Pressure::default();
+			let mut reader = Reader::new(recv, Version::Lite05);
+			reader.track(&pressure, Rank::Unidentified);
+			(send, reader, pressure, (a, b))
+		}
+
+		fn varint(poll: Poll<Result<u64, Error>>) -> u64 {
+			match poll {
+				Poll::Ready(Ok(value)) => value,
+				other => panic!("{other:?}"),
+			}
+		}
+
+		fn write(send: &mut memory::SendStream, bytes: &'static [u8]) -> Poll<usize> {
+			send.poll_write(&mut noop(), bytes).map(|res| res.expect("write"))
+		}
+
+		/// An incomplete unit keeps its credit, and the bytes read past a unit stay held
+		/// for the next one.
+		#[test]
+		fn credit_returns_per_complete_unit() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+
+			// The first byte of a two-byte varint.
+			assert_eq!(write(&mut send, &[0x40]), Poll::Ready(1));
+			assert!(reader.poll_varint(&mut noop()).is_pending());
+			assert_eq!(pressure.held(), 1);
+
+			// The rest of it, plus a second varint read ahead in the same chunk.
+			assert_eq!(write(&mut send, &[0x05, 0x07]), Poll::Ready(2));
+			assert_eq!(varint(reader.poll_varint(&mut noop())), 5);
+			assert_eq!(pressure.held(), 1);
+			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
+			assert_eq!(pressure.held(), 0);
+		}
+
+		/// A peek holds what it looked at until the unit is consumed.
+		#[test]
+		fn a_peek_keeps_the_credit() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+			assert_eq!(write(&mut send, &[0x07, 0x00, 0x01]), Poll::Ready(3));
+			assert_eq!(varint(reader.poll_varint_peek(&mut noop())), 7);
+			assert_eq!(pressure.held(), 3);
+			let bytes = reader.poll_read_exact(&mut noop(), 2);
+			assert!(matches!(bytes, Poll::Ready(Ok(bytes)) if bytes.as_ref() == [0x07, 0x00]));
+			assert_eq!(pressure.held(), 1);
+		}
+
+		/// Bytes buffered before tracking began already returned their credit.
+		#[test]
+		fn tracking_starts_from_what_is_buffered() {
+			let (mut a, mut b) = memory::pair(memory::Config::default());
+			let Poll::Ready(Ok(mut send)) = a.poll_open_uni(&mut noop()) else {
+				panic!("open")
+			};
+			let Poll::Ready(Ok(recv)) = b.poll_accept_uni(&mut noop()) else {
+				panic!("accept")
+			};
+			let mut reader = Reader::new(recv, Version::Lite05);
+			let _sessions = (a, b);
+
+			assert_eq!(write(&mut send, &[0x07, 0x40]), Poll::Ready(2));
+			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
+			let pressure = Pressure::default();
+			reader.track(&pressure, Rank::Unidentified);
+			assert_eq!(pressure.held(), 0);
+
+			assert_eq!(write(&mut send, &[0x09, 0x01]), Poll::Ready(2));
+			assert_eq!(varint(reader.poll_varint(&mut noop())), 9);
+			assert_eq!(pressure.held(), 1);
+		}
+
+		/// An untracked reader returns credit as it reads, so an incomplete unit never
+		/// stalls the peer.
+		#[test]
+		fn an_untracked_reader_holds_nothing() {
+			let (mut a, mut b) = memory::pair(memory::Config {
+				receive_window: Some(2),
+				..Default::default()
+			});
+			let Poll::Ready(Ok(mut send)) = a.poll_open_uni(&mut noop()) else {
+				panic!("open")
+			};
+			let Poll::Ready(Ok(recv)) = b.poll_accept_uni(&mut noop()) else {
+				panic!("accept")
+			};
+			let mut reader = Reader::new(recv, Version::Lite05);
+			let _sessions = (a, b);
+
+			// An eight-byte varint, two bytes at a time.
+			assert_eq!(write(&mut send, &[0xc0, 0x00]), Poll::Ready(2));
+			assert!(reader.poll_varint(&mut noop()).is_pending());
+			assert_eq!(write(&mut send, &[0x00, 0x00]), Poll::Ready(2));
+		}
+
+		/// A tracked reader's incomplete unit spends the window until it completes.
+		#[test]
+		fn a_tracked_reader_holds_the_window() {
+			let (mut send, mut reader, _pressure, _sessions) = tracked(Some(2));
+			assert_eq!(write(&mut send, &[0xc0, 0x00]), Poll::Ready(2));
+			assert!(reader.poll_varint(&mut noop()).is_pending());
+			assert!(write(&mut send, &[0x00]).is_pending());
+		}
+
+		/// Aborting lets go of the credit, and what was buffered stays readable.
+		#[test]
+		fn abort_returns_the_credit() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+			assert_eq!(write(&mut send, &[0x07, 0x40]), Poll::Ready(2));
+			assert!(reader.poll_has_more(&mut noop()).is_ready());
+			assert_eq!(pressure.held(), 2);
+			reader.abort(&Error::Cancel);
+			assert_eq!(pressure.held(), 0);
+			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
+			assert_eq!(pressure.held(), 0);
+		}
+
+		/// An evicted reader stops its stream and fails its next read.
+		#[test]
+		fn eviction_stops_the_stream() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+			assert_eq!(write(&mut send, &[0x40]), Poll::Ready(1));
+			assert!(reader.poll_varint(&mut noop()).is_pending());
+
+			assert!(pressure.evict());
+			assert!(matches!(
+				reader.poll_varint(&mut noop()),
+				Poll::Ready(Err(Error::Evicted))
+			));
+			assert_eq!(pressure.held(), 0);
+			assert!(matches!(
+				send.poll_write(&mut noop(), &[0x05]),
+				Poll::Ready(Err(memory::Error::Stopped(_)))
+			));
+		}
 	}
 }

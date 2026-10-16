@@ -274,7 +274,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	moq_net_sim::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-04".parse().unwrap();
 
-		let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
+		let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()), None);
 		let server_raw = server_transport.clone();
 
 		let client = moq_net::Client::new().with_versions(version.into());

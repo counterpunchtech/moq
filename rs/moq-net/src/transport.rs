@@ -351,15 +351,21 @@ pub mod poll {
 	/// boxed drivers (`Send` boxes on native): what the moq-transport path
 	/// requires until it too becomes named machines. Implemented automatically.
 	pub trait Boxable:
-		Session<SendStream: MaybeSend, RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>, Error: MaybeSend>
-		+ MaybeSend
+		Session<
+			SendStream: MaybeSend,
+			RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>,
+			Error: MaybeSend,
+		> + MaybeSend
 		+ MaybeSync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<SendStream: MaybeSend, RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>, Error: MaybeSend>
-			+ MaybeSend
+		S: Session<
+				SendStream: MaybeSend,
+				RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>,
+				Error: MaybeSend,
+			> + MaybeSend
 			+ MaybeSync
 	{
 	}
@@ -527,7 +533,11 @@ pub mod poll {
 		/// Returns the credit for the bytes read ([`Credit::len`] counts them), or
 		/// `None` once the peer has finished the stream. An empty `dst` reads nothing
 		/// and returns an empty credit: asking for no bytes is not end of stream.
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>>;
+		fn poll_read(
+			&mut self,
+			cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>>;
 
 		/// Poll to read some data into the provided buffer, advancing it by the bytes
 		/// read, which the returned credit covers.

@@ -13,7 +13,6 @@ use crate::{
 	transport::{Credit, Unheld},
 };
 
-
 use super::{Control, Message, Version, control::RequestPermit};
 
 // === Message Queues ===
@@ -537,7 +536,6 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 				.map_ok(|c| c.map(|(b, c)| (b, AdapterCredit::Virtual(c)))),
 		}
 	}
-
 
 	fn stop(&mut self, code: u32) {
 		match self {
