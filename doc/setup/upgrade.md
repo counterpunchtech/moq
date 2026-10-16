@@ -28,7 +28,7 @@ These land with the next breaking release, not the 2026-09-23 train.
   it. The QUIC stack is now MoQ's own `moq-quic` rather than the `moq-noq`
   crates. In Rust, `moq_tokio::noq::Error` is `moq_tokio::quic::Error`, and
   `moq_tokio::Error::Noq` is `moq_tokio::Error::Quic`. A qlog directory gets one
-  file per endpoint instead of one per connection; on io_uring workers, one per
+  file per endpoint instead of one per connection; on io\_uring workers, one per
   endpoint and one per dial.
 - **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
   connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
