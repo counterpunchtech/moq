@@ -520,7 +520,10 @@ async fn a_reset_group_that_keeps_its_header_ends_without_the_grace() {
 		track.finish_at(moq_net::track::Position::group(2)).unwrap();
 		drop(track);
 		moq_net_sim::sleep(max_delay / 10).await;
-		assert!(!reader.is_finished(), "{reliable_reset}: ended before the streams arrived");
+		assert!(
+			!reader.is_finished(),
+			"{reliable_reset}: ended before the streams arrived"
+		);
 
 		let released = moq_net_sim::now();
 		pair.server_transport.release_unis();

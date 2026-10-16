@@ -3697,7 +3697,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		}
 	}
 
-
 	/// Serve the group, aborting the stream with the real reason (Old, Lagged,
 	/// Evicted, ...) on failure so the subscriber can tell a truncated group from
 	/// a routine cancel. Without this the Writer's Drop fallback would report
