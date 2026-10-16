@@ -80,6 +80,22 @@ struct Slot {
 	waker: Mutex<Option<Waker>>,
 }
 
+impl Slot {
+	fn poll_evicted(&self, cx: &Context<'_>) -> bool {
+		if self.evicted.load(Ordering::Acquire) {
+			return true;
+		}
+		let mut waker = self.waker.lock().unwrap_or_else(|err| err.into_inner());
+		match waker.as_mut() {
+			Some(waker) => waker.clone_from(cx.waker()),
+			None => *waker = Some(cx.waker().clone()),
+		}
+		drop(waker);
+		// Checked again: an eviction between the load and the store took no waker.
+		self.evicted.load(Ordering::Acquire)
+	}
+}
+
 impl Pressure {
 	/// Track a new receiver at `rank`.
 	pub fn track(&self, rank: Rank) -> Ticket {
@@ -210,17 +226,44 @@ impl Ticket {
 
 	/// Whether the monitor chose this stream, registering `cx` to hear when it does.
 	pub fn poll_evicted(&self, cx: &Context<'_>) -> bool {
-		if self.slot.evicted.load(Ordering::Acquire) {
-			return true;
-		}
-		let mut waker = self.slot.waker.lock().unwrap_or_else(|err| err.into_inner());
-		match waker.as_mut() {
-			Some(waker) => waker.clone_from(cx.waker()),
-			None => *waker = Some(cx.waker().clone()),
-		}
-		drop(waker);
-		// Checked again: an eviction between the load and the store took no waker.
-		self.slot.evicted.load(Ordering::Acquire)
+		self.slot.poll_evicted(cx)
+	}
+
+	/// Hear this stream's eviction apart from the reader holding the ticket.
+	pub fn eviction(&self) -> Eviction {
+		Eviction(Some(self.slot.clone()))
+	}
+}
+
+/// Hears that the monitor chose a stream without borrowing its reader, so a handler that
+/// lent the reader to a wait parked elsewhere still ends. Empty for an untracked reader.
+pub(crate) struct Eviction(Option<Arc<Slot>>);
+
+impl Eviction {
+	/// For an untracked reader, which is never evicted.
+	pub fn none() -> Self {
+		Self(None)
+	}
+
+	/// Run `serve` to its end, or fail it with [`Error::Evicted`](crate::Error::Evicted)
+	/// once the monitor chooses the stream, whatever `serve` is parked on.
+	pub async fn guard<T>(&self, serve: impl Future<Output = Result<T, crate::Error>>) -> Result<T, crate::Error> {
+		let Some(slot) = &self.0 else {
+			return serve.await;
+		};
+		let mut serve = std::pin::pin!(serve);
+		std::future::poll_fn(|cx| {
+			if let Poll::Ready(res) = serve.as_mut().poll(cx) {
+				return Poll::Ready(res);
+			}
+			// After `serve`, whose reads register on the same slot, so the eviction wakes
+			// this task at the top rather than a wait that will not look.
+			match slot.poll_evicted(cx) {
+				true => Poll::Ready(Err(crate::Error::Evicted)),
+				false => Poll::Pending,
+			}
+		})
+		.await
 	}
 }
 
