@@ -39,8 +39,9 @@ pub(crate) enum Rank {
 	Unidentified,
 	/// A media stream of one broadcast, ranked within it.
 	Media {
-		/// The broadcast, the domain inside which priorities compare.
-		broadcast: PathOwned,
+		/// The broadcast, the domain inside which priorities compare. Shared, since every
+		/// group stream of a subscription names the same one.
+		broadcast: Arc<PathOwned>,
 		/// The stream's rank within its broadcast.
 		priority: Priority,
 	},
@@ -132,7 +133,7 @@ fn victim(entries: &Slab<Entry>) -> Option<usize> {
 	};
 
 	// Media: the broadcast holding the most, then its least useful stream.
-	let mut domains: Vec<(&PathOwned, u64)> = Vec::new();
+	let mut domains: Vec<(&Arc<PathOwned>, u64)> = Vec::new();
 	for (_, entry) in holding() {
 		if let Rank::Media { broadcast, .. } = &entry.rank {
 			match domains.iter_mut().find(|(path, _)| *path == broadcast) {
@@ -185,6 +186,11 @@ impl Ticket {
 	/// Record how many bytes of credit the reader holds.
 	pub fn held(&self, bytes: u64) {
 		self.slot.held.store(bytes, Ordering::Relaxed);
+	}
+
+	/// Whether the monitor chose this stream, without registering to hear when it does.
+	pub fn is_evicted(&self) -> bool {
+		self.slot.evicted.load(Ordering::Acquire)
 	}
 
 	/// Whether the monitor chose this stream, registering `cx` to hear when it does.

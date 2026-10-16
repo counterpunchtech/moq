@@ -9,7 +9,9 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
-	origin, track,
+	origin,
+	pressure::{Pressure, Rank},
+	track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
@@ -509,6 +511,11 @@ struct TrackState {
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
+
+	// The priority and group order this subscription was sent with, which rank its data
+	// streams when held receive credit fills.
+	priority: u8,
+	order: track::Order,
 }
 
 impl TrackState {
@@ -538,6 +545,18 @@ impl TrackState {
 			joining,
 			resume: None,
 			tail: Default::default(),
+			priority: 0,
+			order: Default::default(),
+		}
+	}
+
+	/// The rank of this subscription's data stream for `group`, starting at `start`.
+	fn rank(&self, subscribe: RequestId, group: u64, start: u64) -> Rank {
+		Rank::Media {
+			broadcast: std::sync::Arc::new(self.broadcast.clone()),
+			priority: crate::priority::Priority::new(self.priority, subscribe.0, group)
+				.with_order(self.order)
+				.with_start(start),
 		}
 	}
 }
@@ -683,6 +702,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
+	// Every stream this half reads, cancelled by rank when held receive credit fills.
+	pub(super) pressure: Pressure,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -767,8 +788,16 @@ where
 			auth: crate::auth::Handle::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
+			pressure: Default::default(),
 			validity: Default::default(),
 		}
+	}
+
+	/// Open a request stream, its reads tracked as control.
+	async fn open_stream(&self) -> Result<Stream<S, Version>, Error> {
+		let mut stream = Stream::open(&mut self.session.clone(), self.version).await?;
+		stream.reader.track(&self.pressure, Rank::Control);
+		Ok(stream)
 	}
 
 	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
@@ -777,6 +806,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Track the streams this half reads with the session's `pressure`. Set before the
+	/// halves that clone this subscriber start.
+	pub fn with_pressure(mut self, pressure: Pressure) -> Self {
+		self.pressure = pressure;
 		self
 	}
 
@@ -2506,7 +2542,7 @@ where
 			}
 		};
 
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
@@ -2522,6 +2558,11 @@ where
 			true => Fill::Requested,
 			false => Fill::Done,
 		});
+		// The aggregate is read now: a subscriber can join while the request ID and stream
+		// were awaited, and nothing updates the priority or order after.
+		let aggregate = target.subscription();
+		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		{
 			let mut state = self.state.lock();
 			state.subscribes.insert(
@@ -2533,17 +2574,14 @@ where
 						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
+					priority,
+					order,
 					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill.clone(), joining)
 				},
 			);
 		}
 
-		// Write Subscribe message. The aggregate is read now: a subscriber can join while
-		// the request ID and stream were awaited, and nothing updates the priority or
-		// order after.
-		let aggregate = target.subscription();
-		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
-		let order = aggregate.map(|s| s.order).unwrap_or_default();
+		// Write Subscribe message.
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
@@ -3157,7 +3195,7 @@ where
 		let work = async move {
 			// No ID is spent while opening a stream, so dropping a blocked open
 			// cannot leave a gap in the peer's sequential request IDs.
-			let mut stream = match Stream::open(&mut this.session.clone(), this.version).await {
+			let mut stream = match this.open_stream().await {
 				Ok(stream) => stream,
 				Err(err) => {
 					tracing::debug!(%err, "failed to open joining FETCH stream");
@@ -3360,7 +3398,7 @@ where
 				return None;
 			}
 		};
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(stream) => stream,
 			Err(err) => {
 				request.reject(err);
@@ -3488,7 +3526,17 @@ where
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
-		let request_id = match resolve_track_alias(&self.runtime, aliases, group.track_alias).await {
+		let resolved = {
+			let mut resolve = std::pin::pin!(resolve_track_alias(&self.runtime, aliases, group.track_alias));
+			// Parked off the stream, so an eviction would otherwise wait out the alias.
+			std::future::poll_fn(|cx| match stream.poll_evicted(cx) {
+				true => Poll::Ready(Err(Error::Evicted)),
+				false => resolve.as_mut().poll(cx),
+			})
+			.await
+		};
+		let request_id = match resolved {
+			Err(Error::Evicted) => return Err(Error::Evicted),
 			Ok(request_id) => request_id,
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			Err(err @ Error::Cancel) => {
@@ -3510,6 +3558,7 @@ where
 		let (mut track, timescale, fill, resume, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
+			stream.rank(track.rank(request_id, group.group_id, 0));
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
@@ -4029,6 +4078,9 @@ where
 			let joined = state.fetches.get(&header.request_id).copied();
 			let subscribe_id = joined.unwrap_or(header.request_id);
 			let track = state.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
+			// The head of the group the subscription joined, as urgent as its live edge.
+			let group = track.largest.map_or(0, |largest| largest.group);
+			stream.rank(track.rank(subscribe_id, group, 0));
 			// A fill is one of the subscription's own data streams, so PUBLISH_DONE counts
 			// it. A joining FETCH is a request of its own.
 			let counted = joined
@@ -4048,6 +4100,10 @@ where
 		// be reordered ahead of it. Taking the fill in the same step is what refuses a second
 		// stream for a request that asked for one fill.
 		let timescale = kio::wait(|waiter| {
+			// Parked off the stream, so an eviction would otherwise wait for SUBSCRIBE_OK.
+			if stream.poll_evicted(&waiter.context()) {
+				return Poll::Ready(Err(Error::Evicted));
+			}
 			let accepted = fill.poll(waiter, |fill| match **fill {
 				Fill::Requested => Poll::Pending,
 				_ => Poll::Ready(()),
@@ -4402,7 +4458,7 @@ where
 		let slot = kio::Producer::new(GroupFetch::Pending);
 		let registered = GroupFetchEntry::new(&self.state, fetch_id, slot.clone());
 
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(stream) => stream,
 			Err(err) => return request.reject(err),
 		};

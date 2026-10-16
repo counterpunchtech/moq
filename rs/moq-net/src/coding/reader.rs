@@ -10,7 +10,6 @@ use crate::{
 	Error, StreamError,
 	coding::*,
 	pressure::{Pressure, Rank, Ticket},
-
 	transport::Credit,
 };
 
@@ -116,18 +115,29 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		self.release(used as u64);
 	}
 
-	/// Whether this stream was chosen to free the receive allowance. The first time,
-	/// stop it and let go of everything it holds.
-	fn poll_evicted(&mut self, cx: &Context<'_>) -> bool {
+	/// Whether this stream was chosen to free the receive allowance, registering `cx` to
+	/// hear when it is. A caller that parks the reader on something else races this, since
+	/// only a pending read registers on its own.
+	pub(crate) fn poll_evicted(&mut self, cx: &Context<'_>) -> bool {
+		self.evicted(Some(cx))
+	}
+
+	/// Whether this stream was evicted, registering `cx` when given. The first time, stop
+	/// it and let go of everything it holds.
+	fn evicted(&mut self, cx: Option<&Context<'_>>) -> bool {
 		if self.evicted {
 			return true;
 		}
-		if !self.ticket.as_ref().is_some_and(|ticket| ticket.poll_evicted(cx)) {
-			return false;
+		let evicted = match (&self.ticket, cx) {
+			(None, _) => false,
+			(Some(ticket), Some(cx)) => ticket.poll_evicted(cx),
+			(Some(ticket), None) => ticket.is_evicted(),
+		};
+		if evicted {
+			self.evicted = true;
+			self.abort(&Error::Evicted);
 		}
-		self.evicted = true;
-		self.abort(&Error::Evicted);
-		true
+		evicted
 	}
 
 	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
@@ -298,11 +308,15 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			self.unit += n as u64;
 			return Poll::Ready(Ok(Some(self.buffer.split_to(n).freeze())));
 		}
-		if self.poll_evicted(cx) {
+		if self.evicted(None) {
 			return Poll::Ready(Err(Error::Evicted));
 		}
-		let Some((chunk, credit)) = ready!(self.stream.poll_read_chunk(cx, max)).map_err(|err| self.version.transport_error(err))?
-		else {
+		let read = match self.stream.poll_read_chunk(cx, max) {
+			Poll::Pending if self.evicted(Some(cx)) => return Poll::Ready(Err(Error::Evicted)),
+			Poll::Pending => return Poll::Pending,
+			Poll::Ready(read) => read,
+		};
+		let Some((chunk, credit)) = read.map_err(|err| self.version.transport_error(err))? else {
 			return Poll::Ready(Ok(None));
 		};
 		self.unit += chunk.len() as u64;
@@ -421,10 +435,15 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll for more data from the stream. `true` if data was read, `false` if the
 	/// stream finished.
 	fn poll_read_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
-		if self.poll_evicted(cx) {
+		if self.evicted(None) {
 			return Poll::Ready(Err(Error::Evicted));
 		}
-		match ready!(self.stream.poll_read_buf(cx, &mut self.buffer)) {
+		let read = match self.stream.poll_read_buf(cx, &mut self.buffer) {
+			Poll::Pending if self.evicted(Some(cx)) => return Poll::Ready(Err(Error::Evicted)),
+			Poll::Pending => return Poll::Pending,
+			Poll::Ready(read) => read,
+		};
+		match read {
 			Ok(Some(credit)) => {
 				self.take(credit);
 				Poll::Ready(Ok(true))

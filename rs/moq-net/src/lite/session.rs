@@ -3,6 +3,7 @@ use crate::{
 	Error, Hop, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
+	pressure::{Monitor, Pressure, Rank},
 };
 
 use std::task::{Context, Poll, ready};
@@ -201,7 +202,7 @@ where
 		runtime,
 		client,
 		session,
-		setup_stream,
+		mut setup_stream,
 		publish,
 		subscribe,
 		peer_hop,
@@ -292,8 +293,15 @@ where
 		false => None,
 	};
 
+	// Every stream the session reads holds its credit until a whole message arrives, and
+	// the monitor cancels one by rank whenever that fills the receive allowance.
+	let pressure = Pressure::default();
+	if let Some(stream) = &mut setup_stream {
+		stream.reader.track(&pressure, Rank::Control);
+	}
+
 	let estimate = kio::Producer::default();
-	let publisher = Publisher::new(PublisherConfig {
+	let mut publisher = Publisher::new(PublisherConfig {
 		estimate: estimate.weak(),
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -324,6 +332,8 @@ where
 		auth: auth.clone(),
 	});
 	subscriber.announces = announces;
+	subscriber.pressure = pressure.clone();
+	publisher.pressure = pressure.clone();
 
 	let driver = Driver {
 		auth: Present {
@@ -336,7 +346,9 @@ where
 			violation: Default::default(),
 			started: false,
 			_setup: setup_token,
+			pressure: pressure.clone(),
 		},
+		monitor: Monitor::new(session.clone(), pressure),
 		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
@@ -362,6 +374,8 @@ where
 pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present<S>,
+	/// Cancels a stream whenever held receive credit fills the allowance.
+	monitor: Monitor<S>,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
@@ -427,6 +441,9 @@ where
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 
+		// Never resolves; it only cancels streams, whose own handlers report it.
+		let _ = self.monitor.poll(&mut cx);
+
 		// Presenting tokens ends the session only when the peer breaks the protocol.
 		if let Poll::Ready(err) = self.auth.poll(waiter) {
 			return Poll::Ready(Err(err));
@@ -480,6 +497,8 @@ struct Present<S: crate::transport::poll::Session> {
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
 	_setup: Option<crate::auth::Token>,
+	/// Tracks each AUTH stream's reads.
+	pressure: Pressure,
 }
 
 impl<S: crate::transport::poll::Session> Present<S> {
@@ -499,6 +518,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 				handle: self.handle.clone(),
 				going_away: self.going_away.clone(),
 				violation: self.violation.clone(),
+				pressure: self.pressure.clone(),
 				id,
 				state: PresentState::Open { token },
 			});
@@ -521,6 +541,7 @@ struct PresentToken<S: crate::transport::poll::Session> {
 	handle: crate::auth::Handle,
 	going_away: crate::goaway::GoingAway,
 	violation: kio::Shared<Option<Error>>,
+	pressure: Pressure,
 	id: u64,
 	state: PresentState<S>,
 }
@@ -579,6 +600,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
+					stream.reader.track(&self.pressure, Rank::Control);
 					let res = stream
 						.writer
 						.buffer(&super::ControlType::Auth)

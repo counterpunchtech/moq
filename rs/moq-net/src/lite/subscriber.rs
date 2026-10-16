@@ -10,6 +10,7 @@ use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
 	coding::{Reader, Stream},
 	lite,
+	pressure::{Pressure, Rank},
 	track::{Position, Subscription},
 };
 
@@ -88,6 +89,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	frames: frame::Budget,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
+	/// Every stream this half reads, cancelled by rank when held receive credit fills.
+	pub(super) pressure: Pressure,
 }
 
 #[derive(Clone)]
@@ -98,6 +101,27 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
+	/// Ranks the subscription's group streams when held receive credit fills.
+	rank: GroupRank,
+}
+
+/// What ranks a subscription's group streams for receive-side recovery.
+#[derive(Clone, Default)]
+struct GroupRank {
+	broadcast: Arc<PathOwned>,
+	priority: u8,
+	order: track::Order,
+}
+
+impl GroupRank {
+	fn of(&self, subscribe: u64, group: &lite::Group) -> Rank {
+		Rank::Media {
+			broadcast: self.broadcast.clone(),
+			priority: crate::priority::Priority::new(self.priority, subscribe, group.sequence)
+				.with_order(self.order)
+				.with_start(group.frame_start),
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> Subscriber<S> {
@@ -125,6 +149,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			auth: config.auth,
 			frames: Default::default(),
 			announces: Default::default(),
+			pressure: Default::default(),
 		}
 	}
 
@@ -681,7 +706,8 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 	fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>) -> Self {
 		let accept = subscriber.session.clone();
 		let mut children = kio::Tasks::new();
-		for reader in early {
+		for mut reader in early {
+			reader.track(&subscriber.pressure, Rank::Unidentified);
 			children.push(UniServe {
 				subscriber: subscriber.clone(),
 				state: UniState::Start { reader },
@@ -701,11 +727,11 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 		loop {
 			match self.accept.poll_accept_uni(&mut cx) {
 				Poll::Ready(Ok(stream)) => {
+					let mut reader = Reader::new(stream, self.subscriber.version);
+					reader.track(&self.subscriber.pressure, Rank::Unidentified);
 					self.children.push(UniServe {
 						subscriber: self.subscriber.clone(),
-						state: UniState::Start {
-							reader: Reader::new(stream, self.subscriber.version),
-						},
+						state: UniState::Start { reader },
 					});
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(crate::lite::error::from_transport(err))),
@@ -786,7 +812,10 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					};
 					self.state = match kind {
 						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
-						lite::DataType::Setup => UniState::Setup { reader },
+						lite::DataType::Setup => {
+							reader.rank(Rank::Control);
+							UniState::Setup { reader }
+						}
 					};
 				}
 				UniState::Setup { reader } => {
@@ -870,6 +899,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+						self.reader.rank(entry.rank.of(hdr.subscribe, &hdr));
 
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
@@ -1254,6 +1284,7 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 						return Poll::Ready(Ok(()));
 					}
 					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
+					stream.reader.track(&self.subscriber.pressure, Rank::Control);
 					stream.writer.buffer(&lite::ControlType::Probe)?;
 					self.state = ProbeState::Send { stream };
 				}
@@ -1348,6 +1379,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						self.subscriber.version,
 						&mut cx
 					))?;
+					stream.reader.track(&self.subscriber.pressure, Rank::Control);
 
 					stream.writer.buffer(&lite::ControlType::Announce)?;
 					// Lite04/05: ask the peer to filter out announces that already passed
@@ -2142,6 +2174,7 @@ mod tests {
 						producer: track,
 						timescale: Some(Timescale::MILLI),
 						tail: Default::default(),
+						rank: Default::default(),
 					},
 				);
 				let mut accept = UniAccept::new(subscriber, early);
@@ -2198,6 +2231,7 @@ mod tests {
 					producer: track.clone(),
 					timescale: Some(Timescale::MILLI),
 					tail: Default::default(),
+					rank: Default::default(),
 				},
 			);
 
@@ -2266,6 +2300,7 @@ mod tests {
 				producer: track.clone(),
 				timescale: Some(Timescale::MILLI),
 				tail: tail.clone(),
+				rank: Default::default(),
 			},
 		);
 
@@ -2484,6 +2519,7 @@ mod tests {
 				producer,
 				timescale: Some(Timescale::MILLI),
 				tail: Default::default(),
+				rank: Default::default(),
 			},
 		);
 
@@ -4598,6 +4634,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
 						active.order = subscription.order;
+						// Streams already open keep the rank they were read at.
+						if let Some(entry) = self.subscriber.subscribes.lock().get_mut(&active.id) {
+							entry.rank.priority = subscription.priority;
+							entry.rank.order = subscription.order;
+						}
 						active.max_delay = subscription.max_delay;
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
@@ -4684,6 +4725,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				producer: producer.clone(),
 				timescale,
 				tail: tail.clone(),
+				rank: GroupRank {
+					broadcast: Arc::new(self.path.clone()),
+					priority: subscription.priority,
+					order: subscription.order,
+				},
 			},
 		);
 
@@ -4826,6 +4872,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						self.serve.subscriber.version,
 						&mut cx
 					))?;
+					stream.reader.track(&self.serve.subscriber.pressure, Rank::Control);
 
 					let bounds = WireBounds::new(self.subscription.start, self.subscription.end);
 					let msg = lite::Subscribe {
@@ -5124,6 +5171,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 			match &mut self.state {
 				TrackInfoState::Open => {
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
+					stream.reader.track(&serve.subscriber.pressure, Rank::Control);
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
 						epoch: serve.epoch.clone(),
@@ -5844,6 +5892,14 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 
 					let request = request.take().expect("request pending");
+					// The response is the group's frames, ranked like a group stream of the track.
+					stream.reader.track(
+						&self.serve.subscriber.pressure,
+						Rank::Media {
+							broadcast: Arc::new(self.serve.path.clone()),
+							priority: crate::priority::Priority::new(request.priority(), u64::MAX, self.group),
+						},
+					);
 
 					// A peer that predates lite-06 addresses whole groups only, so ask for
 					// the whole group and number the response from 0. The wider group still
