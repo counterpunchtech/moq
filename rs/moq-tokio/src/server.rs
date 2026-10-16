@@ -2233,6 +2233,7 @@ mod tests {
 	#[cfg(feature = "websocket")]
 	crate::transport::held::unheld!(Scripted, ScriptedRecv);
 
+	#[cfg(feature = "websocket")]
 	impl web_transport_trait::Session for Scripted {
 		type SendStream = ScriptedSend;
 		type RecvStream = ScriptedRecv;
