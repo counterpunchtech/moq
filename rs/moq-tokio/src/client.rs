@@ -787,6 +787,7 @@ mod tests {
 	use super::*;
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
