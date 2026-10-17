@@ -88,9 +88,10 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Return the credit for `bytes` that completed a unit.
-	fn release(&mut self, bytes: u64) {
-		Buffer::of(&mut self.buffer, &self.hold).release(&mut self.free, bytes);
+	/// Return the credit for `bytes` of the unit, which completed or was given up.
+	fn release_unit(&mut self, bytes: u64) {
+		Buffer::of(&mut self.buffer, &self.hold).release_unit(&mut self.free, bytes);
+		self.unit -= bytes;
 	}
 
 	/// Whether this stream was evicted, registering `cx` to hear when it is. The eviction
@@ -264,19 +265,20 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	pub fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		let chunk = ready!(self.poll_unit_chunk(cx, max))?;
 		let size = chunk.as_ref().map_or(0, |chunk| chunk.len() as u64);
-		self.release(size);
-		self.unit -= size;
+		self.release_unit(size);
 		Poll::Ready(Ok(chunk))
 	}
 
-	/// The next chunk of the current unit, draining the buffer first. Its credit stays
-	/// held in `unit` until the caller releases it.
+	/// The next chunk of the current unit, draining the buffer first. Its credit moves to
+	/// the unit, held until the caller releases it: an eviction frees only the buffer.
 	fn poll_unit_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
 		if !buffer.is_empty() {
 			let n = cmp::min(buffer.len(), max);
+			let chunk = buffer.split_to(n).freeze();
+			buffer.advance_unit(self.free, self.unit, n as u64);
 			self.unit += n as u64;
-			return Poll::Ready(Ok(Some(buffer.split_to(n).freeze())));
+			return Poll::Ready(Ok(Some(chunk)));
 		}
 		if self.evicted || buffer.is_evicted() {
 			self.evicted = true;
@@ -296,7 +298,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			return Poll::Ready(Ok(None));
 		};
 		self.unit += chunk.len() as u64;
-		buffer.take(credit);
+		buffer.take_unit(credit);
 		Poll::Ready(Ok(Some(chunk)))
 	}
 
@@ -350,9 +352,8 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			}
 		};
 
-		// The frame is handed off or discarded either way.
-		let unit = std::mem::take(&mut self.unit);
-		self.release(unit);
+		// The frame is handed off, or the caller discards it on the error.
+		self.release_unit(self.unit);
 		Poll::Ready(result)
 	}
 
@@ -496,20 +497,46 @@ impl<'a, S: crate::transport::poll::RecvStream> Buffer<'a, S> {
 		matches!(self, Self::Held(held) if held.is_evicted())
 	}
 
-	/// Keep the credit for bytes just read, if tracked; otherwise it returns now.
+	/// Keep the credit for bytes just read into the buffer, if tracked; otherwise it
+	/// returns now.
 	fn take(&mut self, credit: S::Credit) {
 		if let Self::Held(held) = self {
 			held.take(credit);
 		}
 	}
 
-	/// Return the credit for `bytes` that completed a unit, less the `free` bytes read
-	/// before tracking began.
+	/// Keep the credit for bytes just read straight into the unit, if tracked.
+	fn take_unit(&mut self, credit: S::Credit) {
+		if let Self::Held(held) = self {
+			held.take_unit(credit);
+		}
+	}
+
+	/// Return the credit for `bytes` consumed from the buffer as a complete unit, less the
+	/// leading `free` bytes, which hold none.
 	fn release(&mut self, free: &mut u64, bytes: u64) {
 		let skip = (*free).min(bytes);
 		*free -= skip;
 		if let Self::Held(held) = self {
 			held.release(bytes - skip);
+		}
+	}
+
+	/// Move the credit for `bytes` taken from the buffer into a `unit` already that long.
+	/// The leading `free` bytes hold no credit, and the unit's come first.
+	fn advance_unit(&mut self, free: u64, unit: u64, bytes: u64) {
+		let skip = free.saturating_sub(unit).min(bytes);
+		if let Self::Held(held) = self {
+			held.advance_unit(bytes - skip);
+		}
+	}
+
+	/// Return the credit for `bytes` of the unit, less the leading `free` bytes.
+	fn release_unit(&mut self, free: &mut u64, bytes: u64) {
+		let skip = (*free).min(bytes);
+		*free -= skip;
+		if let Self::Held(held) = self {
+			held.release_unit(bytes - skip);
 		}
 	}
 }
@@ -1163,6 +1190,35 @@ mod tests {
 				send.poll_write(&mut noop(), &[0x05]),
 				Poll::Ready(Err(memory::Error::Stopped(_)))
 			));
+		}
+
+		/// An evicted reader mid-frame keeps the credit for the payload already in its
+		/// partial frame, which is still allocated, until it gives the frame up.
+		#[test]
+		fn a_partial_frame_keeps_its_credit_through_eviction() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+			let (mut frame, _payload, _waiter, _wakes) = parked_frame(9);
+
+			// Six bytes read ahead into the buffer, then moved into the frame, and two more
+			// read straight into it.
+			assert_eq!(write(&mut send, b"abcdef"), Poll::Ready(6));
+			assert!(reader.poll_has_more(&mut noop()).is_ready());
+			assert!(reader.poll_read_frame(&mut noop(), &mut frame).is_pending());
+			assert_eq!(write(&mut send, b"gh"), Poll::Ready(2));
+			assert!(reader.poll_read_frame(&mut noop(), &mut frame).is_pending());
+			assert_eq!(pressure.held(), 8);
+
+			assert!(pressure.evict());
+			assert_eq!(
+				pressure.held(),
+				8,
+				"the partial frame's credit returned while it was allocated"
+			);
+			assert!(matches!(
+				reader.poll_read_frame(&mut noop(), &mut frame),
+				Poll::Ready(Err(Error::Evicted))
+			));
+			assert_eq!(pressure.held(), 0);
 		}
 
 		/// Parked readers filled and evicted in turn never buffer more than the window. An

@@ -79,12 +79,36 @@ pub(crate) struct Hold<R: RecvStream> {
 	code: u32,
 }
 
-/// A tracked reader's buffered bytes and the credit it holds, under one lock so an
-/// eviction frees both: credit returned for bytes still allocated would let a peer refill
-/// the window while parked readers keep the memory.
+/// A tracked reader's bytes and their credit, under one lock. Credit travels with the
+/// bytes it covers and returns only once they are freed: credit returned for bytes still
+/// allocated would let a peer refill the window while readers keep the memory.
 struct Slot<C> {
 	buffer: BytesMut,
+	/// The credit for `buffer`, which an eviction frees with it.
 	credit: Option<C>,
+	/// The credit for bytes moved out of `buffer` into the unit being assembled, which the
+	/// reader returns once it completes or gives the unit up: an eviction cannot free a
+	/// partial frame it does not own.
+	unit: Option<C>,
+}
+
+impl<C: Credit> Slot<C> {
+	fn held(&self) -> u64 {
+		self.credit.as_ref().map_or(0, C::len) + self.unit.as_ref().map_or(0, C::len)
+	}
+}
+
+/// Add `credit` to `into`.
+fn merge<C: Credit>(into: &mut Option<C>, credit: C) {
+	match into {
+		Some(held) => held.merge(credit),
+		None => *into = Some(credit),
+	}
+}
+
+/// Split the credit for `bytes` off `from`, if it holds any.
+fn split<C: Credit>(from: &mut Option<C>, bytes: u64) -> Option<C> {
+	from.as_mut().map(|credit| credit.split(bytes))
 }
 
 /// A [`Hold`]'s slot, locked by its reader.
@@ -111,32 +135,46 @@ impl<R: RecvStream> Locked<'_, R> {
 		self.hold.is_evicted()
 	}
 
-	/// Keep the credit for bytes just read, or return it at once if already evicted.
+	/// Keep the credit for bytes just read into the buffer, or return it at once if
+	/// already evicted.
 	pub fn take(&mut self, credit: R::Credit) {
 		if self.hold.is_evicted() {
 			return drop(credit);
 		}
-		let len = match self.slot.credit.as_mut() {
-			Some(held) => {
-				held.merge(credit);
-				held.len()
-			}
-			None => {
-				let len = credit.len();
-				self.slot.credit = Some(credit);
-				len
-			}
-		};
-		self.hold.held.store(len, Ordering::Relaxed);
+		merge(&mut self.slot.credit, credit);
+		self.store();
 	}
 
-	/// Return the credit for `bytes` that completed a unit.
+	/// Keep the credit for bytes just read straight into the unit.
+	pub fn take_unit(&mut self, credit: R::Credit) {
+		if self.hold.is_evicted() {
+			return drop(credit);
+		}
+		merge(&mut self.slot.unit, credit);
+		self.store();
+	}
+
+	/// Return the credit for `bytes` consumed from the buffer as a complete unit.
 	pub fn release(&mut self, bytes: u64) {
-		let Some(credit) = self.slot.credit.as_mut() else {
-			return;
-		};
-		drop(credit.split(bytes));
-		self.hold.held.store(credit.len(), Ordering::Relaxed);
+		drop(split(&mut self.slot.credit, bytes));
+		self.store();
+	}
+
+	/// Move the credit for `bytes` taken from the buffer into the unit.
+	pub fn advance_unit(&mut self, bytes: u64) {
+		if let Some(credit) = split(&mut self.slot.credit, bytes) {
+			merge(&mut self.slot.unit, credit);
+		}
+	}
+
+	/// Return the credit for `bytes` of the unit, which completed or was given up.
+	pub fn release_unit(&mut self, bytes: u64) {
+		drop(split(&mut self.slot.unit, bytes));
+		self.store();
+	}
+
+	fn store(&self) {
+		self.hold.held.store(self.slot.held(), Ordering::Relaxed);
 	}
 }
 
@@ -149,11 +187,12 @@ impl<R: RecvStream> Hold<R> {
 		}
 	}
 
-	/// Drop the buffer and return the credit: the reader gave up on the stream.
+	/// Drop the buffer and return all the credit: the reader gave up on the stream, and its
+	/// caller gives up any partial unit with it.
 	pub fn clear(&self) {
 		let mut slot = lock(&self.slot);
 		let buffer = std::mem::take(&mut slot.buffer);
-		let credit = slot.credit.take();
+		let credit = (slot.credit.take(), slot.unit.take());
 		self.held.store(0, Ordering::Relaxed);
 		drop(slot);
 		// Freed before the credit returns, as on eviction.
@@ -225,9 +264,12 @@ impl<R: RecvStream> Holder for Hold<R> {
 		self.evicted.store(true, Ordering::Release);
 		let buffer = std::mem::take(&mut slot.buffer);
 		let credit = slot.credit.take();
+		// A partial unit's credit stays counted until the reader, woken below, gives up the
+		// frame that holds its bytes.
+		self.held.store(slot.held(), Ordering::Relaxed);
 		drop(slot);
-		let held = self.held.swap(0, Ordering::Relaxed);
-		tracing::debug!(rank = ?Holder::rank(self), held, "receive credit exhausted, cancelling a stream");
+		let freed = credit.as_ref().map_or(0, Credit::len);
+		tracing::debug!(rank = ?Holder::rank(self), freed, "receive credit exhausted, cancelling a stream");
 		// Stopped first, so the window the credit frees does not invite more of this stream.
 		self.stopper.stop(self.code);
 		// The bytes go before their credit: returned credit lets the peer send again at
@@ -334,6 +376,7 @@ impl<H: ?Sized + Holder> Pressure<H> {
 			slot: Mutex::new(Slot {
 				buffer: BytesMut::new(),
 				credit: None,
+				unit: None,
 			}),
 			stopper,
 			code,
