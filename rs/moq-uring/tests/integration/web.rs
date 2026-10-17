@@ -747,6 +747,15 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 /// it as fatal, so this one is hand-rolled and checks the stream directly.
 #[test]
 fn a_dropped_session_delivers_its_close() {
+	dropped_session_delivers_close(true);
+}
+
+#[test]
+fn the_last_web_session_drop_delivers_a_close_capsule() {
+	dropped_session_delivers_close(false);
+}
+
+fn dropped_session_delivers_close(explicit: bool) {
 	use bytes::Buf as _;
 
 	let Some(mut worker) = worker() else { return };
@@ -790,7 +799,9 @@ fn a_dropped_session_delivers_its_close() {
 			let request = within(&handle, "the CONNECT", quic::web::Request::accept(conn))
 				.await
 				.expect("handshake");
-			let mut session = request.ok().await.expect("respond");
+			let session = request.ok().await.expect("respond");
+			let mut remaining = session.clone();
+			drop(session);
 
 			let mut response = Vec::new();
 			let consumed = loop {
@@ -820,8 +831,13 @@ fn a_dropped_session_delivers_its_close() {
 				}
 			}
 
-			session.close(CLOSE_CODE, CLOSE_REASON);
-			drop(session);
+			let (code, reason) = if explicit {
+				remaining.close(CLOSE_CODE, CLOSE_REASON);
+				(CLOSE_CODE, CLOSE_REASON)
+			} else {
+				(0, "dropped")
+			};
+			drop(remaining);
 
 			let capsule = within(&handle, "the close capsule", async {
 				loop {
@@ -839,8 +855,8 @@ fn a_dropped_session_delivers_its_close() {
 			assert_eq!(
 				capsule,
 				web_transport_proto::Capsule::CloseWebTransportSession {
-					code: CLOSE_CODE,
-					reason: CLOSE_REASON.to_string(),
+					code,
+					reason: reason.to_string(),
 				}
 			);
 
