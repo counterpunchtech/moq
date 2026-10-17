@@ -18,6 +18,10 @@ impl Grouped for quic::web::Session {
 		stream.0
 	}
 
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(quic::web::Session::wire(self))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
 		Some(quic::web::Session::send_group(self, priority))
 	}

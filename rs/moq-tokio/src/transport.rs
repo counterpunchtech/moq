@@ -878,6 +878,10 @@ impl Grouped for crate::quic::web::Session {
 		stream.into_inner()
 	}
 
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(crate::quic::driver::Connection::wire(self))
+	}
+
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
 		Some(Self::send_group(self, priority))
 	}
