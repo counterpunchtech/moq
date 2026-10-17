@@ -4269,7 +4269,7 @@ mod tests {
 	/// A prefix stream waiting on the peer's SETUP for its link cost holds what it read
 	/// past ANNOUNCE_OK. The pressure monitor choosing it returns that credit and stops the
 	/// stream itself, without the prefix being polled.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_evicted_prefix_waiting_on_its_link_cost_lets_go() {
 		use crate::coding::StreamCodes as _;
 		const VERSION: Version = Version::Lite06;
@@ -4293,7 +4293,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let log = session.log.clone();
 		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			origin,
 			recv_bandwidth: None,
@@ -4309,7 +4309,7 @@ mod tests {
 		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
-		let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), run.as_mut()).await;
+		let waited = moq_clock::timeout(std::time::Duration::from_secs(1), run.as_mut()).await;
 		assert!(waited.is_err(), "the prefix did not wait for its link cost: {waited:?}");
 		assert!(pressure.held() > 0, "the parked prefix holds its read-ahead");
 

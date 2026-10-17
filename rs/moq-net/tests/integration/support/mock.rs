@@ -399,8 +399,8 @@ impl moq_net::transport::Stopper for MockStopper {
 			return moq_net::transport::Stopper::stop(&self.inner, code);
 		}
 		let inner = self.inner.clone();
-		drop(moq_net_sim::spawn(async move {
-			moq_net_sim::sleep(latency).await;
+		drop(moq_clock::sim::spawn(async move {
+			moq_clock::sleep(latency).await;
 			moq_net::transport::Stopper::stop(&inner, code);
 		}));
 	}

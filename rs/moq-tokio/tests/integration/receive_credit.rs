@@ -83,7 +83,7 @@ async fn setup(version: &str) -> Setup {
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
-		.connect(std::time::Instant::now(), session)
+		.connect(moq_net::time::now(), session)
 		.await
 		.expect("client handshake");
 	tokio::spawn(moq_net::time::run(driver));

@@ -11086,7 +11086,7 @@ mod stitch_tests {
 	/// pressure monitor chooses it: the eviction itself returns the credit, which the head may
 	/// need to arrive, and stops the stream, without the tail being polled. The head still
 	/// lands, and the tail finishes from what it had already buffered.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_evicted_tail_waiting_on_its_fill_lets_go() {
 		use crate::coding::StreamCodes as _;
 
@@ -11104,7 +11104,7 @@ mod stitch_tests {
 
 		let mut serve_tail = h.subscriber.clone();
 		let mut parked = std::pin::pin!(serve_tail.recv_group(&mut tail));
-		let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), parked.as_mut()).await;
+		let waited = moq_clock::timeout(std::time::Duration::from_secs(1), parked.as_mut()).await;
 		assert!(waited.is_err(), "the tail did not wait for its head: {waited:?}");
 		assert!(pressure.held() > 0, "the parked tail holds its read-ahead");
 
@@ -11114,7 +11114,7 @@ mod stitch_tests {
 
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("the head lands");
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), parked)
+		moq_clock::timeout(std::time::Duration::from_secs(1), parked)
 			.await
 			.expect("the tail never took its head")
 			.expect("the tail finishes from its buffer");

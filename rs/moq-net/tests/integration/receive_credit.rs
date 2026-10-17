@@ -61,11 +61,11 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -81,7 +81,7 @@ impl Setup {
 	/// Subscribe to a new track at `priority`, once the publisher sees the demand.
 	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
 		let track = self.broadcast.create_track(name, timed()).unwrap();
-		let sub = moq_net_sim::timeout(
+		let sub = moq_clock::timeout(
 			TIMEOUT,
 			self.remote
 				.track(name)
@@ -98,11 +98,11 @@ impl Setup {
 
 /// The next frame's payload, which must arrive in time.
 async fn next_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::Result<Bytes> {
-	let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+	let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("group timed out")?
 		.expect("track ended");
-	let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("frame timed out")?
 		.expect("group ended");
@@ -111,7 +111,7 @@ async fn next_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::Result<Byt
 
 /// Two partial frames that together exceed the allowance: the lower-priority one is
 /// cancelled, and the higher-priority one completes on the credit it returns.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn the_less_urgent_partial_frame_gives_way() {
 	for version in VERSIONS {
 		let setup = setup(version.parse().unwrap()).await;
@@ -154,7 +154,7 @@ async fn the_less_urgent_partial_frame_gives_way() {
 /// the allowance runs out.
 fn raw_uni(pair: &MockPair, bytes: Vec<u8>) {
 	let mut session = pair.client_transport.clone();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		let Ok(mut send) = session.open_uni().await else { return };
 		let _ = send.write_chunk(Bytes::from(bytes)).await;
 		// Hold the stream open, so only the receiver can end it.
@@ -174,7 +174,7 @@ fn partial_group_header(size: u32, body: usize) -> Vec<u8> {
 
 /// Headers that never complete fill the allowance: one is cancelled, and a subscription
 /// that arrives afterwards still delivers.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn unidentified_headers_are_cancelled() {
 	let setup = setup("moq-lite-06".parse().unwrap()).await;
 
@@ -191,13 +191,13 @@ async fn unidentified_headers_are_cancelled() {
 
 /// Control requests that never complete fill the allowance: one is cancelled with its
 /// stream, and the session carries on.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn partial_control_requests_are_cancelled() {
 	let setup = setup("moq-lite-06".parse().unwrap()).await;
 
 	for _ in 0..2 {
 		let mut session = setup.pair.client_transport.clone();
-		moq_net_sim::spawn(async move {
+		moq_clock::sim::spawn(async move {
 			let Ok((mut send, _recv)) = session.open_bi().await else {
 				return;
 			};
@@ -220,7 +220,7 @@ async fn partial_control_requests_are_cancelled() {
 
 /// A frame as large as the allowance allows completes while partial frames of a less
 /// urgent track keep arriving, each cancelled as it gets in the way.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn the_largest_unit_completes_under_pressure() {
 	for version in VERSIONS {
 		let setup = setup(version.parse().unwrap()).await;
