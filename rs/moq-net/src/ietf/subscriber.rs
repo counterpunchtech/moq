@@ -4133,7 +4133,7 @@ where
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
 /// the id delta, the extension headers (carrying the timestamp), the size, the
 /// status for empty objects, and the streamed payload.
-struct GroupIngest {
+struct GroupIngest<R: crate::transport::poll::RecvStream> {
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -4143,11 +4143,11 @@ struct GroupIngest {
 	gap: Option<u64>,
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
-	phase: IngestPhase,
+	phase: IngestPhase<R>,
 	budget: frame::Budget,
 }
 
-enum IngestPhase {
+enum IngestPhase<R: crate::transport::poll::RecvStream> {
 	/// Reading the object id delta. Stream end here ends the group.
 	Delta,
 	/// Reading the extension block's size.
@@ -4159,14 +4159,14 @@ enum IngestPhase {
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: crate::coding::HeldFrame<R> },
 	/// Discarding a dropped object's payload: the bytes of it still to read.
 	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
 	Finished(Ended),
 }
 
-impl GroupIngest {
+impl<R: crate::transport::poll::RecvStream> GroupIngest<R> {
 	fn new<S: crate::transport::poll::Boxable>(
 		subscriber: &Subscriber<S>,
 		group: &ietf::GroupHeader,
@@ -4566,7 +4566,7 @@ where
 			info: frame::Info { size, timestamp },
 			fields,
 		};
-		let mut frame = producer.create_frame_owned(header, &self.frames)?;
+		let mut frame = crate::coding::HeldFrame::new(producer.create_frame_owned(header, &self.frames)?);
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
@@ -5281,7 +5281,7 @@ fn object_time(
 	}
 }
 
-impl GroupIngest {
+impl<R: crate::transport::poll::RecvStream> GroupIngest<R> {
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
 		let id = self.prior_object.expect("payload follows object ID");
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
@@ -5300,7 +5300,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	fn poll(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut group::Producer,
@@ -5352,7 +5352,9 @@ impl GroupIngest {
 					let timestamp = object_time(self.timescale, *timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					let frame = group.create_frame_owned(header, &self.budget)?;
-					self.phase = IngestPhase::Payload { frame };
+					self.phase = IngestPhase::Payload {
+						frame: crate::coding::HeldFrame::new(frame),
+					};
 				}
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(&mut cx))?;

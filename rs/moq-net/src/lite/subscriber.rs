@@ -858,13 +858,13 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 struct GroupRecv<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	reader: Reader<S::RecvStream, Version>,
-	state: GroupRecvState,
+	state: GroupRecvState<S::RecvStream>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum GroupRecvState {
+enum GroupRecvState<R: crate::transport::poll::RecvStream> {
 	/// Reading the GROUP header.
 	Header,
 	/// Filling the group, bailing if the track or group dies first.
@@ -872,7 +872,7 @@ enum GroupRecvState {
 		/// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
 		group: crate::recv::Group,
 		track: track::Producer,
-		ingest: FrameIngest,
+		ingest: FrameIngest<R>,
 		/// Whether readers see the group yet; see [`track::Producer::receive_group`].
 		shown: bool,
 		_reading: Reading,
@@ -1027,20 +1027,20 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 	}
 }
 
-/// Pumps bare FRAME messages from a reader into a group producer: the wire
+/// Pumps bare FRAME messages from a reader of `R` into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
-struct FrameIngest {
+struct FrameIngest<R: crate::transport::poll::RecvStream> {
 	/// `Some` decodes the lite-05 zigzag-delta timestamp prefix; `None` leaves frames
 	/// untimed (pre-lite-05).
 	timescale: Option<Timescale>,
 	/// Previous frame's raw timestamp value (in `timescale` units), for the
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
-	phase: IngestPhase,
+	phase: IngestPhase<R>,
 	budget: frame::Budget,
 }
 
-enum IngestPhase {
+enum IngestPhase<R: crate::transport::poll::RecvStream> {
 	/// Reading the timestamp delta (skipped without a timescale). Stream end here
 	/// means the group has no more frames.
 	Timing,
@@ -1048,10 +1048,10 @@ enum IngestPhase {
 	/// where there is no timing prefix to act as the sentinel).
 	Size { timestamp: Option<Timestamp> },
 	/// Streaming the frame payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: crate::coding::HeldFrame<R> },
 }
 
-impl FrameIngest {
+impl<R: crate::transport::poll::RecvStream> FrameIngest<R> {
 	fn new<S: crate::transport::poll::Session>(subscriber: &Subscriber<S>, timescale: Option<Timescale>) -> Self {
 		Self {
 			timescale,
@@ -1064,7 +1064,7 @@ impl FrameIngest {
 	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
 	/// finishes or aborts the group; a frame cut short mid-payload was already
 	/// aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	fn poll(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut group::Producer,
@@ -1107,7 +1107,9 @@ impl FrameIngest {
 						},
 						&self.budget,
 					)?;
-					self.phase = IngestPhase::Payload { frame };
+					self.phase = IngestPhase::Payload {
+						frame: crate::coding::HeldFrame::new(frame),
+					};
 				}
 				IngestPhase::Payload { frame } => {
 					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
@@ -5970,7 +5972,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 		// picked the group up from the cache.
 		joined: kio::Producer<track::FetchOutcome>,
 		// Boxed so the other states stay small; one allocation per fetch.
-		ingest: Box<FrameIngest>,
+		ingest: Box<FrameIngest<S::RecvStream>>,
 	},
 	Done,
 }

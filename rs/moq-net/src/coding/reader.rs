@@ -6,12 +6,12 @@ use std::{
 	task::{Context, Poll, ready},
 };
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 
 use crate::{
 	Error, StreamError,
 	coding::*,
-	pressure::{Erase, Hold, Holder, Locked, Pressure, Rank},
+	pressure::{Erase, Hold, Holder, Lent, Locked, Pressure, Rank},
 };
 
 /// A reader for decoding messages from a stream.
@@ -22,25 +22,24 @@ use crate::{
 /// `Pending` (or a cancelled wrapper) never desynchronizes the stream.
 ///
 /// A [tracked](Self::track) reader holds the transport's connection credit for its
-/// buffered bytes and for the unit it is assembling, releasing each unit's bytes once
-/// it is decoded and handed off, so read-ahead stays with the next unit. Its buffer sits
-/// beside that credit in its [`Hold`], so an eviction frees the memory with the credit
-/// even while the reader is parked. An untracked reader returns credit as soon as it
-/// reads.
+/// buffered bytes, returning each unit's as it is decoded and handed off, so read-ahead
+/// stays with the next unit. Its buffer sits beside that credit in its [`Hold`], so an
+/// eviction frees the memory with the credit even while the reader is parked. A partial
+/// frame's payload carries its own credit in a [`HeldFrame`], which returns it when the
+/// frame goes. An untracked reader returns credit as soon as it reads.
 pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
 	/// The buffer until tracked, then empty: tracking moves it into the hold.
 	buffer: BytesMut,
 	version: V,
-	/// Bytes of the incomplete frame already taken out of `buffer`.
-	unit: u64,
-	/// Leading bytes read before tracking began, whose credit already returned.
-	free: u64,
-	/// While tracked, the credit for `buffer` plus `unit`, less `free`.
+	/// While tracked, the buffer and its credit.
 	hold: Option<Arc<Hold<S>>>,
 	/// The receive allowance filled and this stream was chosen to free it.
 	evicted: bool,
 }
+
+/// A chunk of a unit, with the credit lent to it if tracked.
+type LentChunk<S> = (Bytes, Option<Lent<S>>);
 
 /// How much payload may pile up behind a parked consumer before
 /// [`Reader::poll_read_frame`] wakes it, even while the transport keeps handing over
@@ -59,8 +58,6 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream,
 			buffer: Default::default(),
 			version,
-			unit: 0,
-			free: 0,
 			hold: None,
 			evicted: false,
 		}
@@ -74,10 +71,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		if self.hold.is_some() {
 			return self.rank(rank);
 		}
-		self.free = self.buffer.len() as u64 + self.unit;
 		let code = self.version.encode_stream_code(&StreamError::Evicted);
 		let hold = pressure.track(rank, self.stream.stopper(), code);
-		*hold.lock().buffer_mut() = std::mem::take(&mut self.buffer);
+		hold.lock().adopt(std::mem::take(&mut self.buffer));
 		self.hold = Some(hold);
 	}
 
@@ -86,12 +82,6 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		if let Some(hold) = &self.hold {
 			hold.rank(rank);
 		}
-	}
-
-	/// Return the credit for `bytes` of the unit, which completed or was given up.
-	fn release_unit(&mut self, bytes: u64) {
-		Buffer::of(&mut self.buffer, &self.hold).release_unit(&mut self.free, bytes);
-		self.unit -= bytes;
 	}
 
 	/// Whether this stream was evicted, registering `cx` to hear when it is. The eviction
@@ -126,8 +116,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			match decoded {
 				Ok(value) => {
 					if consume {
-						buffer.advance(used);
-						buffer.release(&mut self.free, used as u64);
+						buffer.consume(used);
 					}
 					return Poll::Ready(Ok(value));
 				}
@@ -264,21 +253,16 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// a complete unit: its credit returns as it is handed over.
 	pub fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		let chunk = ready!(self.poll_unit_chunk(cx, max))?;
-		let size = chunk.as_ref().map_or(0, |chunk| chunk.len() as u64);
-		self.release_unit(size);
-		Poll::Ready(Ok(chunk))
+		Poll::Ready(Ok(chunk.map(|(chunk, _credit)| chunk)))
 	}
 
-	/// The next chunk of the current unit, draining the buffer first. Its credit moves to
-	/// the unit, held until the caller releases it: an eviction frees only the buffer.
-	fn poll_unit_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+	/// The next chunk of a unit, draining the buffer first, with the credit lent to it:
+	/// whoever keeps the bytes keeps the credit, so an eviction frees only the buffer.
+	fn poll_unit_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<LentChunk<S>>, Error>> {
 		let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
 		if !buffer.is_empty() {
 			let n = cmp::min(buffer.len(), max);
-			let chunk = buffer.split_to(n).freeze();
-			buffer.advance_unit(self.free, self.unit, n as u64);
-			self.unit += n as u64;
-			return Poll::Ready(Ok(Some(chunk)));
+			return Poll::Ready(Ok(Some(buffer.lend_buffered(n))));
 		}
 		if self.evicted || buffer.is_evicted() {
 			self.evicted = true;
@@ -297,17 +281,16 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		let Some((chunk, credit)) = read.map_err(|err| self.version.transport_error(err))? else {
 			return Poll::Ready(Ok(None));
 		};
-		self.unit += chunk.len() as u64;
-		buffer.take_unit(credit);
-		Poll::Ready(Ok(Some(chunk)))
+		let credit = buffer.lend(credit);
+		Poll::Ready(Ok(Some((chunk, credit))))
 	}
 
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// `Ready(Ok(()))` means the frame is full and the caller should commit it; an error
 	/// means the caller should abort it. Either way the frame is untouched otherwise, so
-	/// the caller keeps ownership of the commit/abort decision. The payload's credit is
-	/// held until then, whichever way the frame ends.
+	/// the caller keeps ownership of the commit/abort decision. The payload's credit moves
+	/// into the frame, so it returns only as the frame goes, whichever way that is.
 	///
 	/// Consumers are woken where the loop yields rather than once per chunk. The wire
 	/// hands over everything it has already buffered in one turn, and each wake pays a
@@ -320,41 +303,36 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	pub(crate) fn poll_read_frame(
 		&mut self,
 		cx: &mut Context<'_>,
-		frame: &mut crate::frame::ProducerOwned,
+		frame: &mut HeldFrame<S>,
 	) -> Poll<Result<(), Error>> {
 		let mut owed = 0;
 
-		let result = loop {
-			if frame.remaining() == 0 {
-				break Ok(());
+		loop {
+			if frame.frame.remaining() == 0 {
+				return Poll::Ready(Ok(()));
 			}
 
-			match self.poll_unit_chunk(cx, frame.remaining()) {
+			match self.poll_unit_chunk(cx, frame.frame.remaining()) {
 				Poll::Pending => {
 					if owed > 0 {
-						frame.notify();
+						frame.frame.notify();
 					}
 					return Poll::Pending;
 				}
-				Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
+				Poll::Ready(Ok(Some((chunk, credit)))) if !chunk.is_empty() => {
+					frame.keep(credit);
 					owed += chunk.len();
-					if let Err(err) = frame.write(chunk) {
-						break Err(err);
-					}
+					frame.frame.write(chunk)?;
 					if owed >= WAKE_BUDGET {
-						frame.notify();
+						frame.frame.notify();
 						owed = 0;
 					}
 				}
 				// A FIN mid-payload: the declared size never arrived.
-				Poll::Ready(Ok(_)) => break Err(Error::WrongSize),
-				Poll::Ready(Err(err)) => break Err(err),
+				Poll::Ready(Ok(_)) => return Poll::Ready(Err(Error::WrongSize)),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 			}
-		};
-
-		// The frame is handed off, or the caller discards it on the error.
-		self.release_unit(self.unit);
-		Poll::Ready(result)
+		}
 	}
 
 	/// Poll for exactly `size` bytes, accumulating partial reads in the buffer.
@@ -362,9 +340,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		loop {
 			let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
 			if buffer.len() >= size {
-				let bytes = buffer.split_to(size).freeze();
-				buffer.release(&mut self.free, size as u64);
-				return Poll::Ready(Ok(bytes));
+				return Poll::Ready(Ok(buffer.hand_off(size)));
 			}
 			drop(buffer);
 			if !ready!(self.poll_read_more(cx))? {
@@ -380,8 +356,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		loop {
 			let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
 			let skipped = buffer.len().min(*remaining);
-			buffer.advance(skipped);
-			buffer.release(&mut self.free, skipped as u64);
+			buffer.consume(skipped);
 			drop(buffer);
 			*remaining -= skipped;
 			if *remaining == 0 {
@@ -455,9 +430,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			self.stream.stop(self.version.encode_stream_code(&err.into()));
 		}
 		// Nothing buffered is worth keeping, and a reader retained after its abort must not
-		// keep memory whose credit returned. The unit's credit returns too.
+		// keep memory whose credit returned. A partial frame's credit is its own, returned
+		// as its owner aborts it.
 		self.buffer = BytesMut::new();
-		self.free = self.unit;
 		if let Some(hold) = &self.hold {
 			hold.clear();
 		}
@@ -469,8 +444,6 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
-			unit: self.unit,
-			free: self.free,
 			hold: self.hold,
 			evicted: self.evicted,
 		}
@@ -505,39 +478,75 @@ impl<'a, S: crate::transport::poll::RecvStream> Buffer<'a, S> {
 		}
 	}
 
-	/// Keep the credit for bytes just read straight into the unit, if tracked.
-	fn take_unit(&mut self, credit: S::Credit) {
-		if let Self::Held(held) = self {
-			held.take_unit(credit);
+	/// Discard the first `bytes`, a unit consumed whole, then return their credit.
+	fn consume(&mut self, bytes: usize) {
+		match self {
+			Self::Own(buffer) => bytes::Buf::advance(buffer, bytes),
+			Self::Held(held) => held.consume(bytes),
 		}
 	}
 
-	/// Return the credit for `bytes` consumed from the buffer as a complete unit, less the
-	/// leading `free` bytes, which hold none.
-	fn release(&mut self, free: &mut u64, bytes: u64) {
-		let skip = (*free).min(bytes);
-		*free -= skip;
-		if let Self::Held(held) = self {
-			held.release(bytes - skip);
+	/// Hand off the first `bytes` as a complete unit, whose credit returns as it leaves.
+	fn hand_off(&mut self, bytes: usize) -> Bytes {
+		match self {
+			Self::Own(buffer) => buffer.split_to(bytes).freeze(),
+			Self::Held(held) => held.hand_off(bytes),
 		}
 	}
 
-	/// Move the credit for `bytes` taken from the buffer into a `unit` already that long.
-	/// The leading `free` bytes hold no credit, and the unit's come first.
-	fn advance_unit(&mut self, free: u64, unit: u64, bytes: u64) {
-		let skip = free.saturating_sub(unit).min(bytes);
-		if let Self::Held(held) = self {
-			held.advance_unit(bytes - skip);
+	/// Move the first `bytes` into a partial unit, with their credit if tracked.
+	fn lend_buffered(&mut self, bytes: usize) -> LentChunk<S> {
+		match self {
+			Self::Own(buffer) => (buffer.split_to(bytes).freeze(), None),
+			Self::Held(held) => held.lend_buffered(bytes),
 		}
 	}
 
-	/// Return the credit for `bytes` of the unit, less the leading `free` bytes.
-	fn release_unit(&mut self, free: &mut u64, bytes: u64) {
-		let skip = (*free).min(bytes);
-		*free -= skip;
-		if let Self::Held(held) = self {
-			held.release_unit(bytes - skip);
+	/// The credit for bytes read straight into a partial unit, if tracked; otherwise it
+	/// returns now.
+	fn lend(&self, credit: S::Credit) -> Option<Lent<S>> {
+		match self {
+			Self::Own(_) => None,
+			Self::Held(held) => Some(held.lend(credit)),
 		}
+	}
+}
+
+/// A frame filled from a stream by [`Reader::poll_read_frame`], with the connection credit
+/// for the payload it holds so far. The credit is the frame's own, so it returns only as
+/// the frame finishes, aborts or drops, on every exit alike.
+pub(crate) struct HeldFrame<S: crate::transport::poll::RecvStream> {
+	/// Declared before `credit`: fields drop in order, so a dropped frame frees its payload
+	/// before the credit returns and lets the peer send more.
+	frame: crate::frame::ProducerOwned,
+	credit: Option<Lent<S>>,
+}
+
+impl<S: crate::transport::poll::RecvStream> HeldFrame<S> {
+	pub fn new(frame: crate::frame::ProducerOwned) -> Self {
+		Self { frame, credit: None }
+	}
+
+	/// Keep the credit for payload just written into the frame.
+	fn keep(&mut self, credit: Option<Lent<S>>) {
+		match (&mut self.credit, credit) {
+			(Some(held), Some(credit)) => held.merge(credit),
+			(held, credit @ Some(_)) => *held = credit,
+			(_, None) => {}
+		}
+	}
+
+	/// Publish the complete frame, returning its credit once it is handed off.
+	pub fn finish(self) -> crate::Result<()> {
+		// `_credit` lives to the end of the scope, past the frame `finish` consumes.
+		let Self { frame, credit: _credit } = self;
+		frame.finish()
+	}
+
+	/// Fail the frame with `err`, freeing its payload before its credit returns.
+	pub fn abort(self, err: Error) -> crate::Result<()> {
+		let Self { frame, credit: _credit } = self;
+		frame.abort(err)
 	}
 }
 
@@ -653,14 +662,9 @@ mod tests {
 	}
 
 	/// A group with one open frame, plus a consumer parked on its payload.
-	fn parked_frame(
+	fn parked_frame<S: crate::transport::poll::RecvStream>(
 		size: usize,
-	) -> (
-		crate::frame::ProducerOwned,
-		crate::frame::Consumer,
-		kio::Waiter,
-		Arc<CountWaker>,
-	) {
+	) -> (HeldFrame<S>, crate::frame::Consumer, kio::Waiter, Arc<CountWaker>) {
 		let mut group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
@@ -677,7 +681,7 @@ mod tests {
 		let wakes = Arc::new(CountWaker::default());
 		let waiter = kio::Waiter::new(wakes.clone().into());
 
-		(frame, payload, waiter, wakes)
+		(HeldFrame::new(frame), payload, waiter, wakes)
 	}
 
 	/// Hands back one queued chunk per poll, then blocks: a stream whose socket has
@@ -1128,8 +1132,8 @@ mod tests {
 			}
 		}
 
-		/// Decode size-prefixed units, untracked and tracked: the per-read and per-unit cost
-		/// of holding credit in the reader. Run by nightly.
+		/// Decode size-prefixed units, untracked and tracked, as messages and as frames: the
+		/// per-read and per-unit cost of holding credit in the reader. Run by nightly.
 		#[test]
 		#[ignore = "release benchmark, run by nightly"]
 		fn benchmark_tracked_reads() {
@@ -1143,11 +1147,12 @@ mod tests {
 			unit.resize(unit.len() + UNIT, 7);
 			let data = Bytes::from(unit.repeat(1024));
 
-			println!("max_read,untracked_ns_per_unit,tracked_ns_per_unit");
+			println!("max_read,untracked_ns_per_unit,tracked_ns_per_unit,untracked_ns_per_frame,tracked_ns_per_frame");
 			for max in [1200usize, 16 * 1024, 64 * 1024] {
-				let mut ns = [f64::MAX; 2];
+				let mut ns = [f64::MAX; 4];
 				for _ in 0..RUNS {
-					for (mode, tracked) in [false, true].into_iter().enumerate() {
+					let modes = [(false, false), (true, false), (false, true), (true, true)];
+					for (mode, (tracked, framed)) in modes.into_iter().enumerate() {
 						let stream = Endless {
 							data: data.clone(),
 							pos: 0,
@@ -1158,18 +1163,37 @@ mod tests {
 						if tracked {
 							reader.track(&pressure, Rank::Unidentified);
 						}
+						let mut group = crate::group::Info { sequence: 0 }.produce();
 						let start = std::time::Instant::now();
-						for _ in 0..UNITS {
+						for i in 0..UNITS {
 							let size = varint(reader.poll_varint(&mut noop()));
-							let Poll::Ready(Ok(payload)) = reader.poll_read_exact(&mut noop(), size as usize) else {
-								panic!("short unit");
+							if !framed {
+								let Poll::Ready(Ok(payload)) = reader.poll_read_exact(&mut noop(), size as usize)
+								else {
+									panic!("short unit");
+								};
+								std::hint::black_box(payload);
+								continue;
+							}
+							// A fresh group now and then, so the cache stays small.
+							if i % 64 == 0 {
+								group = crate::group::Info { sequence: i as u64 }.produce();
+							}
+							let info = crate::frame::Info {
+								size,
+								timestamp: Some(crate::Timestamp::ZERO),
 							};
-							std::hint::black_box(payload);
+							let frame = group.create_frame_owned(info, &Default::default()).unwrap();
+							let mut frame = HeldFrame::new(frame);
+							let Poll::Ready(Ok(())) = reader.poll_read_frame(&mut noop(), &mut frame) else {
+								panic!("short frame");
+							};
+							frame.finish().unwrap();
 						}
 						ns[mode] = ns[mode].min(start.elapsed().as_nanos() as f64 / UNITS as f64);
 					}
 				}
-				println!("{max},{:.1},{:.1}", ns[0], ns[1]);
+				println!("{max},{:.1},{:.1},{:.1},{:.1}", ns[0], ns[1], ns[2], ns[3]);
 			}
 		}
 
@@ -1218,6 +1242,28 @@ mod tests {
 				reader.poll_read_frame(&mut noop(), &mut frame),
 				Poll::Ready(Err(Error::Evicted))
 			));
+			reader.abort(&Error::Evicted);
+			assert_eq!(pressure.held(), 8, "the reader returned its frame's credit");
+			frame.abort(Error::Evicted).unwrap();
+			assert_eq!(pressure.held(), 0);
+		}
+
+		/// A FIN mid-payload fails the frame, whose credit returns only once its owner drops
+		/// it: the payload is still allocated until then.
+		#[test]
+		fn a_truncated_frame_keeps_its_credit_until_dropped() {
+			let (mut send, mut reader, pressure, _sessions) = tracked(None);
+			let (mut frame, _payload, _waiter, _wakes) = parked_frame(9);
+
+			assert_eq!(write(&mut send, b"abc"), Poll::Ready(3));
+			assert!(reader.poll_read_frame(&mut noop(), &mut frame).is_pending());
+			send.finish().expect("finish");
+			assert!(matches!(
+				reader.poll_read_frame(&mut noop(), &mut frame),
+				Poll::Ready(Err(Error::WrongSize))
+			));
+			assert_eq!(pressure.held(), 3, "the credit returned before its frame dropped");
+			drop(frame);
 			assert_eq!(pressure.held(), 0);
 		}
 
