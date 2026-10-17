@@ -786,7 +786,11 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					};
 					self.state = match kind {
 						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
-						lite::DataType::Setup => UniState::Setup { reader },
+						lite::DataType::Setup => {
+							let mut reader = reader;
+							reader.set_priority(crate::priority::RECV_CONTROL);
+							UniState::Setup { reader }
+						}
 					};
 				}
 				UniState::Setup { reader } => {
@@ -866,6 +870,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 				GroupRecvState::Header => {
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+					self.reader.set_priority(crate::priority::recv_group(hdr.sequence));
 
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();

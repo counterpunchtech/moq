@@ -3591,6 +3591,7 @@ where
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
+		stream.set_priority(crate::priority::recv_group(group.group_id));
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");

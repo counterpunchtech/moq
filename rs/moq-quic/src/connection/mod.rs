@@ -93,7 +93,8 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
+    Checkpoint, Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError,
+    RecvStream,
     SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
     WriteError, Written,
 };
@@ -1381,17 +1382,9 @@ impl Connection {
         stats
     }
 
-    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
-    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// Ping the remote endpoint
