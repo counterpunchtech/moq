@@ -3407,7 +3407,11 @@ mod tests {
             Err(LeaseError::Blocked(ShouldTransmit(true)))
         );
         assert_eq!(wait(&mut client, frame, 1), Err(LeaseError::Evicted));
-        assert_eq!(client.local_max_data, 2 * WINDOW, "the evicted credit returns");
+        assert_eq!(
+            client.local_max_data,
+            2 * WINDOW,
+            "the evicted credit returns"
+        );
     }
 
     /// Ties go to the newest stream; a parked holder that never waits is a candidate too.
