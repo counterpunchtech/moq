@@ -1139,6 +1139,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 		fn poll_read(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,

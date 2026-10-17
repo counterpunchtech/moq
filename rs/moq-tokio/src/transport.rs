@@ -17,8 +17,8 @@ use futures::FutureExt;
 use moq_net::transport::Credit as _;
 use web_transport_trait::poll as wt_poll;
 
-pub(crate) mod held;
 mod grouped;
+pub(crate) mod held;
 mod owned;
 pub(crate) use grouped::{Grouped, GroupedSend};
 pub use owned::Error;
@@ -31,11 +31,17 @@ pub trait HeldRecvStream: web_transport_trait::RecvStream {
 	/// The connection credit a read keeps until it is dropped.
 	type Credit: moq_net::transport::Credit + Send + Sync;
 
+	/// What [`stopper`](Self::stopper) returns.
+	type Stopper: moq_net::transport::Stopper + Clone + Send + Sync;
+
 	/// Read the next chunk, up to `max` bytes, with its credit, or `None` once finished.
 	fn read_chunk_held(
 		&mut self,
 		max: usize,
 	) -> impl Future<Output = Result<Option<(Bytes, Self::Credit)>, Self::Error>> + Send;
+
+	/// A handle that stops this stream without borrowing it.
+	fn stopper(&self) -> Self::Stopper;
 }
 
 /// A backend session that reports when held credit fills its receive window.
@@ -689,6 +695,8 @@ pub struct RecvStream<S: HeldRecvStream + 'static> {
 	/// waiting behind blocked I/O. Fired by [`stop`](wt_poll::RecvStream::stop)
 	/// and by [`Drop`].
 	interrupt: Option<futures::channel::oneshot::Sender<()>>,
+	/// Taken up front, since an in-flight read owns the stream.
+	stopper: S::Stopper,
 }
 
 /// How much the closed-watch may read ahead of the caller before it parks and
@@ -710,6 +718,7 @@ impl<S: HeldRecvStream + 'static> RecvStream<S> {
 	/// Wrap an async-interface receive stream.
 	pub fn new(stream: S) -> Self {
 		Self {
+			stopper: stream.stopper(),
 			state: std::sync::Mutex::new(Some(RecvState::Idle(stream))),
 			buffer: None,
 			queued: std::collections::VecDeque::new(),

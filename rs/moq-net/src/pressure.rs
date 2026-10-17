@@ -1,11 +1,13 @@
 //! Receive-side recovery for when held connection credit fills the allowance.
 //!
-//! A [`Reader`](crate::coding::Reader) tracked here holds the connection credit for its
-//! buffered bytes and its incomplete unit, so incomplete messages are bounded by the
-//! transport's receive allowance. When the transport reports that the allowance is
-//! spent ([`poll_credit_exhausted`](crate::transport::poll::Session::poll_credit_exhausted)),
-//! nothing can arrive to complete any unit, so the [`Monitor`] cancels the least useful
-//! holder with STOP_SENDING and the session continues with the credit it returns.
+//! A [`Reader`](crate::coding::Reader) tracked here keeps the connection credit for its
+//! buffered bytes and its incomplete unit in a [`Hold`], so incomplete messages are
+//! bounded by the transport's receive allowance. When the transport reports that the
+//! allowance is spent ([`poll_credit_exhausted`](crate::transport::poll::Session::poll_credit_exhausted)),
+//! nothing can arrive to complete any unit, so the [`Monitor`] evicts the least useful
+//! holder: the eviction itself drops the credit and stops the stream with STOP_SENDING,
+//! whatever the stream's handler is waiting on, and the handler's next read fails with
+//! [`Error::Evicted`](crate::Error::Evicted).
 //!
 //! Victims, first to last:
 //! - Media, from the broadcast holding the most credit, lowest priority first. Within a
@@ -23,15 +25,17 @@
 use std::{
 	collections::HashMap,
 	sync::{
-		Arc, Mutex,
+		Arc, Mutex, MutexGuard, PoisonError, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
-	task::{Context, Poll, Waker},
+	task::{Context, Waker},
 };
 
-use slab::Slab;
-
-use crate::{PathOwned, priority::Priority};
+use crate::{
+	PathOwned,
+	priority::Priority,
+	transport::{Credit, MaybeSend, MaybeSync, Stopper, poll::RecvStream},
+};
 
 /// How useful a tracked stream is, which orders the victims.
 #[derive(Clone, Debug)]
@@ -50,86 +54,255 @@ pub(crate) enum Rank {
 	Control,
 }
 
-/// One session's tracked receivers.
-#[derive(Clone, Default)]
-pub(crate) struct Pressure {
-	state: kio::Lock<State>,
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+	mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[derive(Default)]
-struct State {
-	entries: Slab<Entry>,
-	/// Registration order, the last tiebreak: the newest stream goes first.
-	next: u64,
-}
-
-struct Entry {
-	slot: Arc<Slot>,
-	rank: Rank,
-	seq: u64,
-}
-
-/// What a [`Ticket`] shares with the registry without taking its lock.
-#[derive(Default)]
-struct Slot {
-	/// Bytes of credit the reader holds.
+/// A tracked stream's credit, and what evicting it takes, shared by its reader and the
+/// registry.
+pub(crate) struct Hold<R: RecvStream> {
+	/// Bytes of credit `credit` covers, read by the registry without the lock.
 	held: AtomicU64,
-	/// The monitor chose this stream; its reader stops and lets go.
+	/// The monitor chose this stream: its credit is gone and the stream is stopped.
 	evicted: AtomicBool,
 	/// The reader's task, woken on eviction.
 	waker: Mutex<Option<Waker>>,
+	rank: Mutex<Rank>,
+	/// Registration order, the last tiebreak: the newest stream goes first.
+	seq: u64,
+	credit: Mutex<Option<R::Credit>>,
+	stopper: R::Stopper,
+	/// The STOP_SENDING code for an eviction, in the stream's negotiated registry.
+	code: u32,
 }
 
-impl Slot {
-	fn poll_evicted(&self, cx: &Context<'_>) -> bool {
+impl<R: RecvStream> Hold<R> {
+	/// Keep the credit for bytes just read, or return it at once if already evicted.
+	pub fn take(&self, credit: R::Credit) {
+		let mut held = lock(&self.credit);
+		// Checked under the lock: an eviction sets the flag before it takes the credit.
 		if self.evicted.load(Ordering::Acquire) {
+			drop(held);
+			return drop(credit);
+		}
+		let len = match held.as_mut() {
+			Some(held) => {
+				held.merge(credit);
+				held.len()
+			}
+			None => {
+				let len = credit.len();
+				*held = Some(credit);
+				len
+			}
+		};
+		self.held.store(len, Ordering::Relaxed);
+	}
+
+	/// Return the credit for `bytes` that completed a unit.
+	pub fn release(&self, bytes: u64) {
+		let mut held = lock(&self.credit);
+		let Some(credit) = held.as_mut() else { return };
+		let freed = credit.split(bytes);
+		self.held.store(credit.len(), Ordering::Relaxed);
+		drop(held);
+		drop(freed);
+	}
+
+	/// Return everything held: the reader gave up on the stream.
+	pub fn clear(&self) {
+		let credit = lock(&self.credit).take();
+		self.held.store(0, Ordering::Relaxed);
+		drop(credit);
+	}
+
+	/// Re-rank the stream, once its header identifies it.
+	pub fn rank(&self, rank: Rank) {
+		*lock(&self.rank) = rank;
+	}
+
+	/// Whether the monitor chose this stream, without registering to hear when it does.
+	pub fn is_evicted(&self) -> bool {
+		self.evicted.load(Ordering::Acquire)
+	}
+
+	/// Whether the monitor chose this stream, registering `cx` to hear when it does.
+	pub fn poll_evicted(&self, cx: &Context<'_>) -> bool {
+		if self.is_evicted() {
 			return true;
 		}
-		let mut waker = self.waker.lock().unwrap_or_else(|err| err.into_inner());
+		let mut waker = lock(&self.waker);
 		match waker.as_mut() {
 			Some(waker) => waker.clone_from(cx.waker()),
 			None => *waker = Some(cx.waker().clone()),
 		}
 		drop(waker);
 		// Checked again: an eviction between the load and the store took no waker.
-		self.evicted.load(Ordering::Acquire)
+		self.is_evicted()
 	}
 }
 
-impl Pressure {
-	/// Track a new receiver at `rank`.
-	pub fn track(&self, rank: Rank) -> Ticket {
-		let slot = Arc::new(Slot::default());
-		let mut state = self.state.lock();
-		let seq = state.next;
-		state.next += 1;
-		let id = state.entries.insert(Entry {
-			slot: slot.clone(),
-			rank,
-			seq,
-		});
-		Ticket {
-			pressure: self.clone(),
-			id,
-			slot,
-		}
+/// What the registry needs from a [`Hold`], whatever its stream type.
+pub(crate) trait Holder {
+	/// Bytes of credit held.
+	fn held(&self) -> u64;
+	/// Whether it was evicted already.
+	fn is_evicted(&self) -> bool;
+	/// How useful the stream is.
+	fn rank(&self) -> Rank;
+	/// Registration order.
+	fn seq(&self) -> u64;
+	/// Drop the credit, stop the stream, and wake its reader to fail.
+	fn evict(&self);
+}
+
+impl<R: RecvStream> Holder for Hold<R> {
+	fn held(&self) -> u64 {
+		self.held.load(Ordering::Relaxed)
 	}
 
-	/// Cancel the least useful holder of credit, returning whether there was one.
-	pub fn evict(&self) -> bool {
-		let state = self.state.lock();
-		let Some(id) = victim(&state.entries) else {
-			return false;
-		};
-		let slot = &state.entries[id].slot;
-		slot.evicted.store(true, Ordering::Release);
-		let waker = slot.waker.lock().unwrap_or_else(|err| err.into_inner()).take();
-		tracing::debug!(rank = ?state.entries[id].rank, held = slot.held.load(Ordering::Relaxed), "receive credit exhausted, cancelling a stream");
-		drop(state);
+	fn is_evicted(&self) -> bool {
+		Hold::is_evicted(self)
+	}
+
+	fn rank(&self) -> Rank {
+		lock(&self.rank).clone()
+	}
+
+	fn seq(&self) -> u64 {
+		self.seq
+	}
+
+	fn evict(&self) {
+		self.evicted.store(true, Ordering::Release);
+		let credit = lock(&self.credit).take();
+		let held = self.held.swap(0, Ordering::Relaxed);
+		tracing::debug!(rank = ?Holder::rank(self), held, "receive credit exhausted, cancelling a stream");
+		// Stopped first, so the window the credit frees does not invite more of this stream.
+		self.stopper.stop(self.code);
+		drop(credit);
+		let waker = lock(&self.waker).take();
 		if let Some(waker) = waker {
 			waker.wake();
 		}
-		true
+	}
+}
+
+/// The registry entry of a session whose tracked readers differ in stream type: the
+/// moq-transport path, which reads both raw streams and its control adapter's.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type Erased = dyn Holder + Send + Sync;
+#[cfg(target_family = "wasm")]
+pub(crate) type Erased = dyn Holder;
+
+/// The registry of a session whose tracked readers all read its own streams: moq-lite's.
+///
+/// An alias rather than the spelled-out type, so a `derive` on a struct holding it bounds
+/// only `S`, not its stream type.
+pub(crate) type Of<S> = Pressure<Hold<<S as crate::transport::poll::Session>::RecvStream>>;
+
+/// Turns a reader's [`Hold`] into the registry's entry type.
+pub(crate) trait Erase<H: ?Sized> {
+	fn erase(self: Arc<Self>) -> Arc<H>;
+}
+
+impl<R: RecvStream> Erase<Hold<R>> for Hold<R> {
+	fn erase(self: Arc<Self>) -> Arc<Self> {
+		self
+	}
+}
+
+impl<R: RecvStream> Erase<Erased> for Hold<R>
+where
+	Self: MaybeSend + MaybeSync,
+{
+	fn erase(self: Arc<Self>) -> Arc<Erased> {
+		self
+	}
+}
+
+/// One session's tracked receivers, each a [`Hold`] seen as `H`.
+pub(crate) struct Pressure<H: ?Sized> {
+	state: kio::Lock<State<H>>,
+}
+
+impl<H: ?Sized> Clone for Pressure<H> {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+		}
+	}
+}
+
+impl<H: ?Sized> Default for Pressure<H> {
+	fn default() -> Self {
+		Self {
+			state: kio::Lock::new(State {
+				entries: Vec::new(),
+				next: 0,
+				prune: PRUNE,
+			}),
+		}
+	}
+}
+
+/// Entries kept before the first sweep of dropped readers.
+const PRUNE: usize = 64;
+
+struct State<H: ?Sized> {
+	/// Weak, so a reader unregisters by being dropped, and swept on growth.
+	entries: Vec<Weak<H>>,
+	next: u64,
+	/// Sweep dropped readers once `entries` reaches this.
+	prune: usize,
+}
+
+/// A live holder, as of the choice.
+struct Candidate<H: ?Sized> {
+	hold: Arc<H>,
+	rank: Rank,
+	held: u64,
+	seq: u64,
+}
+
+impl<H: ?Sized + Holder> Pressure<H> {
+	/// Track a new receiver at `rank`, which `stopper` stops with `code` on eviction.
+	pub fn track<R: RecvStream>(&self, rank: Rank, stopper: R::Stopper, code: u32) -> Arc<Hold<R>>
+	where
+		Hold<R>: Erase<H>,
+	{
+		let mut state = self.state.lock();
+		let hold = Arc::new(Hold {
+			held: AtomicU64::new(0),
+			evicted: AtomicBool::new(false),
+			waker: Mutex::new(None),
+			rank: Mutex::new(rank),
+			seq: state.next,
+			credit: Mutex::new(None),
+			stopper,
+			code,
+		});
+		state.next += 1;
+		if state.entries.len() >= state.prune {
+			state.entries.retain(|entry| entry.strong_count() > 0);
+			state.prune = PRUNE.max(2 * state.entries.len());
+		}
+		state.entries.push(Arc::downgrade(&hold.clone().erase()));
+		hold
+	}
+
+	/// Evict the least useful holder of credit, returning whether there was one.
+	pub fn evict(&self) -> bool {
+		let victim = victim(&self.state.lock().entries);
+		// Evicted without the registry lock: dropping credit and stopping call into the
+		// transport, and readers track and drop meanwhile.
+		match victim {
+			Some(hold) => {
+				hold.evict();
+				true
+			}
+			None => false,
+		}
 	}
 
 	/// The bytes every tracked receiver holds, for tests.
@@ -139,31 +312,39 @@ impl Pressure {
 		state
 			.entries
 			.iter()
-			.map(|(_, e)| e.slot.held.load(Ordering::Relaxed))
+			.filter_map(Weak::upgrade)
+			.map(|hold| hold.held())
 			.sum()
 	}
 }
 
 /// Pick the victim: see the module docs for the order.
-fn victim(entries: &Slab<Entry>) -> Option<usize> {
-	let held = |entry: &Entry| entry.slot.held.load(Ordering::Relaxed);
-	let holding = || {
-		entries
-			.iter()
-			.filter(|(_, entry)| held(entry) > 0 && !entry.slot.evicted.load(Ordering::Relaxed))
-	};
+fn victim<H: ?Sized + Holder>(entries: &[Weak<H>]) -> Option<Arc<H>> {
+	let holding: Vec<_> = entries
+		.iter()
+		.filter_map(Weak::upgrade)
+		.filter_map(|hold| {
+			let held = hold.held();
+			(held > 0 && !hold.is_evicted()).then(|| Candidate {
+				rank: hold.rank(),
+				seq: hold.seq(),
+				held,
+				hold,
+			})
+		})
+		.collect();
 
 	// Media: the broadcast holding the most, then its least useful stream. Keyed by path
 	// rather than by `Arc`, since separate subscriptions to one broadcast share no `Arc`.
 	// A run of streams sharing one `Arc` sums before it is hashed.
 	let mut domains: HashMap<&PathOwned, u64> = HashMap::new();
 	let mut run: Option<(&Arc<PathOwned>, u64)> = None;
-	for (_, entry) in holding() {
+	for entry in &holding {
 		if let Rank::Media { broadcast, .. } = &entry.rank {
 			match &mut run {
-				Some((path, total)) if Arc::ptr_eq(path, broadcast) => *total += held(entry),
+				Some((path, total)) if Arc::ptr_eq(path, broadcast) => *total += entry.held,
 				_ => {
-					if let Some((path, total)) = run.replace((broadcast, held(entry))) {
+					if let Some((path, total)) = run.replace((broadcast, entry.held)) {
 						*domains.entry(path.as_ref()).or_default() += total;
 					}
 				}
@@ -177,118 +358,48 @@ fn victim(entries: &Slab<Entry>) -> Option<usize> {
 	let domain = domains
 		.into_iter()
 		.max_by(|(a, a_held), (b, b_held)| a_held.cmp(b_held).then_with(|| b.as_str().cmp(a.as_str())));
-	if let Some((domain, _)) = domain {
-		return holding()
-			.filter_map(|(id, entry)| match &entry.rank {
-				Rank::Media { broadcast, priority } if broadcast.as_ref() == domain => Some((id, priority, entry)),
+	let chosen = match domain {
+		Some((domain, _)) => holding
+			.iter()
+			.filter_map(|entry| match &entry.rank {
+				Rank::Media { broadcast, priority } if broadcast.as_ref() == domain => Some((priority, entry)),
 				_ => None,
 			})
 			// `Priority` sorts the most urgent first, so the greatest is the least useful.
-			.max_by(|(_, a, a_entry), (_, b, b_entry)| {
+			.max_by(|(a, a_entry), (b, b_entry)| {
 				a.cmp(b)
-					.then_with(|| held(a_entry).cmp(&held(b_entry)))
+					.then_with(|| a_entry.held.cmp(&b_entry.held))
 					.then_with(|| a_entry.seq.cmp(&b_entry.seq))
 			})
-			.map(|(id, ..)| id);
-	}
-
-	let largest = |control: bool| {
-		holding()
-			.filter(|(_, entry)| matches!(entry.rank, Rank::Control) == control)
-			.max_by(|(_, a), (_, b)| held(a).cmp(&held(b)).then_with(|| a.seq.cmp(&b.seq)))
-			.map(|(id, _)| id)
-	};
-	largest(false).or_else(|| largest(true))
-}
-
-/// A tracked receiver's registration, removed on drop.
-pub(crate) struct Ticket {
-	pressure: Pressure,
-	id: usize,
-	slot: Arc<Slot>,
-}
-
-impl Ticket {
-	/// Re-rank the stream, once its header identifies it.
-	pub fn rank(&self, rank: Rank) {
-		self.pressure.state.lock().entries[self.id].rank = rank;
-	}
-
-	/// Record how many bytes of credit the reader holds.
-	pub fn held(&self, bytes: u64) {
-		self.slot.held.store(bytes, Ordering::Relaxed);
-	}
-
-	/// Whether the monitor chose this stream, without registering to hear when it does.
-	pub fn is_evicted(&self) -> bool {
-		self.slot.evicted.load(Ordering::Acquire)
-	}
-
-	/// Whether the monitor chose this stream, registering `cx` to hear when it does.
-	pub fn poll_evicted(&self, cx: &Context<'_>) -> bool {
-		self.slot.poll_evicted(cx)
-	}
-
-	/// Hear this stream's eviction apart from the reader holding the ticket.
-	pub fn eviction(&self) -> Eviction {
-		Eviction(Some(self.slot.clone()))
-	}
-}
-
-/// Hears that the monitor chose a stream without borrowing its reader, so a handler that
-/// lent the reader to a wait parked elsewhere still ends. Empty for an untracked reader.
-pub(crate) struct Eviction(Option<Arc<Slot>>);
-
-impl Eviction {
-	/// For an untracked reader, which is never evicted.
-	pub fn none() -> Self {
-		Self(None)
-	}
-
-	/// Run `serve` to its end, or fail it with [`Error::Evicted`](crate::Error::Evicted)
-	/// once the monitor chooses the stream, whatever `serve` is parked on.
-	pub async fn guard<T>(&self, serve: impl Future<Output = Result<T, crate::Error>>) -> Result<T, crate::Error> {
-		let mut serve = std::pin::pin!(serve);
-		std::future::poll_fn(|cx| {
-			let res = serve.as_mut().poll(cx);
-			self.check(cx, res)
-		})
-		.await
-	}
-
-	/// [`Self::guard`] for a state machine owning the stream: a pending `res` fails with
-	/// [`Error::Evicted`](crate::Error::Evicted) once the monitor chooses the stream. Call
-	/// it on the machine's result, after its reads, which register on the same slot, so the
-	/// eviction wakes the machine at the top rather than a wait that will not look.
-	pub fn check<T>(&self, cx: &Context<'_>, res: Poll<Result<T, crate::Error>>) -> Poll<Result<T, crate::Error>> {
-		match (res, &self.0) {
-			(Poll::Pending, Some(slot)) if slot.poll_evicted(cx) => Poll::Ready(Err(crate::Error::Evicted)),
-			(res, _) => res,
+			.map(|(_, entry)| entry),
+		None => {
+			let largest = |control: bool| {
+				holding
+					.iter()
+					.filter(|entry| matches!(entry.rank, Rank::Control) == control)
+					.max_by(|a, b| a.held.cmp(&b.held).then_with(|| a.seq.cmp(&b.seq)))
+			};
+			largest(false).or_else(|| largest(true))
 		}
-	}
-}
-
-impl Drop for Ticket {
-	fn drop(&mut self) {
-		self.pressure.state.lock().entries.remove(self.id);
-	}
+	};
+	chosen.map(|entry| entry.hold.clone())
 }
 
 /// Cancels a stream each time the session's receive allowance fills.
-pub(crate) struct Monitor<S> {
+pub(crate) struct Monitor<S, H: ?Sized> {
 	session: S,
-	pressure: Pressure,
+	pressure: Pressure<H>,
 }
 
-impl<S: crate::transport::poll::Session> Monitor<S> {
+impl<S: crate::transport::poll::Session, H: ?Sized + Holder> Monitor<S, H> {
 	/// Watch `session`, cancelling streams tracked by `pressure`.
-	pub fn new(session: S, pressure: Pressure) -> Self {
+	pub fn new(session: S, pressure: Pressure<H>) -> Self {
 		Self { session, pressure }
 	}
 
 	/// Run until dropped. Each fill cancels one stream: the next fill can only come after
 	/// it let go of its credit and the peer spent what that freed.
-	pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+	pub fn poll(&mut self, cx: &mut Context<'_>) -> std::task::Poll<()> {
 		while self.session.poll_credit_exhausted(cx).is_ready() {
 			if !self.pressure.evict() {
 				// Untracked readers or transport read-ahead hold it all; whoever holds it
@@ -296,14 +407,51 @@ impl<S: crate::transport::poll::Session> Monitor<S> {
 				tracing::warn!("receive credit exhausted with no tracked holder to cancel");
 			}
 		}
-		Poll::Pending
+		std::task::Poll::Pending
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::task::{Poll, Waker};
+
 	use super::*;
-	use crate::{Path, track::Order};
+	use crate::{Path, track::Order, transport::Unheld};
+
+	/// Logs the codes its streams were stopped with.
+	#[derive(Clone, Default)]
+	struct Stops(Arc<Mutex<Vec<u32>>>);
+
+	impl Stopper for Stops {
+		fn stop(&self, code: u32) {
+			lock(&self.0).push(code);
+		}
+	}
+
+	/// A stream that only exists to name its credit and stopper.
+	struct Probe;
+
+	impl RecvStream for Probe {
+		type Error = crate::lite::test_transport::SinkError;
+		type Credit = Unheld;
+		type Stopper = Stops;
+
+		fn poll_read(&mut self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<Result<Option<Unheld>, Self::Error>> {
+			Poll::Pending
+		}
+
+		fn stop(&mut self, _: u32) {}
+
+		fn stopper(&self) -> Stops {
+			Stops::default()
+		}
+
+		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Pending
+		}
+	}
+
+	type Probes = Pressure<Hold<Probe>>;
 
 	fn media(broadcast: &str, track: u8, group: u64) -> Rank {
 		Rank::Media {
@@ -313,26 +461,26 @@ mod tests {
 	}
 
 	/// Track a receiver holding `held` bytes.
-	fn hold(pressure: &Pressure, rank: Rank, held: u64) -> Ticket {
-		let ticket = pressure.track(rank);
-		ticket.held(held);
-		ticket
+	fn hold(pressure: &Probes, rank: Rank, held: u64) -> Arc<Hold<Probe>> {
+		let hold = pressure.track::<Probe>(rank, Stops::default(), 0x35);
+		hold.take(Unheld(held));
+		hold
 	}
 
-	/// Evict once, returning every ticket chosen so far.
-	fn evict(pressure: &Pressure, tickets: &[&Ticket]) -> Vec<usize> {
+	/// Evict once, returning every hold chosen so far.
+	fn evict(pressure: &Probes, holds: &[&Arc<Hold<Probe>>]) -> Vec<usize> {
 		assert!(pressure.evict());
-		tickets
+		holds
 			.iter()
 			.enumerate()
-			.filter(|(_, ticket)| ticket.is_evicted())
+			.filter(|(_, hold)| hold.is_evicted())
 			.map(|(i, _)| i)
 			.collect()
 	}
 
 	#[test]
 	fn media_goes_before_unidentified_before_control() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let control = hold(&pressure, Rank::Control, 100);
 		let unidentified = hold(&pressure, Rank::Unidentified, 50);
 		let media = hold(&pressure, media("room", 255, 0), 10);
@@ -347,7 +495,7 @@ mod tests {
 
 	#[test]
 	fn the_least_urgent_stream_of_the_fullest_broadcast_goes() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		// `small` holds less in total, so its less urgent track is not compared.
 		let small = hold(&pressure, media("small", 0, 0), 30);
 		let urgent = hold(&pressure, media("big", 200, 0), 20);
@@ -361,7 +509,7 @@ mod tests {
 
 	#[test]
 	fn group_order_ranks_within_a_subscription() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let old = hold(&pressure, media("room", 1, 1), 10);
 		let new = hold(&pressure, media("room", 1, 2), 10);
 		// Newest first by default, so the older group is the less useful one.
@@ -371,7 +519,7 @@ mod tests {
 			broadcast: Arc::new(Path::new("room").to_owned()),
 			priority: Priority::new(1, 0, group).with_order(Order::Ascending),
 		};
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let old = hold(&pressure, ascending(1), 10);
 		let new = hold(&pressure, ascending(2), 10);
 		assert_eq!(evict(&pressure, &[&old, &new]), [1]);
@@ -379,7 +527,7 @@ mod tests {
 
 	#[test]
 	fn ties_go_to_the_larger_then_the_newer() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let first = hold(&pressure, Rank::Unidentified, 10);
 		let larger = hold(&pressure, Rank::Unidentified, 20);
 		let newest = hold(&pressure, Rank::Unidentified, 10);
@@ -390,24 +538,39 @@ mod tests {
 
 	#[test]
 	fn empty_and_dropped_receivers_are_never_chosen() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let idle = hold(&pressure, media("room", 0, 0), 0);
 		drop(hold(&pressure, media("room", 0, 0), 10));
 		assert!(!pressure.evict());
 		assert!(!idle.is_evicted());
 	}
 
+	/// Dropped readers are swept as the registry grows, so it stays the size of what is live.
+	#[test]
+	fn dropped_receivers_are_swept() {
+		let pressure = Probes::default();
+		let live = hold(&pressure, Rank::Control, 1);
+		for _ in 0..10 * PRUNE {
+			drop(hold(&pressure, Rank::Control, 1));
+		}
+		assert!(pressure.state.lock().entries.len() <= PRUNE + 1);
+		assert_eq!(pressure.held(), 1);
+		drop(live);
+	}
+
 	#[test]
 	fn rerank_once_identified() {
-		let pressure = Pressure::default();
+		let pressure = Probes::default();
 		let header = hold(&pressure, Rank::Unidentified, 10);
 		let control = hold(&pressure, Rank::Control, 10);
 		header.rank(media("room", 0, 0));
 		assert_eq!(evict(&pressure, &[&header, &control]), [0]);
 	}
 
+	/// The eviction itself returns the credit and stops the stream, so a reader parked
+	/// on something else holds nothing; it hears of it on its next poll.
 	#[test]
-	fn eviction_wakes_the_reader() {
+	fn eviction_lets_go_without_the_reader() {
 		#[derive(Default)]
 		struct Count(std::sync::atomic::AtomicUsize);
 		impl std::task::Wake for Count {
@@ -416,14 +579,23 @@ mod tests {
 			}
 		}
 
-		let pressure = Pressure::default();
-		let ticket = hold(&pressure, Rank::Unidentified, 10);
+		let pressure = Probes::default();
+		let stops = Stops::default();
+		let hold = pressure.track::<Probe>(Rank::Unidentified, stops.clone(), 0x35);
+		hold.take(Unheld(10));
 		let count = Arc::new(Count::default());
 		let waker = Waker::from(count.clone());
-		assert!(!ticket.poll_evicted(&Context::from_waker(&waker)));
+		assert!(!hold.poll_evicted(&Context::from_waker(&waker)));
+
 		assert!(pressure.evict());
+		assert_eq!(pressure.held(), 0);
+		assert_eq!(*lock(&stops.0), [0x35]);
 		assert_eq!(count.0.load(Ordering::Relaxed), 1);
-		assert!(ticket.poll_evicted(&Context::from_waker(&waker)));
+		assert!(hold.poll_evicted(&Context::from_waker(&waker)));
+
+		// A read that raced the eviction returns its credit at once.
+		hold.take(Unheld(5));
+		assert_eq!(pressure.held(), 0);
 	}
 
 	/// Choose a victim among streams spread across broadcasts. The cost per stream must stay
@@ -440,8 +612,8 @@ mod tests {
 				let paths: Vec<_> = (0..broadcasts)
 					.map(|b| Arc::new(Path::new(&format!("broadcast/{b}")).to_owned()))
 					.collect();
-				let pressure = Pressure::default();
-				let _tickets: Vec<_> = (0..streams)
+				let pressure = Probes::default();
+				let _holds: Vec<_> = (0..streams)
 					.map(|i| {
 						let rank = Rank::Media {
 							broadcast: paths[i % broadcasts].clone(),

@@ -935,7 +935,32 @@ pub struct RecvStream {
 	web: bool,
 }
 
+/// Stops a [`RecvStream`] without borrowing it, with the same code mapping as its `stop`.
+#[derive(Clone)]
+pub struct Stopper {
+	inner: super::Stopper,
+	web: bool,
+}
+
+impl Stopper {
+	/// Stop the stream with an application `code`.
+	pub fn stop(&self, code: u32) {
+		match self.web {
+			true => self.inner.stop_code(proto::error_to_http3(code)),
+			false => self.inner.stop_code(u64::from(code)),
+		}
+	}
+}
+
 impl RecvStream {
+	/// A handle that stops this stream without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			inner: self.inner.stopper(),
+			web: self.web,
+		}
+	}
+
 	fn map(&self, err: Error) -> Error {
 		match self.web {
 			true => unmap_err(err),

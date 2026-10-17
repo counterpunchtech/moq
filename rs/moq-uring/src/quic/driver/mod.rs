@@ -17,7 +17,7 @@ mod stream;
 pub use connection::Connection;
 pub use endpoint::Endpoint;
 pub use group::SendGroup;
-pub use stream::{Credit, RecvStream, SendStream};
+pub use stream::{Credit, RecvStream, SendStream, Stopper};
 
 pub(crate) use connection::{End, Shared};
 

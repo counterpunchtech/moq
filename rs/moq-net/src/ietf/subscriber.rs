@@ -707,7 +707,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 	// Every stream this half reads, cancelled by rank when held receive credit fills.
-	pub(super) pressure: Pressure,
+	pub(super) pressure: Pressure<crate::pressure::Erased>,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -815,7 +815,7 @@ where
 
 	/// Track the streams this half reads with the session's `pressure`. Set before the
 	/// halves that clone this subscriber start.
-	pub fn with_pressure(mut self, pressure: Pressure) -> Self {
+	pub fn with_pressure(mut self, pressure: Pressure<crate::pressure::Erased>) -> Self {
 		self.pressure = pressure;
 		self
 	}
@@ -3519,14 +3519,7 @@ where
 		Err(request::from_code(code, request::Kind::TrackStatus, self.version))
 	}
 
-	/// Serve a subgroup stream. It ends once the pressure monitor evicts the stream, even
-	/// from a wait parked off it, such as on its alias or its fill.
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let eviction = stream.eviction();
-		eviction.guard(self.serve_group(stream)).await
-	}
-
-	async fn serve_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
 
 		if group.sub_group_id != 0 {
@@ -4077,14 +4070,7 @@ where
 	/// into a group producer of its own and hands that to the subgroup stream carrying the
 	/// rest of the group; see [`Fill`]. A reset stream is the publisher's fill-failure
 	/// signal, and arrives here as a read error, which drops the head and the join with it.
-	/// Serve a fetch stream. It ends once the pressure monitor evicts the stream, even from a
-	/// wait parked off it, such as on SUBSCRIBE_OK.
 	pub async fn recv_fill(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let eviction = stream.eviction();
-		eviction.guard(self.serve_fill(stream)).await
-	}
-
-	async fn serve_fill(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		// The dispatcher peeked the stream type to get here.
 		let _ = stream.varint().await?;
 		let header: ietf::FetchHeader = stream.decode().await?;
@@ -10960,9 +10946,10 @@ mod stitch_tests {
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
 	}
 
-	/// A tail parked on its head, holding the read-ahead it peeked, still hears the pressure
-	/// monitor choose it. It stops with Evicted and lets go of its credit, which the head may
-	/// need to arrive, and the head still lands.
+	/// A tail parked on its head, holding the read-ahead it peeked, lets go the moment the
+	/// pressure monitor chooses it: the eviction itself returns the credit, which the head may
+	/// need to arrive, and stops the stream, without the tail being polled. The head still
+	/// lands, and the tail finishes from what it had already buffered.
 	#[moq_net_sim::test]
 	async fn an_evicted_tail_waiting_on_its_fill_lets_go() {
 		use crate::coding::StreamCodes as _;
@@ -10977,29 +10964,25 @@ mod stitch_tests {
 		let pressure = h.subscriber.pressure.clone();
 		let mut tail = h.stream().await;
 		tail.track(&pressure, Rank::Unidentified);
+		let evicted = vec![VERSION.encode_stream_code(&crate::StreamError::Evicted)];
 
 		let mut serve_tail = h.subscriber.clone();
-		let res = {
-			let mut parked = std::pin::pin!(serve_tail.recv_group(&mut tail));
-			let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), parked.as_mut()).await;
-			assert!(waited.is_err(), "the tail did not wait for its head: {waited:?}");
-			assert!(pressure.held() > 0, "the parked tail holds its read-ahead");
+		let mut parked = std::pin::pin!(serve_tail.recv_group(&mut tail));
+		let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), parked.as_mut()).await;
+		assert!(waited.is_err(), "the tail did not wait for its head: {waited:?}");
+		assert!(pressure.held() > 0, "the parked tail holds its read-ahead");
 
-			assert!(pressure.evict());
-			moq_net_sim::timeout(std::time::Duration::from_secs(1), parked)
-				.await
-				.expect("the evicted tail never woke")
-		};
-		assert!(matches!(res, Err(Error::Evicted)), "{res:?}");
-		super::super::session::stop_on_error(&mut tail, res).expect("the session survives");
-		assert_eq!(pressure.held(), 0, "the evicted tail let go of its credit");
-		assert_eq!(
-			h.session.log.stops(),
-			vec![VERSION.encode_stream_code(&crate::StreamError::Evicted)]
-		);
+		assert!(pressure.evict());
+		assert_eq!(pressure.held(), 0, "the eviction let go of the parked tail's credit");
+		assert_eq!(h.session.log.stops(), evicted, "the eviction stopped the parked tail");
 
 		let mut fill = h.stream().await;
 		h.subscriber.clone().recv_fill(&mut fill).await.expect("the head lands");
+		moq_net_sim::timeout(std::time::Duration::from_secs(1), parked)
+			.await
+			.expect("the tail never took its head")
+			.expect("the tail finishes from its buffer");
+		assert_eq!(h.session.log.stops(), evicted, "an evicted stream is stopped once");
 	}
 
 	/// A tail parked on its head stops holding the end open, so the finished fill does until

@@ -294,6 +294,15 @@ impl RecvStream {
         Ok(())
     }
 
+    /// A handle that stops this stream as [`stop`](Self::stop) does, without borrowing it.
+    pub fn stopper(&self) -> Stopper {
+        Stopper {
+            conn: self.conn.0.clone(),
+            stream: self.stream,
+            is_0rtt: self.is_0rtt,
+        }
+    }
+
     /// Check if this stream predates completion of the handshake on an incoming connection.
     ///
     /// True only if the stream was accepted before the handshake completed, which is only possible
@@ -623,6 +632,38 @@ impl tokio::io::AsyncRead for RecvStream {
     ) -> Poll<io::Result<()>> {
         ready!(Self::poll_read_buf(self.get_mut(), cx, buf))?;
         Poll::Ready(Ok(()))
+    }
+}
+
+/// Stops a [`RecvStream`] without borrowing it.
+///
+/// It does not keep the connection open: only [`RecvStream`] and the other handles count.
+#[derive(Clone)]
+pub struct Stopper {
+    conn: Arc<ConnectionInner>,
+    stream: StreamId,
+    is_0rtt: bool,
+}
+
+impl Stopper {
+    /// Stop accepting data, as [`RecvStream::stop`] does.
+    ///
+    /// The stream's own handle learns of it on its next read, which yields `ClosedStream`.
+    pub fn stop(&self, error_code: VarInt) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("Stopper::stop");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
+        }
+        conn.inner.recv_stream(self.stream).stop(error_code)?;
+        conn.check_credit();
+        conn.wake();
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Stopper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stopper").field("stream", &self.stream).finish()
     }
 }
 

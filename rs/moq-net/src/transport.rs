@@ -154,6 +154,20 @@ impl Credit for Unheld {
 	}
 }
 
+/// Stops a [`poll::RecvStream`] without borrowing it, as [`stop`](poll::RecvStream::stop)
+/// would, for when the stream's reader is parked somewhere else.
+///
+/// A no-op once the stream has ended. A transport whose reads return their credit (an
+/// [`Unheld`] credit) never needs a stream stopped this way, so it may use `()`.
+pub trait Stopper: 'static {
+	/// Send STOP_SENDING with a stream `code`, unless the stream already ended.
+	fn stop(&self, code: u32);
+}
+
+impl Stopper for () {
+	fn stop(&self, _code: u32) {}
+}
+
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
@@ -375,7 +389,7 @@ pub mod poll {
 	pub trait Boxable:
 		Session<
 			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync, Stopper: MaybeSend + MaybeSync>,
 			Error: MaybeSend,
 		> + MaybeSend
 		+ MaybeSync
@@ -385,7 +399,7 @@ pub mod poll {
 	impl<S> Boxable for S where
 		S: Session<
 				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync, Stopper: MaybeSend + MaybeSync>,
 				Error: MaybeSend,
 			> + MaybeSend
 			+ MaybeSync
@@ -576,6 +590,9 @@ pub mod poll {
 		/// The connection credit each read returns.
 		type Credit: Credit;
 
+		/// What [`stopper`](Self::stopper) returns.
+		type Stopper: super::Stopper;
+
 		/// Poll to read some data into the provided slice.
 		///
 		/// Returns the credit for the bytes read ([`Credit::len`] counts them), or
@@ -666,6 +683,9 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// A handle that stops this stream as [`stop`](Self::stop) does, without borrowing it.
+		fn stopper(&self) -> Self::Stopper;
+
 		/// Poll until the stream has been closed by either side.
 		///
 		/// This includes:
@@ -750,6 +770,8 @@ mod tests {
 	impl super::poll::RecvStream for Read {
 		type Error = crate::Error;
 		type Credit = Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 		fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Unheld>, Self::Error>> {
 			// A safe transport may read its destination before overwriting it.
 			assert!(dst.iter().all(|byte| *byte == 0));

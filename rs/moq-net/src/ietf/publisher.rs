@@ -541,7 +541,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) subscriptions: crate::session::Slots,
 	pub(super) fetches: crate::session::Slots,
 	/// Tracks each stream this half opens.
-	pub(super) pressure: crate::pressure::Pressure,
+	pub(super) pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
 }

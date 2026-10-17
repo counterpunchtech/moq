@@ -10,7 +10,7 @@ use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
 	coding::{Reader, Stream},
 	lite,
-	pressure::{Pressure, Rank},
+	pressure::Rank,
 	track::{Position, Subscription},
 };
 
@@ -90,7 +90,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 	/// Every stream this half reads, cancelled by rank when held receive credit fills.
-	pub(super) pressure: Pressure,
+	pub(super) pressure: crate::pressure::Of<S>,
 }
 
 #[derive(Clone)]
@@ -1315,8 +1315,6 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
-	/// Heard here because the link cost wait parks off the stream's reader.
-	eviction: crate::pressure::Eviction,
 	state: PrefixState<S>,
 }
 
@@ -1360,7 +1358,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		Self {
 			subscriber,
 			prefix,
-			eviction: crate::pressure::Eviction::none(),
 			state: PrefixState::Open,
 		}
 	}
@@ -1368,9 +1365,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let res = self.poll_run(waiter);
-		self.eviction
-			.check(&waiter.context(), res)
+		self.poll_run(waiter)
 			.map_err(|err| lite::error::control(&mut self.subscriber.session.clone(), err))
 	}
 
@@ -1385,7 +1380,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						&mut cx
 					))?;
 					stream.reader.track(&self.subscriber.pressure, Rank::Control);
-					self.eviction = stream.reader.eviction();
 
 					stream.writer.buffer(&lite::ControlType::Announce)?;
 					// Lite04/05: ask the peer to filter out announces that already passed
@@ -4193,9 +4187,11 @@ mod tests {
 	}
 
 	/// A prefix stream waiting on the peer's SETUP for its link cost holds what it read
-	/// past ANNOUNCE_OK, so it still has to hear the pressure monitor choose it.
+	/// past ANNOUNCE_OK. The pressure monitor choosing it returns that credit and stops the
+	/// stream itself, without the prefix being polled.
 	#[moq_net_sim::test]
 	async fn an_evicted_prefix_waiting_on_its_link_cost_lets_go() {
+		use crate::coding::StreamCodes as _;
 		const VERSION: Version = Version::Lite06;
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -4214,9 +4210,11 @@ mod tests {
 		.unwrap();
 
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::Clock::sim(),
-			session: crate::lite::test_transport::ScriptedSession::new(script),
+			session,
 			origin,
 			recv_bandwidth: None,
 			version: VERSION,
@@ -4230,20 +4228,18 @@ mod tests {
 		let pressure = subscriber.pressure.clone();
 		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
 
-		let res = {
-			let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
-			let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), run.as_mut()).await;
-			assert!(waited.is_err(), "the prefix did not wait for its link cost: {waited:?}");
-			assert!(pressure.held() > 0, "the parked prefix holds its read-ahead");
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), run.as_mut()).await;
+		assert!(waited.is_err(), "the prefix did not wait for its link cost: {waited:?}");
+		assert!(pressure.held() > 0, "the parked prefix holds its read-ahead");
 
-			assert!(pressure.evict());
-			moq_net_sim::timeout(std::time::Duration::from_secs(1), run)
-				.await
-				.expect("the evicted prefix never woke")
-		};
-		assert!(matches!(res, Err(Error::Evicted)), "{res:?}");
-		drop(prefix);
-		assert_eq!(pressure.held(), 0, "the evicted prefix let go of its credit");
+		assert!(pressure.evict());
+		assert_eq!(pressure.held(), 0, "the eviction let go of the parked prefix's credit");
+		assert_eq!(
+			log.stops(),
+			vec![VERSION.encode_stream_code(&crate::StreamError::Evicted)],
+			"the eviction stopped the parked prefix"
+		);
 	}
 }
 

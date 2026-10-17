@@ -3378,6 +3378,8 @@ mod tests {
 
         let stats = client.credit_stats();
         assert_eq!((stats.held, stats.unread), (0, 0));
+    }
+
     /// A group token indexes its own connection's schedule, so another connection refuses it
     /// rather than reach whichever of its own groups shares the index.
     #[test]

@@ -717,6 +717,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
 		fn poll_read(
 			&mut self,
@@ -1096,6 +1098,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
 		fn poll_read(
 			&mut self,

@@ -142,6 +142,8 @@ pub struct RecvStream<S>(S);
 impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	type Error = Error<S::Error>;
 	type Credit = moq::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
 		backend::RecvStream::poll_read(&mut self.0, cx, dst)
 			.map_err(Error)

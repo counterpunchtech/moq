@@ -20,8 +20,19 @@ impl moq_net::transport::Credit for driver::Credit {
 	}
 }
 
+impl moq_net::transport::Stopper for web::Stopper {
+	fn stop(&self, code: u32) {
+		web::Stopper::stop(self, code)
+	}
+}
+
 impl super::HeldRecvStream for web::RecvStream {
 	type Credit = driver::Credit;
+	type Stopper = web::Stopper;
+
+	fn stopper(&self) -> web::Stopper {
+		web::RecvStream::stopper(self)
+	}
 
 	fn poll_read_held(
 		&mut self,

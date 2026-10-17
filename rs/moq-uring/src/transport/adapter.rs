@@ -49,6 +49,12 @@ pub trait HeldRecvStream: backend::RecvStream {
 	/// The connection credit a read keeps until it is dropped.
 	type Credit: moq::Credit;
 
+	/// What [`stopper`](Self::stopper) returns.
+	type Stopper: moq::Stopper;
+
+	/// A handle that stops this stream without borrowing it.
+	fn stopper(&self) -> Self::Stopper;
+
 	/// Read up to `max` bytes with their credit, or `None` once finished.
 	#[allow(clippy::type_complexity)]
 	fn poll_read_held(
@@ -62,6 +68,8 @@ pub trait HeldRecvStream: backend::RecvStream {
 pub trait HeldSession: backend::Session<RecvStream: HeldRecvStream> {
 	/// See [`poll_credit_exhausted`](poll::Session::poll_credit_exhausted).
 	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()>;
+}
+
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
 /// `pub` only because `pub(crate)` is refused (E0446): the adapter's `type Group` projects
@@ -193,6 +201,10 @@ pub struct RecvStream<S>(S);
 impl<S: HeldRecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	type Error = Error<S::Error>;
 	type Credit = S::Credit;
+	type Stopper = S::Stopper;
+	fn stopper(&self) -> S::Stopper {
+		self.0.stopper()
+	}
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<S::Credit>, Self::Error>> {
 		let read = ready!(self.0.poll_read_held(cx, dst.len())).map_err(Error)?;
 		Poll::Ready(Ok(read.map(|(bytes, credit)| {
@@ -283,6 +295,8 @@ mod tests {
 	}
 	impl HeldRecvStream for Stream {
 		type Credit = moq::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 		fn poll_read_held(
 			&mut self,
 			cx: &mut Context<'_>,

@@ -335,6 +335,14 @@ impl RecvStream {
 		self.finished || self.stopped
 	}
 
+	/// A handle that stops this stream without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			shared: self.shared.clone(),
+			id: self.id,
+		}
+	}
+
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn stop_code(&mut self, code: u64) {
@@ -456,6 +464,31 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 				Read::Reset(code) => return Poll::Ready(Err(Error::Reset(code))),
 			}
 		}
+	}
+}
+
+/// Stops a [`RecvStream`] without borrowing it.
+///
+/// The stream's own handle learns of it on its next read, which fails as stopped. What its
+/// closed-watch read ahead stays with that handle until it stops or drops.
+#[derive(Clone)]
+pub struct Stopper {
+	shared: Shared,
+	id: StreamId,
+}
+
+impl Stopper {
+	/// [`RecvStream::stop_code`] from outside the stream.
+	pub(crate) fn stop_code(&self, code: u64) {
+		// Err means the stream is already gone, which is what we wanted.
+		let _ = self
+			.shared
+			.conn
+			.borrow_mut()
+			.recv_stream(self.id)
+			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+		self.shared.check_credit();
+		self.shared.kick();
 	}
 }
 

@@ -244,7 +244,7 @@ pub(super) async fn run_present<S>(
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
-	pressure: crate::pressure::Pressure,
+	pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 ) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
@@ -311,7 +311,7 @@ struct Present<S: crate::transport::poll::Session> {
 	handle: Handle,
 	version: Version,
 	id: u64,
-	pressure: crate::pressure::Pressure,
+	pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 }
 
 #[cfg(feature = "async")]

@@ -165,6 +165,11 @@ impl VirtualRecvStream {
 impl crate::transport::poll::RecvStream for VirtualRecvStream {
 	type Error = crate::Error;
 	type Credit = Unheld;
+	type Stopper = VirtualStopper;
+
+	fn stopper(&self) -> VirtualStopper {
+		VirtualStopper(self.rx.clone())
+	}
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Unheld>, Self::Error>> {
 		if dst.is_empty() {
@@ -240,6 +245,15 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 				Poll::Pending => return Poll::Pending,
 			}
 		}
+	}
+}
+
+/// Stops a [`VirtualRecvStream`] without borrowing it, discarding what is routed to it.
+pub struct VirtualStopper(Queue<Bytes>);
+
+impl crate::transport::Stopper for VirtualStopper {
+	fn stop(&self, _code: u32) {
+		self.0.close();
 	}
 }
 
@@ -508,10 +522,35 @@ impl<C: Credit> Credit for AdapterCredit<C> {
 }
 
 type RealCredit<S> = <<S as crate::transport::poll::Session>::RecvStream as crate::transport::poll::RecvStream>::Credit;
+type RealStopper<S> =
+	<<S as crate::transport::poll::Session>::RecvStream as crate::transport::poll::RecvStream>::Stopper;
+
+/// Stops an [`AdapterRecv`] without borrowing it.
+pub enum AdapterStopper<T> {
+	Real(T),
+	Virtual(VirtualStopper),
+}
+
+impl<T: crate::transport::Stopper> crate::transport::Stopper for AdapterStopper<T> {
+	fn stop(&self, code: u32) {
+		match self {
+			Self::Real(s) => s.stop(code),
+			Self::Virtual(s) => s.stop(code),
+		}
+	}
+}
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
 	type Error = crate::Error;
 	type Credit = AdapterCredit<RealCredit<S>>;
+	type Stopper = AdapterStopper<RealStopper<S>>;
+
+	fn stopper(&self) -> Self::Stopper {
+		match self {
+			Self::Real(s) => AdapterStopper::Real(s.stopper()),
+			Self::Virtual(s) => AdapterStopper::Virtual(s.stopper()),
+		}
+	}
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		match self {

@@ -16,6 +16,20 @@ pub struct RecvStream {
 	close: Arc<CloseReason>,
 }
 
+/// Stops a [`RecvStream`] without borrowing it.
+#[derive(Clone)]
+pub struct Stopper {
+	inner: crate::quic::driver::Stopper,
+	close: Arc<CloseReason>,
+}
+
+impl Stopper {
+	/// Stop accepting data, as [`RecvStream::stop`] does.
+	pub fn stop(&self, code: u32) -> Result<(), crate::quic::driver::ClosedStream> {
+		self.inner.stop(self.close.encode_stream_code(code))
+	}
+}
+
 impl RecvStream {
 	pub(crate) fn new(stream: crate::quic::driver::RecvStream, close: Arc<CloseReason>) -> Self {
 		Self { inner: stream, close }
@@ -41,6 +55,14 @@ impl RecvStream {
 	pub fn stop(&mut self, code: u32) -> Result<(), crate::quic::driver::ClosedStream> {
 		let code = self.close.encode_stream_code(code);
 		self.inner.stop(code)
+	}
+
+	/// A handle that stops this stream as [`stop`](Self::stop) does, without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			inner: self.inner.stopper(),
+			close: self.close.clone(),
+		}
 	}
 
 	// Unfortunately, we have to wrap ReadError for a bunch of functions.

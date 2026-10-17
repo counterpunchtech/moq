@@ -1169,6 +1169,8 @@ struct Chunks {
 impl crate::transport::poll::RecvStream for Chunks {
 	type Error = NoError;
 	type Credit = crate::transport::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 
 	fn poll_read(
 		&mut self,

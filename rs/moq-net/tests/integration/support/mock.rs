@@ -289,6 +289,8 @@ type Event = Result<Option<(Bytes, memory::Credit)>, memory::Error>;
 pub struct MockRecvStream {
 	/// Taken once this side stops reading.
 	inner: Option<memory::RecvStream>,
+	/// What [`MockStopper`] stops, kept because `inner` goes once this side stops.
+	stopper: memory::Stopper,
 	line: Arc<Line>,
 	conn: Arc<Conn>,
 	/// The next event, read from the transport but still crossing the link.
@@ -305,6 +307,7 @@ pub struct MockRecvStream {
 impl MockRecvStream {
 	fn new(inner: memory::RecvStream, line: Arc<Line>, conn: Arc<Conn>) -> Self {
 		Self {
+			stopper: poll::RecvStream::stopper(&inner),
 			inner: Some(inner),
 			line,
 			conn,
@@ -381,9 +384,39 @@ impl MockRecvStream {
 	}
 }
 
+/// Stops a [`MockRecvStream`] without borrowing it, telling the writer once the latency
+/// has passed.
+#[derive(Clone)]
+pub struct MockStopper {
+	inner: memory::Stopper,
+	conn: Arc<Conn>,
+}
+
+impl moq_net::transport::Stopper for MockStopper {
+	fn stop(&self, code: u32) {
+		let latency = self.conn.latency();
+		if latency.is_zero() {
+			return moq_net::transport::Stopper::stop(&self.inner, code);
+		}
+		let inner = self.inner.clone();
+		drop(moq_net_sim::spawn(async move {
+			moq_net_sim::sleep(latency).await;
+			moq_net::transport::Stopper::stop(&inner, code);
+		}));
+	}
+}
+
 impl poll::RecvStream for MockRecvStream {
 	type Error = memory::Error;
 	type Credit = memory::Credit;
+	type Stopper = MockStopper;
+
+	fn stopper(&self) -> MockStopper {
+		MockStopper {
+			inner: self.stopper.clone(),
+			conn: self.conn.clone(),
+		}
+	}
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, dst.len()))? else {

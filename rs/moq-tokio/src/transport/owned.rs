@@ -121,6 +121,10 @@ impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> 
 impl<S: super::HeldRecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
 	type Error = Error<S::Error>;
 	type Credit = super::Credit<S::Credit>;
+	type Stopper = S::Stopper;
+	fn stopper(&self) -> S::Stopper {
+		self.stopper.clone()
+	}
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		let read = ready!(self.poll_read_held(cx, dst.len())).map_err(Error)?;
 		Poll::Ready(Ok(read.map(|(bytes, credit)| {

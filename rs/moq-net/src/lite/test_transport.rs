@@ -270,6 +270,8 @@ pub struct PendingRecv;
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
 	type Credit = crate::transport::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		Poll::Pending
@@ -318,6 +320,8 @@ pub struct DeadRecv(ResetError);
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
 	type Credit = crate::transport::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		Poll::Ready(Err(self.0))
@@ -705,9 +709,24 @@ pub enum Close {
 	Reset,
 }
 
+/// Records a [`ScriptedRecv`]'s stops from outside it, as its own `stop` does.
+#[derive(Clone)]
+pub struct ScriptedStopper(Log);
+
+impl crate::transport::Stopper for ScriptedStopper {
+	fn stop(&self, code: u32) {
+		self.0.stops.lock().unwrap().push(code);
+	}
+}
+
 impl poll::RecvStream for ScriptedRecv {
 	type Error = SinkError;
 	type Credit = crate::transport::Unheld;
+	type Stopper = ScriptedStopper;
+
+	fn stopper(&self) -> ScriptedStopper {
+		ScriptedStopper(self.log.clone())
+	}
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		let take = {

@@ -677,9 +677,29 @@ pub struct RecvStream {
 	park: kio::Park,
 }
 
+/// Stops a [`RecvStream`] without borrowing it.
+#[derive(Clone)]
+pub struct Stopper {
+	channel: kio::Shared<Channel>,
+	window: kio::Shared<Window>,
+	close: Close,
+}
+
+impl super::Stopper for Stopper {
+	fn stop(&self, code: u32) {
+		// A closed session leaves its streams as they were; checked under the channel lock,
+		// as in `reset`.
+		let mut channel = self.channel.lock();
+		if closed(&self.close).is_none() {
+			channel.abort(End::Stop(code), &self.window);
+		}
+	}
+}
+
 impl poll::RecvStream for RecvStream {
 	type Error = Error;
 	type Credit = Credit;
+	type Stopper = Stopper;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
 		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
@@ -746,14 +766,16 @@ impl poll::RecvStream for RecvStream {
 	}
 
 	fn stop(&mut self, code: u32) {
-		if std::mem::replace(&mut self.stopped, true) {
-			return;
+		if !std::mem::replace(&mut self.stopped, true) {
+			super::Stopper::stop(&self.stopper(), code);
 		}
-		// A closed session leaves its streams as they were; checked under the channel lock,
-		// as in `reset`.
-		let mut channel = self.channel.lock();
-		if closed(&self.close).is_none() {
-			channel.abort(End::Stop(code), &self.window);
+	}
+
+	fn stopper(&self) -> Stopper {
+		Stopper {
+			channel: self.channel.clone(),
+			window: self.window.clone(),
+			close: self.close.clone(),
 		}
 	}
 

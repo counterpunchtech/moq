@@ -1,6 +1,7 @@
 use std::{
 	cmp,
 	fmt::Debug,
+	sync::Arc,
 	task::{Context, Poll, ready},
 };
 
@@ -9,8 +10,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use crate::{
 	Error, StreamError,
 	coding::*,
-	pressure::{Eviction, Pressure, Rank, Ticket},
-	transport::Credit,
+	pressure::{Erase, Hold, Holder, Pressure, Rank},
 };
 
 /// A reader for decoding messages from a stream.
@@ -28,13 +28,12 @@ pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
-	/// Covers `buffer` plus `unit`, less `free`, while tracked.
-	credit: Option<S::Credit>,
 	/// Bytes of the incomplete frame already taken out of `buffer`.
 	unit: u64,
 	/// Leading bytes read before tracking began, whose credit already returned.
 	free: u64,
-	ticket: Option<Ticket>,
+	/// While tracked, the credit for `buffer` plus `unit`, less `free`.
+	hold: Option<Arc<Hold<S>>>,
 	/// The receive allowance filled and this stream was chosen to free it.
 	evicted: bool,
 }
@@ -56,57 +55,47 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream,
 			buffer: Default::default(),
 			version,
-			credit: None,
 			unit: 0,
 			free: 0,
-			ticket: None,
+			hold: None,
 			evicted: false,
 		}
 	}
 
-	/// Hold connection credit until each unit completes, cancellable by `pressure` at
-	/// `rank`.
-	pub(crate) fn track(&mut self, pressure: &Pressure, rank: Rank) {
-		if self.ticket.is_some() {
+	/// Hold connection credit until each unit completes, evictable by `pressure` at `rank`.
+	pub(crate) fn track<H: ?Sized + Holder>(&mut self, pressure: &Pressure<H>, rank: Rank)
+	where
+		Hold<S>: Erase<H>,
+	{
+		if self.hold.is_some() {
 			return self.rank(rank);
 		}
 		self.free = self.buffer.len() as u64 + self.unit;
-		self.ticket = Some(pressure.track(rank));
+		let code = self.version.encode_stream_code(&StreamError::Evicted);
+		self.hold = Some(pressure.track(rank, self.stream.stopper(), code));
 	}
 
 	/// Re-rank a tracked stream once its header identifies it.
 	pub(crate) fn rank(&self, rank: Rank) {
-		if let Some(ticket) = &self.ticket {
-			ticket.rank(rank);
+		if let Some(hold) = &self.hold {
+			hold.rank(rank);
 		}
 	}
 
 	/// Keep the credit for bytes just read, if tracked; otherwise it returns now.
 	fn take(&mut self, credit: S::Credit) {
-		let Some(ticket) = &self.ticket else { return };
-		let held = match &mut self.credit {
-			Some(held) => {
-				held.merge(credit);
-				held.len()
-			}
-			None => {
-				let len = credit.len();
-				self.credit = Some(credit);
-				len
-			}
-		};
-		ticket.held(held);
+		if let Some(hold) = &self.hold {
+			hold.take(credit);
+		}
 	}
 
 	/// Return the credit for `bytes` that completed a unit.
 	fn release(&mut self, bytes: u64) {
 		let free = self.free.min(bytes);
 		self.free -= free;
-		let (Some(ticket), Some(credit)) = (&self.ticket, &mut self.credit) else {
-			return;
-		};
-		drop(credit.split(bytes - free));
-		ticket.held(credit.len());
+		if let Some(hold) = &self.hold {
+			hold.release(bytes - free);
+		}
 	}
 
 	/// Drop `used` decoded bytes from the buffer, returning their credit.
@@ -115,27 +104,20 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		self.release(used as u64);
 	}
 
-	/// Hear this stream's eviction without borrowing the reader. Only a pending read
-	/// registers on its own, so a handler that parks the reader on something else races
-	/// this with [`Eviction::guard`].
-	pub(crate) fn eviction(&self) -> Eviction {
-		self.ticket.as_ref().map_or_else(Eviction::none, Ticket::eviction)
-	}
-
-	/// Whether this stream was evicted, registering `cx` when given. The first time, stop
-	/// it and let go of everything it holds.
+	/// Whether this stream was evicted, registering `cx` when given. The eviction already
+	/// stopped the stream and took its credit, so what is buffered is all that is left.
 	fn evicted(&mut self, cx: Option<&Context<'_>>) -> bool {
 		if self.evicted {
 			return true;
 		}
-		let evicted = match (&self.ticket, cx) {
+		let evicted = match (&self.hold, cx) {
 			(None, _) => false,
-			(Some(ticket), Some(cx)) => ticket.poll_evicted(cx),
-			(Some(ticket), None) => ticket.is_evicted(),
+			(Some(hold), Some(cx)) => hold.poll_evicted(cx),
+			(Some(hold), None) => hold.is_evicted(),
 		};
 		if evicted {
 			self.evicted = true;
-			self.abort(&Error::Evicted);
+			self.free = self.buffer.len() as u64 + self.unit;
 		}
 		evicted
 	}
@@ -455,15 +437,17 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// Abort the stream with the given error, returning the credit it holds.
 	pub fn abort(&mut self, err: impl Into<StreamError>) {
-		// STOP_SENDING is a stream operation, so it carries a stream code from the
-		// negotiated protocol's registry. A session code, or the other protocol's, would be
-		// read against the wrong table and mean something else.
-		self.stream.stop(self.version.encode_stream_code(&err.into()));
+		// An evicted stream was stopped with its own code already.
+		if !self.hold.as_ref().is_some_and(|hold| hold.is_evicted()) {
+			// STOP_SENDING is a stream operation, so it carries a stream code from the
+			// negotiated protocol's registry. A session code, or the other protocol's, would
+			// be read against the wrong table and mean something else.
+			self.stream.stop(self.version.encode_stream_code(&err.into()));
+		}
 		// What is buffered stays readable, but nothing more is worth holding for.
 		self.free = self.buffer.len() as u64 + self.unit;
-		self.credit = None;
-		if let Some(ticket) = &self.ticket {
-			ticket.held(0);
+		if let Some(hold) = &self.hold {
+			hold.clear();
 		}
 	}
 
@@ -473,10 +457,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
-			credit: self.credit,
 			unit: self.unit,
 			free: self.free,
-			ticket: self.ticket,
+			hold: self.hold,
 			evicted: self.evicted,
 		}
 	}
@@ -500,6 +483,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for StopLog {
 		type Error = crate::lite::test_transport::SinkError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
 		fn poll_read(
 			&mut self,
@@ -607,6 +592,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for Chunks {
 		type Error = crate::lite::test_transport::SinkError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
 		fn poll_read(
 			&mut self,
@@ -813,6 +800,8 @@ mod tests {
 	impl crate::transport::poll::RecvStream for Burst {
 		type Error = crate::lite::test_transport::SinkError;
 		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
 		fn poll_read(
 			&mut self,
@@ -873,6 +862,9 @@ mod tests {
 			Context::from_waker(Waker::noop())
 		}
 
+		/// A registry of memory streams.
+		type Tracked = Pressure<Hold<memory::RecvStream>>;
+
 		/// A memory stream whose writer stays open, read by a reader the returned pressure
 		/// tracks. `window` bounds what the reader's side accepts.
 		fn tracked(
@@ -880,7 +872,7 @@ mod tests {
 		) -> (
 			memory::SendStream,
 			Reader<memory::RecvStream, Version>,
-			Pressure,
+			Tracked,
 			(memory::Session, memory::Session),
 		) {
 			let (mut a, mut b) = memory::pair(memory::Config {
@@ -893,7 +885,7 @@ mod tests {
 			let Poll::Ready(Ok(recv)) = b.poll_accept_uni(&mut noop()) else {
 				panic!("accept")
 			};
-			let pressure = Pressure::default();
+			let pressure = Tracked::default();
 			let mut reader = Reader::new(recv, Version::Lite05);
 			reader.track(&pressure, Rank::Unidentified);
 			(send, reader, pressure, (a, b))
@@ -956,7 +948,7 @@ mod tests {
 
 			assert_eq!(write(&mut send, &[0x07, 0x40]), Poll::Ready(2));
 			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
-			let pressure = Pressure::default();
+			let pressure = Tracked::default();
 			reader.track(&pressure, Rank::Unidentified);
 			assert_eq!(pressure.held(), 0);
 
@@ -1008,6 +1000,82 @@ mod tests {
 			assert_eq!(pressure.held(), 0);
 			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
 			assert_eq!(pressure.held(), 0);
+		}
+
+		/// Hands out `max`-byte reads of a looping buffer of units, so only the reader costs.
+		struct Endless {
+			data: Bytes,
+			pos: usize,
+			max: usize,
+		}
+
+		impl crate::transport::poll::RecvStream for Endless {
+			type Error = crate::lite::test_transport::SinkError;
+			type Credit = crate::transport::Unheld;
+			type Stopper = ();
+			fn stopper(&self) {}
+
+			fn poll_read(
+				&mut self,
+				_: &mut Context<'_>,
+				dst: &mut [u8],
+			) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+				let n = dst.len().min(self.max).min(self.data.len() - self.pos);
+				dst[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+				self.pos = (self.pos + n) % self.data.len();
+				Poll::Ready(Ok(Some(crate::transport::Unheld(n as u64))))
+			}
+
+			fn stop(&mut self, _code: u32) {}
+
+			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Pending
+			}
+		}
+
+		/// Decode size-prefixed units, untracked and tracked: the per-read and per-unit cost
+		/// of holding credit in the reader. Run by nightly.
+		#[test]
+		#[ignore = "release benchmark, run by nightly"]
+		fn benchmark_tracked_reads() {
+			const UNIT: usize = 1000;
+			const UNITS: usize = 1 << 16;
+			const RUNS: usize = 5;
+			let mut unit = Vec::new();
+			Encoder::new(&mut unit, Version::Lite05.into())
+				.varint(UNIT as u64)
+				.unwrap();
+			unit.resize(unit.len() + UNIT, 7);
+			let data = Bytes::from(unit.repeat(1024));
+
+			println!("max_read,untracked_ns_per_unit,tracked_ns_per_unit");
+			for max in [1200usize, 16 * 1024, 64 * 1024] {
+				let mut ns = [f64::MAX; 2];
+				for _ in 0..RUNS {
+					for (mode, tracked) in [false, true].into_iter().enumerate() {
+						let stream = Endless {
+							data: data.clone(),
+							pos: 0,
+							max,
+						};
+						let mut reader = Reader::new(stream, Version::Lite05);
+						let pressure = Pressure::<Hold<Endless>>::default();
+						if tracked {
+							reader.track(&pressure, Rank::Unidentified);
+						}
+						let start = std::time::Instant::now();
+						for _ in 0..UNITS {
+							let size = varint(reader.poll_varint(&mut noop()));
+							let Poll::Ready(Ok(payload)) = reader.poll_read_exact(&mut noop(), size as usize) else {
+								panic!("short unit");
+							};
+							std::hint::black_box(payload);
+						}
+						ns[mode] = ns[mode].min(start.elapsed().as_nanos() as f64 / UNITS as f64);
+					}
+				}
+				println!("{max},{:.1},{:.1}", ns[0], ns[1]);
+			}
 		}
 
 		/// An evicted reader stops its stream and fails its next read.

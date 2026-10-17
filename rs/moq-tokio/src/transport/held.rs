@@ -20,6 +20,9 @@ macro_rules! unheld {
 	($session:ty, $recv:ty) => {
 		impl $crate::transport::HeldRecvStream for $recv {
 			type Credit = moq_net::transport::Unheld;
+			type Stopper = ();
+
+			fn stopper(&self) {}
 
 			fn read_chunk_held(
 				&mut self,
@@ -60,8 +63,21 @@ impl moq_net::transport::Credit for crate::quic::driver::Credit {
 }
 
 #[cfg(feature = "quic")]
+impl moq_net::transport::Stopper for crate::quic::web::Stopper {
+	fn stop(&self, code: u32) {
+		// Err means the stream is already gone, which is what we wanted.
+		let _ = crate::quic::web::Stopper::stop(self, code);
+	}
+}
+
+#[cfg(feature = "quic")]
 impl super::HeldRecvStream for crate::quic::web::RecvStream {
 	type Credit = crate::quic::driver::Credit;
+	type Stopper = crate::quic::web::Stopper;
+
+	fn stopper(&self) -> Self::Stopper {
+		crate::quic::web::RecvStream::stopper(self)
+	}
 
 	fn read_chunk_held(
 		&mut self,

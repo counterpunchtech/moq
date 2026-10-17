@@ -375,7 +375,7 @@ pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present<S>,
 	/// Cancels a stream whenever held receive credit fills the allowance.
-	monitor: Monitor<S>,
+	monitor: Monitor<S, crate::pressure::Hold<S::RecvStream>>,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
@@ -498,7 +498,7 @@ struct Present<S: crate::transport::poll::Session> {
 	/// The connection's own credential, held for the life of the session.
 	_setup: Option<crate::auth::Token>,
 	/// Tracks each AUTH stream's reads.
-	pressure: Pressure,
+	pressure: crate::pressure::Of<S>,
 }
 
 impl<S: crate::transport::poll::Session> Present<S> {
@@ -541,7 +541,7 @@ struct PresentToken<S: crate::transport::poll::Session> {
 	handle: crate::auth::Handle,
 	going_away: crate::goaway::GoingAway,
 	violation: kio::Shared<Option<Error>>,
-	pressure: Pressure,
+	pressure: crate::pressure::Of<S>,
 	id: u64,
 	state: PresentState<S>,
 }
