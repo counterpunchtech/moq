@@ -391,8 +391,23 @@ impl<H: ?Sized + Holder> Pressure<H> {
 	}
 
 	/// Evict the least useful holder of credit, returning whether there was one.
+	///
+	/// An evicted stream still holding a partial unit is one: its reader, woken by the
+	/// eviction, gives the unit up and frees what this fill needs, so cancelling another
+	/// stream meanwhile would cost it for nothing.
 	pub fn evict(&self) -> bool {
-		let victim = victim(&self.state.lock().entries);
+		let victim = {
+			let state = self.state.lock();
+			let releasing = state
+				.entries
+				.iter()
+				.filter_map(Weak::upgrade)
+				.any(|hold| hold.is_evicted() && hold.held() > 0);
+			if releasing {
+				return true;
+			}
+			victim(&state.entries)
+		};
 		// Evicted without the registry lock: dropping credit and stopping call into the
 		// transport, and readers track and drop meanwhile.
 		match victim {
@@ -608,6 +623,31 @@ mod tests {
 		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 			Poll::Pending
 		}
+	}
+
+	/// An evicted stream still holding a partial unit answers the next fill: its reader
+	/// frees that credit once it wakes, and another stream goes only if the window is still
+	/// full after.
+	#[test]
+	fn a_release_in_flight_spares_the_next_stream() {
+		let pressure = Probes::default();
+		let partial = pressure.track::<Probe>(Rank::Unidentified, Stops::default(), 0x35);
+		partial.lock().take_unit(Unheld(10));
+		let other = hold(&pressure, Rank::Unidentified, 5);
+
+		assert!(pressure.evict());
+		assert!(Holder::is_evicted(&*partial));
+		assert_eq!(pressure.held(), 15, "the partial unit stays counted");
+
+		assert!(pressure.evict());
+		assert!(
+			!Holder::is_evicted(&*other),
+			"cancelled while the partial unit was letting go"
+		);
+
+		partial.lock().release_unit(10);
+		assert!(pressure.evict());
+		assert!(Holder::is_evicted(&*other));
 	}
 
 	/// Eviction and abort free the buffered bytes before their credit returns, so the
