@@ -35,7 +35,8 @@ use crate::udp;
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
 const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
-/// the largest one.
+/// the largest one: `MIN_RECEIVE_WINDOW` is the 64 MiB announcement cap plus framing. 128 MiB
+/// also holds two maximum-size frames at once.
 const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
 const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
 /// Unacknowledged outgoing data to buffer, whatever the peer allows.
