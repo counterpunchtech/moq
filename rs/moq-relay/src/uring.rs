@@ -891,13 +891,13 @@ mod tests {
 	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
-		set.receive_window = Some(128 << 20);
+		set.receive_window = Some(256 << 20);
 		set.stream_receive_window = Some(8 << 20);
 		set.send_window = Some(32 << 20);
 
 		for (quic, expected) in [
-			(moq_tokio::quic::Config::default(), (64 << 20, 4 << 20, 16 << 20)),
-			(set, (128 << 20, 8 << 20, 32 << 20)),
+			(moq_tokio::quic::Config::default(), (128 << 20, 4 << 20, 16 << 20)),
+			(set, (256 << 20, 8 << 20, 32 << 20)),
 		] {
 			let resolved = quic.resolve();
 			let tokio = (
