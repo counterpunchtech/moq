@@ -663,7 +663,9 @@ impl Stopper {
 
 impl fmt::Debug for Stopper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Stopper").field("stream", &self.stream).finish()
+        f.debug_struct("Stopper")
+            .field("stream", &self.stream)
+            .finish()
     }
 }
 
