@@ -509,11 +509,14 @@ impl PriorityHandle {
 pub const RECV_CONTROL: i64 = i64::MAX;
 
 /// The receive priority of a group stream: always below a control stream or an
-/// unidentified one, and the older group first to go, since a live track that falls
-/// behind skips to its newest group anyway.
-pub fn recv_group(sequence: u64) -> i64 {
-	// Sequences are wire varints below 2^62, so the band stays negative.
-	i64::MIN / 2 + i64::try_from(sequence).unwrap_or(i64::MAX / 2).min(i64::MAX / 2)
+/// unidentified one, ranked by its subscription's `priority` like the sender ranks it,
+/// then the older group first to go, since a live track that falls behind skips to its
+/// newest group anyway.
+pub fn recv_group(priority: u8, sequence: u64) -> i64 {
+	// Saturating the sequence at 2^48 keeps the band negative; no track gets that far.
+	const SEQUENCE: u32 = 48;
+	let sequence = sequence.min((1 << SEQUENCE) - 1) as i64;
+	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + sequence
 }
 
 #[cfg(test)]
@@ -583,13 +586,13 @@ mod tests {
 	}
 
 	/// Every group sits below an unidentified stream, and so below a control stream, with
-	/// newer groups kept longer, up to the largest sequence the wire carries.
+	/// more urgent subscriptions and then newer groups kept longer.
 	#[test]
 	fn recv_group_stays_below_unidentified_streams() {
-		assert!(recv_group(0) < recv_group(1));
-		assert!(recv_group((1 << 62) - 1) < 0);
-		assert!(recv_group(u64::MAX) < 0);
-		assert!(recv_group(0) > i64::MIN);
+		assert!(recv_group(0, 0) < recv_group(0, 1));
+		assert!(recv_group(0, u64::MAX) < recv_group(1, 0));
+		assert!(recv_group(u8::MAX, u64::MAX) < 0);
+		assert!(recv_group(0, 0) > i64::MIN);
 	}
 
 	/// A group whose rank didn't move must not be re-polled. Every queued group parks on

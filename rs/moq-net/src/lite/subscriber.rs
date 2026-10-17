@@ -870,7 +870,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 				GroupRecvState::Header => {
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
-					self.reader.set_priority(crate::priority::recv_group(hdr.sequence));
 
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
@@ -922,6 +921,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						group.start_at(hdr.frame_start)?;
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
+					let priority = track.subscription().map_or(0, |sub| sub.priority);
+					self.reader.set_priority(crate::priority::recv_group(priority, hdr.sequence));
 
 					// The timescale came from TRACK_INFO (read before this subscription was
 					// even registered), so frames decode immediately. No SUBSCRIBE_OK to
