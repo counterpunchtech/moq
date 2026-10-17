@@ -104,8 +104,9 @@ impl<R: RecvStream> Locked<'_, R> {
 		&mut self.slot.buffer
 	}
 
-	/// Whether the monitor chose this stream. Checked under the lock, a `false` means no
-	/// eviction can empty the buffer until it is unlocked.
+	/// Whether the monitor chose this stream. An eviction sets it under the lock, so it
+	/// holds for as long as this does: a `false` means bytes read now keep their credit
+	/// until an eviction frees both.
 	pub fn is_evicted(&self) -> bool {
 		self.hold.is_evicted()
 	}
@@ -148,11 +149,15 @@ impl<R: RecvStream> Hold<R> {
 		}
 	}
 
-	/// Return all the credit: the reader gave up on the stream, and what it buffered
-	/// stays readable.
+	/// Drop the buffer and return the credit: the reader gave up on the stream.
 	pub fn clear(&self) {
-		let credit = lock(&self.slot).credit.take();
+		let mut slot = lock(&self.slot);
+		let buffer = std::mem::take(&mut slot.buffer);
+		let credit = slot.credit.take();
 		self.held.store(0, Ordering::Relaxed);
+		drop(slot);
+		// Freed before the credit returns, as on eviction.
+		drop(buffer);
 		drop(credit);
 	}
 
@@ -214,19 +219,21 @@ impl<R: RecvStream> Holder for Hold<R> {
 	}
 
 	fn evict(&self) {
-		// Set before locking, so a reader that locks after it sees the flag and reads
-		// nothing more into the buffer this empties.
-		self.evicted.store(true, Ordering::Release);
 		let mut slot = lock(&self.slot);
-		let credit = slot.credit.take();
+		// Set under the lock, so a reader holding it reads and keeps that credit as one
+		// step, and one locking after sees the flag and reads nothing more in.
+		self.evicted.store(true, Ordering::Release);
 		let buffer = std::mem::take(&mut slot.buffer);
+		let credit = slot.credit.take();
 		drop(slot);
 		let held = self.held.swap(0, Ordering::Relaxed);
 		tracing::debug!(rank = ?Holder::rank(self), held, "receive credit exhausted, cancelling a stream");
 		// Stopped first, so the window the credit frees does not invite more of this stream.
 		self.stopper.stop(self.code);
-		drop(credit);
+		// The bytes go before their credit: returned credit lets the peer send again at
+		// once, and the memory it bounds must already be free.
 		drop(buffer);
+		drop(credit);
 		let waker = lock(&self.waker).take();
 		if let Some(waker) = waker {
 			waker.wake();
@@ -501,6 +508,94 @@ mod tests {
 	}
 
 	type Probes = Pressure<Hold<Probe>>;
+
+	/// Credit that records, as it returns, whether the bytes it covers were freed first:
+	/// it shares their allocation, so it is the last owner once the buffer is gone.
+	struct Watched {
+		len: u64,
+		bytes: Option<bytes::Bytes>,
+		freed_first: Arc<AtomicBool>,
+	}
+
+	impl Credit for Watched {
+		fn len(&self) -> u64 {
+			self.len
+		}
+
+		fn split(&mut self, bytes: u64) -> Self {
+			self.len -= bytes;
+			Self {
+				len: bytes,
+				bytes: None,
+				freed_first: self.freed_first.clone(),
+			}
+		}
+
+		fn merge(&mut self, other: Self) {
+			self.len += other.len;
+		}
+	}
+
+	impl Drop for Watched {
+		fn drop(&mut self) {
+			if let Some(bytes) = &self.bytes {
+				self.freed_first.store(bytes.is_unique(), Ordering::Relaxed);
+			}
+		}
+	}
+
+	/// A stream whose credit is [`Watched`].
+	struct Watch;
+
+	impl RecvStream for Watch {
+		type Error = crate::lite::test_transport::SinkError;
+		type Credit = Watched;
+		type Stopper = Stops;
+
+		fn poll_read(&mut self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<Result<Option<Watched>, Self::Error>> {
+			Poll::Pending
+		}
+
+		fn stop(&mut self, _: u32) {}
+
+		fn stopper(&self) -> Stops {
+			Stops::default()
+		}
+
+		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Pending
+		}
+	}
+
+	/// Eviction and abort free the buffered bytes before their credit returns, so the
+	/// window the peer regains never covers memory still allocated.
+	#[test]
+	fn buffered_bytes_are_freed_before_their_credit_returns() {
+		let pressure = Pressure::<Hold<Watch>>::default();
+		for evict in [true, false] {
+			let hold = pressure.track::<Watch>(Rank::Unidentified, Stops::default(), 0x35);
+			let freed_first = Arc::new(AtomicBool::new(false));
+			{
+				let mut locked = hold.lock();
+				locked.buffer_mut().extend_from_slice(&[7; 64]);
+				let bytes = locked.buffer_mut().split_off(32).freeze();
+				locked.take(Watched {
+					len: 32,
+					bytes: Some(bytes),
+					freed_first: freed_first.clone(),
+				});
+			}
+			match evict {
+				true => assert!(pressure.evict()),
+				false => hold.clear(),
+			}
+			assert!(
+				freed_first.load(Ordering::Relaxed),
+				"evict={evict}: the credit returned while its bytes were still allocated"
+			);
+			assert!(hold.lock().buffer().is_empty());
+		}
+	}
 
 	fn media(broadcast: &str, track: u8, group: u64) -> Rank {
 		Rank::Media {

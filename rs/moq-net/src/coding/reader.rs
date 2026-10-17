@@ -443,7 +443,8 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Abort the stream with the given error, returning the credit it holds.
+	/// Abort the stream with the given error, discarding what it buffered and returning
+	/// the credit it holds.
 	pub fn abort(&mut self, err: impl Into<StreamError>) {
 		// An evicted stream was stopped with its own code already.
 		if !self.hold.as_ref().is_some_and(|hold| hold.is_evicted()) {
@@ -452,8 +453,10 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			// be read against the wrong table and mean something else.
 			self.stream.stop(self.version.encode_stream_code(&err.into()));
 		}
-		// What is buffered stays readable, but nothing more is worth holding for.
-		self.free = Buffer::of(&mut self.buffer, &self.hold).len() as u64 + self.unit;
+		// Nothing buffered is worth keeping, and a reader retained after its abort must not
+		// keep memory whose credit returned. The unit's credit returns too.
+		self.buffer = BytesMut::new();
+		self.free = self.unit;
 		if let Some(hold) = &self.hold {
 			hold.clear();
 		}
@@ -1055,7 +1058,7 @@ mod tests {
 			assert!(write(&mut send, &[0x00]).is_pending());
 		}
 
-		/// Aborting lets go of the credit, and what was buffered stays readable.
+		/// Aborting lets go of the credit and of what was buffered.
 		#[test]
 		fn abort_returns_the_credit() {
 			let (mut send, mut reader, pressure, _sessions) = tracked(None);
@@ -1064,8 +1067,7 @@ mod tests {
 			assert_eq!(pressure.held(), 2);
 			reader.abort(&Error::Cancel);
 			assert_eq!(pressure.held(), 0);
-			assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
-			assert_eq!(pressure.held(), 0);
+			assert_eq!(reader.buffered(), 0);
 		}
 
 		/// Hands out `max`-byte reads of a looping buffer of units, so only the reader costs.
