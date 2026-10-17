@@ -2,3 +2,30 @@
 mod adapter;
 mod held;
 pub use adapter::{Error, HeldRecvStream, HeldSession, RecvStream, SendStream, Session};
+use adapter::{Grouped, GroupedSend};
+
+use crate::quic;
+
+impl Grouped for quic::web::Session {
+	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
+		Some(quic::web::Session::send_group(self, priority))
+	}
+}
+
+impl GroupedSend for quic::web::SendStream {
+	type Group = quic::SendGroup;
+
+	fn set_group(&mut self, group: &Self::Group) {
+		quic::web::SendStream::set_group(self, Some(group));
+	}
+
+	fn set_priority(&mut self, priority: i64) {
+		quic::web::SendStream::set_priority(self, priority);
+	}
+}
+
+impl moq_net::transport::poll::SendGroup for quic::SendGroup {
+	fn set_priority(&mut self, priority: i64) {
+		quic::SendGroup::set_priority(self, priority)
+	}
+}
