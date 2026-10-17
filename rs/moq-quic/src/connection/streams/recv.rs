@@ -399,7 +399,7 @@ impl<'a> Chunks<'a> {
     ///
     /// The number of read bytes will be released from the congestion window,
     /// allowing the remote peer to send more data if it was previously blocked.
-    /// Bytes taken by [`Self::withhold()`] keep their connection credit.
+    /// Bytes a receive lease holds keep their connection credit until it consumes them.
     ///
     /// If [`ShouldTransmit::should_transmit()`] returns `true`,
     /// a packet needs to be sent to the peer informing them that the stream is unblocked.
