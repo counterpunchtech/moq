@@ -107,10 +107,13 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
-/// Bounds how much unread data one peer can make us buffer across all of its streams,
-/// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
-/// shares one connection, can still sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+/// Bounds how much unread data and incomplete messages one peer can make us buffer across
+/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
+/// credit as it reads, it bounds only the unread data. Sized to fit the largest message with
+/// room to spare, so a relay-to-relay session, which shares one connection, can still
+/// sustain several Gbps at intercontinental RTTs.
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -142,12 +145,13 @@ pub struct Limits {
 }
 
 impl Limits {
-	/// Refuse a stream count past 2^60 or a receive window past a QUIC varint.
+	/// Refuse a stream count past 2^60, or a receive window past a QUIC varint or below
+	/// the largest message.
 	pub fn validate(&self) -> crate::Result<()> {
 		validate_streams(Some(self.max_streams.get()))?;
 		match self.receive_window.get() {
 			window if window > MAX_VARINT => Err(crate::Error::WindowRange("receive_window")),
-			_ => Ok(()),
+			window => validate_receive_window(window),
 		}
 	}
 }
@@ -257,7 +261,11 @@ pub struct Config {
 	pub congestion_control: Option<CongestionControl>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
-	/// in flight across every stream at once. Defaults to 64 MiB.
+	/// in flight or in incomplete messages across every stream at once. Defaults to
+	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	///
+	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
+	/// returns credit as it reads, so there it bounds only unread data.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -646,7 +654,8 @@ fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
 /// Zero is rejected everywhere: a window of zero credits nothing, so it would wedge
 /// the connection rather than tighten it. The receive windows additionally have to
 /// fit a varint, since they are sent as transport parameters; the send window is
-/// local bookkeeping and only has to be non-zero.
+/// local bookkeeping and only has to be non-zero. The connection receive window has
+/// to fit the largest message, which holds its credit until it is complete.
 #[cfg(feature = "_transport")]
 fn validate_windows(quic: &Config) -> crate::Result<()> {
 	for (name, window, wire) in [
@@ -660,7 +669,17 @@ fn validate_windows(quic: &Config) -> crate::Result<()> {
 			_ => {}
 		}
 	}
-	Ok(())
+	quic.receive_window.map_or(Ok(()), validate_receive_window)
+}
+
+/// Refuse a connection receive window that cannot fit the largest message.
+fn validate_receive_window(window: u64) -> crate::Result<()> {
+	match window < moq_net::transport::MIN_RECEIVE_WINDOW {
+		true => Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		)),
+		false => Ok(()),
+	}
 }
 
 /// Every knob at its default, which is what an untouched [`Config`] resolves to.
@@ -694,7 +713,7 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
-	/// Connection-wide receive window in bytes, or `None` for the 64 MiB default.
+	/// Connection-wide receive window in bytes, or `None` for the 128 MiB default.
 	pub receive_window: Option<u64>,
 	/// Per-stream receive window in bytes, or `None` for the backend default.
 	pub stream_receive_window: Option<u64>,
@@ -988,6 +1007,34 @@ mod tests {
 		}
 	}
 
+	/// Incomplete messages hold connection credit, so a connection window that can't fit
+	/// the largest one could stall it forever. `[quic]` and the runtime limits both refuse it.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn the_receive_window_fits_the_largest_message() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let config = |window| Config {
+			receive_window: Some(window),
+			..Default::default()
+		};
+		assert!(matches!(
+			config(min - 1).validate(),
+			Err(crate::Error::ReceiveWindowTooSmall(got)) if got == min
+		));
+		assert!(config(min).validate().is_ok());
+
+		let limits = |window| Limits {
+			max_streams: std::num::NonZeroU64::MIN,
+			receive_window: std::num::NonZeroU64::new(window).unwrap(),
+			send_window: std::num::NonZeroU64::MIN,
+		};
+		assert!(matches!(
+			limits(min - 1).validate(),
+			Err(crate::Error::ReceiveWindowTooSmall(_))
+		));
+		assert!(limits(min).validate().is_ok());
+	}
+
 	/// The receive windows go on the wire as transport parameters, so they have to fit
 	/// a varint. The send window is local bookkeeping and does not.
 	#[cfg(feature = "_transport")]
@@ -1056,13 +1103,13 @@ mod tests {
 	fn window_flags_parse() {
 		let quic = parse(&[
 			"--quic-receive-window",
-			"67108864",
+			"134217728",
 			"--quic-stream-receive-window",
 			"8388608",
 			"--quic-send-window",
 			"33554432",
 		]);
-		assert_eq!(quic.receive_window, Some(67108864));
+		assert_eq!(quic.receive_window, Some(134217728));
 		assert_eq!(quic.stream_receive_window, Some(8388608));
 		assert_eq!(quic.send_window, Some(33554432));
 	}
@@ -1073,7 +1120,7 @@ mod tests {
 			max_streams = 7000
 			gso = false
 			congestion_control = "delay"
-			receive_window = 67108864
+			receive_window = 134217728
 			stream_receive_window = 8388608
 			send_window = 33554432
 			qlog = "/tmp/qlog"
@@ -1082,7 +1129,7 @@ mod tests {
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
-		assert_eq!(quic.receive_window, Some(67108864));
+		assert_eq!(quic.receive_window, Some(134217728));
 		assert_eq!(quic.stream_receive_window, Some(8388608));
 		assert_eq!(quic.send_window, Some(33554432));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));

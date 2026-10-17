@@ -289,8 +289,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				Poll::Ready(Err(err)) => break Err(err),
 			};
 
-			while frame.remaining() > 0 && !lease.is_empty() {
-				let chunk = lease.take(frame.remaining());
+			// One chunk per lease: a lease may hold the transport's lock, so the frame is
+			// written, and its consumers woken, only once the lease is gone.
+			let chunk = lease.take(frame.remaining());
+			let complete = chunk.len() == frame.remaining();
+			let ended = lease.is_fin() && lease.is_empty();
+			if complete {
+				// Every byte of the frame is in hand, so its credit returns.
+				lease.consume(0);
+			} else {
+				drop(lease);
+			}
+
+			if !chunk.is_empty() {
 				owed += chunk.len();
 				if let Err(err) = frame.write(chunk) {
 					return Poll::Ready(Err(err));
@@ -300,14 +311,11 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					owed = 0;
 				}
 			}
-
-			if frame.remaining() == 0 {
-				// The frame is complete, so its credit returns with the lease.
-				lease.consume(0);
+			if complete {
 				break Ok(());
 			}
 			// A FIN mid-payload: the declared size never arrived.
-			if lease.is_fin() {
+			if ended {
 				break Err(Error::WrongSize);
 			}
 		};

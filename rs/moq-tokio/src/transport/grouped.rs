@@ -10,6 +10,13 @@
 /// [`send_group`](moq_net::transport::poll::Session::send_group) reaches a backend through
 /// this. A backend without groups implements it empty.
 pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
+	/// The receive stream moq-net reads: the backend's own lease where it has one, or
+	/// [`Buffered`](moq_net::transport::poll::Buffered) reads otherwise.
+	type Recv: moq_net::transport::poll::RecvStream;
+
+	/// Adapt one of the backend's receive streams, freshly accepted or opened.
+	fn recv(stream: super::RecvStream<Self::RecvStream>) -> Self::Recv;
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;

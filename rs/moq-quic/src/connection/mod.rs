@@ -79,9 +79,6 @@ mod stats;
 pub(crate) struct ConnectionTag(u64);
 
 impl ConnectionTag {
-    /// No connection, for state that has not come from one yet.
-    pub(crate) const NONE: Self = Self(0);
-
     /// A tag no other connection in this process has.
     pub(crate) fn next() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

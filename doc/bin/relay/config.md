@@ -61,7 +61,7 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
-receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
+receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
 stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
 send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
@@ -73,9 +73,14 @@ QUIC uses the smaller of the two endpoints' values, so this also bounds the
 other end. Keep `keep_alive` under a third of it.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
-64 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
-how much unread data one peer can make the relay buffer. Keep
-`stream_receive_window` well under it so one slow group cannot starve the
+128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
+how much unread data and incomplete messages one peer can make the relay
+buffer. It has to fit the largest message, just over 64 MiB, so a smaller
+value, here or in `[peer.quic]`, is refused at startup. When incomplete
+messages fill the window, the relay cancels the least urgent stream, the
+oldest group's before a newer one's. Over iroh the window bounds only
+unread data, and over WebSocket or TCP nothing bounds incomplete messages.
+Keep `stream_receive_window` well under it so one slow group cannot starve the
 connection.
 
 ## \[session] and \[peer]
