@@ -410,6 +410,7 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),

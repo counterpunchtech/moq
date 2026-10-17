@@ -875,15 +875,16 @@ mod tests {
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		let mut stream = buffered(&[b"ab", b"cd"], false);
 
-		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 3) else {
-			panic!("both chunks were ready")
-		};
-		assert_eq!(lease.len(), 4);
-		assert_eq!(lease.chunk(), b"ab");
-		let mut all = [0u8; 4];
-		lease.buf().copy_to_slice(&mut all);
-		assert_eq!(&all, b"abcd");
-		drop(lease);
+		{
+			let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 3) else {
+				panic!("both chunks were ready")
+			};
+			assert_eq!(lease.len(), 4);
+			assert_eq!(lease.chunk(), b"ab");
+			let mut all = [0u8; 4];
+			lease.buf().copy_to_slice(&mut all);
+			assert_eq!(&all, b"abcd");
+		}
 
 		assert!(stream.poll_lease(&mut cx, 5).is_pending(), "nothing more arrived");
 		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 1) else {

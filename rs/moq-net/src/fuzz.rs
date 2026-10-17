@@ -1080,6 +1080,8 @@ pub fn seeds() -> Vec<Seed> {
 	seeds
 }
 
+type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
+
 /// Frames arriving on concurrent group streams, as the frame bench times them: one
 /// frame per stream, read a chunk per stream per poll turn so the streams interleave
 /// the way a session's do.
@@ -1088,12 +1090,7 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<
-		Option<(
-			coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>,
-			frame::ProducerOwned,
-		)>,
-	>,
+	streams: Vec<Option<(FrameReader, frame::ProducerOwned)>>,
 	groups: Vec<group::Producer>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
