@@ -108,7 +108,8 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
-/// all of its streams, which the backends otherwise leave unlimited. Sized to fit the
+/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
+/// credit as it reads, it bounds only the unread data. Sized to fit the
 /// largest message with room to spare, so a relay-to-relay session, which shares one
 /// connection, can still sustain several Gbps at intercontinental RTTs.
 #[cfg(any(feature = "quic", feature = "iroh"))]
@@ -236,6 +237,10 @@ pub struct Config {
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
 	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	///
+	/// iroh returns credit as it reads, so there this bounds only unread data, and
+	/// incomplete messages are bounded by [`max_streams`](Self::max_streams) streams
+	/// of up to the largest message each.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for

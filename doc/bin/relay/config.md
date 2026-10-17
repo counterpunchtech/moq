@@ -77,7 +77,9 @@ Raise `receive_window` when a fat, long path idles below the link rate. The
 data and incomplete messages one peer can make the relay buffer. A message holds
 its share until it is complete, so the window must fit the largest one, just over
 64 MiB, and the relay refuses to start with less. When incomplete messages fill
-it, the relay cancels the least urgent stream and carries on.
+it, the relay cancels the least urgent stream and carries on. iroh returns credit
+as it reads, so there the window bounds only unread data, and incomplete messages
+are bounded by `max_streams` streams of up to the largest message each.
 
 Stream credit returns as data is read, so a `stream_receive_window` under
 `receive_window` only adds round trips to a large frame.

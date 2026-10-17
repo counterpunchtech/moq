@@ -44,6 +44,8 @@ pub(crate) use unheld;
 
 #[cfg(any(feature = "tcp", feature = "websocket"))]
 unheld!(qmux::Session, qmux::RecvStream);
+// iroh's upstream quinn has no way to hold credit, so its incomplete messages are bounded
+// only by its stream limit, each up to the largest message.
 #[cfg(feature = "iroh")]
 unheld!(web_transport_iroh::Session, web_transport_iroh::RecvStream);
 
