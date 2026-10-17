@@ -1,6 +1,7 @@
 use std::{
 	cmp,
 	fmt::Debug,
+	ops::{Deref, DerefMut},
 	sync::Arc,
 	task::{Context, Poll, ready},
 };
@@ -10,7 +11,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use crate::{
 	Error, StreamError,
 	coding::*,
-	pressure::{Erase, Hold, Holder, Pressure, Rank},
+	pressure::{Erase, Hold, Holder, Locked, Pressure, Rank},
 };
 
 /// A reader for decoding messages from a stream.
@@ -22,10 +23,13 @@ use crate::{
 ///
 /// A [tracked](Self::track) reader holds the transport's connection credit for its
 /// buffered bytes and for the unit it is assembling, releasing each unit's bytes once
-/// it is decoded and handed off, so read-ahead stays with the next unit. An untracked
-/// reader returns credit as soon as it reads.
+/// it is decoded and handed off, so read-ahead stays with the next unit. Its buffer sits
+/// beside that credit in its [`Hold`], so an eviction frees the memory with the credit
+/// even while the reader is parked. An untracked reader returns credit as soon as it
+/// reads.
 pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
+	/// The buffer until tracked, then empty: tracking moves it into the hold.
 	buffer: BytesMut,
 	version: V,
 	/// Bytes of the incomplete frame already taken out of `buffer`.
@@ -72,7 +76,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 		self.free = self.buffer.len() as u64 + self.unit;
 		let code = self.version.encode_stream_code(&StreamError::Evicted);
-		self.hold = Some(pressure.track(rank, self.stream.stopper(), code));
+		let hold = pressure.track(rank, self.stream.stopper(), code);
+		*hold.lock().buffer_mut() = std::mem::take(&mut self.buffer);
+		self.hold = Some(hold);
 	}
 
 	/// Re-rank a tracked stream once its header identifies it.
@@ -82,44 +88,22 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Keep the credit for bytes just read, if tracked; otherwise it returns now.
-	fn take(&mut self, credit: S::Credit) {
-		if let Some(hold) = &self.hold {
-			hold.take(credit);
-		}
-	}
-
 	/// Return the credit for `bytes` that completed a unit.
 	fn release(&mut self, bytes: u64) {
-		let free = self.free.min(bytes);
-		self.free -= free;
-		if let Some(hold) = &self.hold {
-			hold.release(bytes - free);
-		}
+		Buffer::of(&mut self.buffer, &self.hold).release(&mut self.free, bytes);
 	}
 
-	/// Drop `used` decoded bytes from the buffer, returning their credit.
-	fn consume(&mut self, used: usize) {
-		self.buffer.advance(used);
-		self.release(used as u64);
+	/// Whether this stream was evicted, registering `cx` to hear when it is. The eviction
+	/// already stopped the stream and took its buffer and credit.
+	fn poll_evicted(&mut self, cx: &Context<'_>) -> bool {
+		self.evicted |= self.hold.as_ref().is_some_and(|hold| hold.poll_evicted(cx));
+		self.evicted
 	}
 
-	/// Whether this stream was evicted, registering `cx` when given. The eviction already
-	/// stopped the stream and took its credit, so what is buffered is all that is left.
-	fn evicted(&mut self, cx: Option<&Context<'_>>) -> bool {
-		if self.evicted {
-			return true;
-		}
-		let evicted = match (&self.hold, cx) {
-			(None, _) => false,
-			(Some(hold), Some(cx)) => hold.poll_evicted(cx),
-			(Some(hold), None) => hold.is_evicted(),
-		};
-		if evicted {
-			self.evicted = true;
-			self.free = self.buffer.len() as u64 + self.unit;
-		}
-		evicted
+	/// The buffered bytes, for tests.
+	#[cfg(test)]
+	fn buffered(&mut self) -> usize {
+		Buffer::of(&mut self.buffer, &self.hold).len()
 	}
 
 	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
@@ -134,21 +118,24 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		V: Into<Form> + Copy,
 	{
 		loop {
-			let mut r = Decoder::new(&self.buffer, self.version.into());
-			match decode(&mut r) {
+			let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
+			let mut r = Decoder::new(&buffer, self.version.into());
+			let decoded = decode(&mut r);
+			let used = buffer.len() - r.remaining();
+			match decoded {
 				Ok(value) => {
 					if consume {
-						let used = self.buffer.len() - r.remaining();
-						self.consume(used);
+						buffer.advance(used);
+						buffer.release(&mut self.free, used as u64);
 					}
 					return Poll::Ready(Ok(value));
 				}
-				// Stream closed while we still need more data.
-				Err(DecodeError::Short) if !ready!(self.poll_read_more(cx))? => {
-					return Poll::Ready(Err(DecodeError::Short.into()));
-				}
-				Err(DecodeError::Short) => {}
+				Err(DecodeError::Short) => drop(buffer),
 				Err(e) => return Poll::Ready(Err(e.into())),
+			}
+			// Stream closed while we still need more data.
+			if !ready!(self.poll_read_more(cx))? {
+				return Poll::Ready(Err(DecodeError::Short.into()));
 			}
 		}
 	}
@@ -285,24 +272,31 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// The next chunk of the current unit, draining the buffer first. Its credit stays
 	/// held in `unit` until the caller releases it.
 	fn poll_unit_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		if !self.buffer.is_empty() {
-			let n = cmp::min(self.buffer.len(), max);
+		let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
+		if !buffer.is_empty() {
+			let n = cmp::min(buffer.len(), max);
 			self.unit += n as u64;
-			return Poll::Ready(Ok(Some(self.buffer.split_to(n).freeze())));
+			return Poll::Ready(Ok(Some(buffer.split_to(n).freeze())));
 		}
-		if self.evicted(None) {
+		if self.evicted || buffer.is_evicted() {
+			self.evicted = true;
 			return Poll::Ready(Err(Error::Evicted));
 		}
 		let read = match self.stream.poll_read_chunk(cx, max) {
-			Poll::Pending if self.evicted(Some(cx)) => return Poll::Ready(Err(Error::Evicted)),
-			Poll::Pending => return Poll::Pending,
+			Poll::Pending => {
+				drop(buffer);
+				return match self.poll_evicted(cx) {
+					true => Poll::Ready(Err(Error::Evicted)),
+					false => Poll::Pending,
+				};
+			}
 			Poll::Ready(read) => read,
 		};
 		let Some((chunk, credit)) = read.map_err(|err| self.version.transport_error(err))? else {
 			return Poll::Ready(Ok(None));
 		};
 		self.unit += chunk.len() as u64;
-		self.take(credit);
+		buffer.take(credit);
 		Poll::Ready(Ok(Some(chunk)))
 	}
 
@@ -364,14 +358,18 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// Poll for exactly `size` bytes, accumulating partial reads in the buffer.
 	pub fn poll_read_exact(&mut self, cx: &mut Context<'_>, size: usize) -> Poll<Result<Bytes, Error>> {
-		while self.buffer.len() < size {
+		loop {
+			let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
+			if buffer.len() >= size {
+				let bytes = buffer.split_to(size).freeze();
+				buffer.release(&mut self.free, size as u64);
+				return Poll::Ready(Ok(bytes));
+			}
+			drop(buffer);
 			if !ready!(self.poll_read_more(cx))? {
 				return Poll::Ready(Err(DecodeError::Short.into()));
 			}
 		}
-		let bytes = self.buffer.split_to(size).freeze();
-		self.release(size as u64);
-		Poll::Ready(Ok(bytes))
 	}
 
 	/// Poll to discard `remaining` bytes, counting it down as they arrive. Nothing is
@@ -379,8 +377,11 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// memory.
 	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
 		loop {
-			let skipped = self.buffer.len().min(*remaining);
-			self.consume(skipped);
+			let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
+			let skipped = buffer.len().min(*remaining);
+			buffer.advance(skipped);
+			buffer.release(&mut self.free, skipped as u64);
+			drop(buffer);
 			*remaining -= skipped;
 			if *remaining == 0 {
 				return Poll::Ready(Ok(()));
@@ -407,7 +408,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 
 	/// Poll for whether data is available in the buffer or stream: `false` once it finishes.
 	pub(crate) fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
-		if !self.buffer.is_empty() {
+		if !Buffer::of(&mut self.buffer, &self.hold).is_empty() {
 			return Poll::Ready(Ok(true));
 		}
 
@@ -417,17 +418,24 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll for more data from the stream. `true` if data was read, `false` if the
 	/// stream finished.
 	fn poll_read_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
-		if self.evicted(None) {
+		let mut buffer = Buffer::of(&mut self.buffer, &self.hold);
+		if self.evicted || buffer.is_evicted() {
+			self.evicted = true;
 			return Poll::Ready(Err(Error::Evicted));
 		}
-		let read = match self.stream.poll_read_buf(cx, &mut self.buffer) {
-			Poll::Pending if self.evicted(Some(cx)) => return Poll::Ready(Err(Error::Evicted)),
-			Poll::Pending => return Poll::Pending,
+		let read = match self.stream.poll_read_buf(cx, &mut *buffer) {
+			Poll::Pending => {
+				drop(buffer);
+				return match self.poll_evicted(cx) {
+					true => Poll::Ready(Err(Error::Evicted)),
+					false => Poll::Pending,
+				};
+			}
 			Poll::Ready(read) => read,
 		};
 		match read {
 			Ok(Some(credit)) => {
-				self.take(credit);
+				buffer.take(credit);
 				Poll::Ready(Ok(true))
 			}
 			Ok(None) => Poll::Ready(Ok(false)),
@@ -445,7 +453,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			self.stream.stop(self.version.encode_stream_code(&err.into()));
 		}
 		// What is buffered stays readable, but nothing more is worth holding for.
-		self.free = self.buffer.len() as u64 + self.unit;
+		self.free = Buffer::of(&mut self.buffer, &self.hold).len() as u64 + self.unit;
 		if let Some(hold) = &self.hold {
 			hold.clear();
 		}
@@ -461,6 +469,64 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			free: self.free,
 			hold: self.hold,
 			evicted: self.evicted,
+		}
+	}
+}
+
+/// A reader's buffered bytes: its own while untracked, else locked in its hold beside
+/// their credit, so no eviction runs between a check and a read.
+enum Buffer<'a, S: crate::transport::poll::RecvStream> {
+	Own(&'a mut BytesMut),
+	Held(Locked<'a, S>),
+}
+
+impl<'a, S: crate::transport::poll::RecvStream> Buffer<'a, S> {
+	fn of(own: &'a mut BytesMut, hold: &'a Option<Arc<Hold<S>>>) -> Self {
+		match hold {
+			Some(hold) => Self::Held(hold.lock()),
+			None => Self::Own(own),
+		}
+	}
+
+	/// Whether an eviction emptied the buffer, after which nothing may be read into it.
+	fn is_evicted(&self) -> bool {
+		matches!(self, Self::Held(held) if held.is_evicted())
+	}
+
+	/// Keep the credit for bytes just read, if tracked; otherwise it returns now.
+	fn take(&mut self, credit: S::Credit) {
+		if let Self::Held(held) = self {
+			held.take(credit);
+		}
+	}
+
+	/// Return the credit for `bytes` that completed a unit, less the `free` bytes read
+	/// before tracking began.
+	fn release(&mut self, free: &mut u64, bytes: u64) {
+		let skip = (*free).min(bytes);
+		*free -= skip;
+		if let Self::Held(held) = self {
+			held.release(bytes - skip);
+		}
+	}
+}
+
+impl<S: crate::transport::poll::RecvStream> Deref for Buffer<'_, S> {
+	type Target = BytesMut;
+
+	fn deref(&self) -> &BytesMut {
+		match self {
+			Self::Own(buffer) => buffer,
+			Self::Held(held) => held.buffer(),
+		}
+	}
+}
+
+impl<S: crate::transport::poll::RecvStream> DerefMut for Buffer<'_, S> {
+	fn deref_mut(&mut self) -> &mut BytesMut {
+		match self {
+			Self::Own(buffer) => buffer,
+			Self::Held(held) => held.buffer_mut(),
 		}
 	}
 }
@@ -637,7 +703,7 @@ mod tests {
 		let mut remaining = 5;
 		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
 		assert_eq!(remaining, 1);
-		assert!(reader.buffer.is_empty(), "nothing skipped is kept");
+		assert_eq!(reader.buffered(), 0, "nothing skipped is kept");
 	}
 
 	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Into<Form> + Copy>(
@@ -663,7 +729,7 @@ mod tests {
 				"{result:?}"
 			);
 		}
-		assert_eq!(reader.buffer.len(), prefix.len());
+		assert_eq!(reader.buffered(), prefix.len());
 		assert_eq!(reader.stream.0.len(), 1, "read past the complete frame");
 	}
 
@@ -748,7 +814,7 @@ mod tests {
 			reader.poll_decode::<crate::lite::Setup>(&mut cx),
 			Poll::Ready(Ok(_))
 		));
-		assert!(reader.buffer.is_empty());
+		assert_eq!(reader.buffered(), 0);
 	}
 
 	/// A consumer parked on the group cannot run until this task yields, so a burst of
@@ -1095,6 +1161,48 @@ mod tests {
 				send.poll_write(&mut noop(), &[0x05]),
 				Poll::Ready(Err(memory::Error::Stopped(_)))
 			));
+		}
+
+		/// Parked readers filled and evicted in turn never buffer more than the window. An
+		/// eviction that returned the credit but left a parked reader its read-ahead would
+		/// let the peer refill the window while every evicted reader kept its bytes.
+		#[test]
+		fn evicted_parked_readers_free_their_read_ahead() {
+			const WINDOW: usize = 16;
+			let (mut a, mut b) = memory::pair(memory::Config {
+				receive_window: Some(WINDOW),
+				..Default::default()
+			});
+			let pressure = Tracked::default();
+			// One message, then the start of the next, which the reader keeps as read-ahead.
+			const MESSAGE: &[u8] = &[0x07, 0x40, 0x01, 0x40, 0x02, 0x40, 0x03, 0x40];
+			let mut parked = Vec::new();
+			for _ in 0..64 {
+				let Poll::Ready(Ok(mut send)) = a.poll_open_uni(&mut noop()) else {
+					panic!("open")
+				};
+				let mut rest = MESSAGE;
+				while !rest.is_empty() {
+					match write(&mut send, rest) {
+						Poll::Ready(n) => rest = &rest[n..],
+						// Full of parked read-ahead: evict one, as the monitor would.
+						Poll::Pending => assert!(pressure.evict(), "a full window has a holder"),
+					}
+				}
+				let Poll::Ready(Ok(recv)) = b.poll_accept_uni(&mut noop()) else {
+					panic!("accept")
+				};
+				let mut reader = Reader::new(recv, Version::Lite05);
+				reader.track(&pressure, Rank::Unidentified);
+				assert_eq!(varint(reader.poll_varint(&mut noop())), 7);
+				parked.push((send, reader));
+
+				let buffered: usize = parked.iter_mut().map(|(_, reader)| reader.buffered()).sum();
+				assert!(
+					buffered <= WINDOW,
+					"{buffered} bytes buffered past a {WINDOW}-byte window"
+				);
+			}
 		}
 	}
 }

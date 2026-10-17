@@ -1,13 +1,13 @@
 //! Receive-side recovery for when held connection credit fills the allowance.
 //!
-//! A [`Reader`](crate::coding::Reader) tracked here keeps the connection credit for its
-//! buffered bytes and its incomplete unit in a [`Hold`], so incomplete messages are
-//! bounded by the transport's receive allowance. When the transport reports that the
-//! allowance is spent ([`poll_credit_exhausted`](crate::transport::poll::Session::poll_credit_exhausted)),
+//! A [`Reader`](crate::coding::Reader) tracked here keeps its buffered bytes, and the
+//! connection credit for them and for its incomplete unit, in a [`Hold`], so incomplete
+//! messages are bounded by the transport's receive allowance. When the transport reports
+//! that the allowance is spent ([`poll_credit_exhausted`](crate::transport::poll::Session::poll_credit_exhausted)),
 //! nothing can arrive to complete any unit, so the [`Monitor`] evicts the least useful
-//! holder: the eviction itself drops the credit and stops the stream with STOP_SENDING,
-//! whatever the stream's handler is waiting on, and the handler's next read fails with
-//! [`Error::Evicted`](crate::Error::Evicted).
+//! holder: the eviction itself drops the buffer and the credit and stops the stream with
+//! STOP_SENDING, whatever the stream's handler is waiting on, and the handler's next read
+//! fails with [`Error::Evicted`](crate::Error::Evicted).
 //!
 //! Victims, first to last:
 //! - Media, from the broadcast holding the most credit, lowest priority first. Within a
@@ -30,6 +30,8 @@ use std::{
 	},
 	task::{Context, Waker},
 };
+
+use bytes::BytesMut;
 
 use crate::{
 	PathOwned,
@@ -58,60 +60,98 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 	mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A tracked stream's credit, and what evicting it takes, shared by its reader and the
-/// registry.
+/// A tracked stream's buffer and credit, and what evicting it takes, shared by its reader
+/// and the registry.
 pub(crate) struct Hold<R: RecvStream> {
-	/// Bytes of credit `credit` covers, read by the registry without the lock.
+	/// Bytes of credit the slot covers, read by the registry without the lock.
 	held: AtomicU64,
-	/// The monitor chose this stream: its credit is gone and the stream is stopped.
+	/// The monitor chose this stream: its buffer and credit are gone and the stream is
+	/// stopped.
 	evicted: AtomicBool,
 	/// The reader's task, woken on eviction.
 	waker: Mutex<Option<Waker>>,
 	rank: Mutex<Rank>,
 	/// Registration order, the last tiebreak: the newest stream goes first.
 	seq: u64,
-	credit: Mutex<Option<R::Credit>>,
+	slot: Mutex<Slot<R::Credit>>,
 	stopper: R::Stopper,
 	/// The STOP_SENDING code for an eviction, in the stream's negotiated registry.
 	code: u32,
 }
 
-impl<R: RecvStream> Hold<R> {
+/// A tracked reader's buffered bytes and the credit it holds, under one lock so an
+/// eviction frees both: credit returned for bytes still allocated would let a peer refill
+/// the window while parked readers keep the memory.
+struct Slot<C> {
+	buffer: BytesMut,
+	credit: Option<C>,
+}
+
+/// A [`Hold`]'s slot, locked by its reader.
+pub(crate) struct Locked<'a, R: RecvStream> {
+	hold: &'a Hold<R>,
+	slot: MutexGuard<'a, Slot<R::Credit>>,
+}
+
+impl<R: RecvStream> Locked<'_, R> {
+	/// The reader's buffered bytes.
+	pub fn buffer(&self) -> &BytesMut {
+		&self.slot.buffer
+	}
+
+	/// The reader's buffered bytes, to read into or consume.
+	pub fn buffer_mut(&mut self) -> &mut BytesMut {
+		&mut self.slot.buffer
+	}
+
+	/// Whether the monitor chose this stream. Checked under the lock, a `false` means no
+	/// eviction can empty the buffer until it is unlocked.
+	pub fn is_evicted(&self) -> bool {
+		self.hold.is_evicted()
+	}
+
 	/// Keep the credit for bytes just read, or return it at once if already evicted.
-	pub fn take(&self, credit: R::Credit) {
-		let mut held = lock(&self.credit);
-		// Checked under the lock: an eviction sets the flag before it takes the credit.
-		if self.evicted.load(Ordering::Acquire) {
-			drop(held);
+	pub fn take(&mut self, credit: R::Credit) {
+		if self.hold.is_evicted() {
 			return drop(credit);
 		}
-		let len = match held.as_mut() {
+		let len = match self.slot.credit.as_mut() {
 			Some(held) => {
 				held.merge(credit);
 				held.len()
 			}
 			None => {
 				let len = credit.len();
-				*held = Some(credit);
+				self.slot.credit = Some(credit);
 				len
 			}
 		};
-		self.held.store(len, Ordering::Relaxed);
+		self.hold.held.store(len, Ordering::Relaxed);
 	}
 
 	/// Return the credit for `bytes` that completed a unit.
-	pub fn release(&self, bytes: u64) {
-		let mut held = lock(&self.credit);
-		let Some(credit) = held.as_mut() else { return };
-		let freed = credit.split(bytes);
-		self.held.store(credit.len(), Ordering::Relaxed);
-		drop(held);
-		drop(freed);
+	pub fn release(&mut self, bytes: u64) {
+		let Some(credit) = self.slot.credit.as_mut() else {
+			return;
+		};
+		drop(credit.split(bytes));
+		self.hold.held.store(credit.len(), Ordering::Relaxed);
+	}
+}
+
+impl<R: RecvStream> Hold<R> {
+	/// Lock the buffer and credit, which an eviction drops together.
+	pub fn lock(&self) -> Locked<'_, R> {
+		Locked {
+			hold: self,
+			slot: lock(&self.slot),
+		}
 	}
 
-	/// Return everything held: the reader gave up on the stream.
+	/// Return all the credit: the reader gave up on the stream, and what it buffered
+	/// stays readable.
 	pub fn clear(&self) {
-		let credit = lock(&self.credit).take();
+		let credit = lock(&self.slot).credit.take();
 		self.held.store(0, Ordering::Relaxed);
 		drop(credit);
 	}
@@ -152,7 +192,7 @@ pub(crate) trait Holder {
 	fn rank(&self) -> Rank;
 	/// Registration order.
 	fn seq(&self) -> u64;
-	/// Drop the credit, stop the stream, and wake its reader to fail.
+	/// Drop the buffer and credit, stop the stream, and wake its reader to fail.
 	fn evict(&self);
 }
 
@@ -174,13 +214,19 @@ impl<R: RecvStream> Holder for Hold<R> {
 	}
 
 	fn evict(&self) {
+		// Set before locking, so a reader that locks after it sees the flag and reads
+		// nothing more into the buffer this empties.
 		self.evicted.store(true, Ordering::Release);
-		let credit = lock(&self.credit).take();
+		let mut slot = lock(&self.slot);
+		let credit = slot.credit.take();
+		let buffer = std::mem::take(&mut slot.buffer);
+		drop(slot);
 		let held = self.held.swap(0, Ordering::Relaxed);
 		tracing::debug!(rank = ?Holder::rank(self), held, "receive credit exhausted, cancelling a stream");
 		// Stopped first, so the window the credit frees does not invite more of this stream.
 		self.stopper.stop(self.code);
 		drop(credit);
+		drop(buffer);
 		let waker = lock(&self.waker).take();
 		if let Some(waker) = waker {
 			waker.wake();
@@ -278,7 +324,10 @@ impl<H: ?Sized + Holder> Pressure<H> {
 			waker: Mutex::new(None),
 			rank: Mutex::new(rank),
 			seq: state.next,
-			credit: Mutex::new(None),
+			slot: Mutex::new(Slot {
+				buffer: BytesMut::new(),
+				credit: None,
+			}),
 			stopper,
 			code,
 		});
@@ -463,7 +512,7 @@ mod tests {
 	/// Track a receiver holding `held` bytes.
 	fn hold(pressure: &Probes, rank: Rank, held: u64) -> Arc<Hold<Probe>> {
 		let hold = pressure.track::<Probe>(rank, Stops::default(), 0x35);
-		hold.take(Unheld(held));
+		hold.lock().take(Unheld(held));
 		hold
 	}
 
@@ -582,7 +631,7 @@ mod tests {
 		let pressure = Probes::default();
 		let stops = Stops::default();
 		let hold = pressure.track::<Probe>(Rank::Unidentified, stops.clone(), 0x35);
-		hold.take(Unheld(10));
+		hold.lock().take(Unheld(10));
 		let count = Arc::new(Count::default());
 		let waker = Waker::from(count.clone());
 		assert!(!hold.poll_evicted(&Context::from_waker(&waker)));
@@ -594,7 +643,7 @@ mod tests {
 		assert!(hold.poll_evicted(&Context::from_waker(&waker)));
 
 		// A read that raced the eviction returns its credit at once.
-		hold.take(Unheld(5));
+		hold.lock().take(Unheld(5));
 		assert_eq!(pressure.held(), 0);
 	}
 
