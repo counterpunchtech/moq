@@ -502,8 +502,9 @@ struct TrackState {
 
 	// The broadcast this track was subscribed from. With the track name it forms the full
 	// track name, which is what decides whether a repeated alias is the fatal collision
-	// (one alias, two tracks) or the legal sharing of an alias across subscriptions.
-	broadcast: PathOwned,
+	// (one alias, two tracks) or the legal sharing of an alias across subscriptions. Shared
+	// with the rank of every stream it carries, so victim choice compares one pointer.
+	broadcast: std::sync::Arc<PathOwned>,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
@@ -552,7 +553,7 @@ impl TrackState {
 			pending: None,
 			name,
 			alias: None,
-			broadcast,
+			broadcast: std::sync::Arc::new(broadcast),
 			timescale: None,
 			fill,
 			largest: None,
@@ -568,7 +569,7 @@ impl TrackState {
 	/// The rank of this subscription's data stream for `group`, starting at `start`.
 	fn rank(&self, subscribe: RequestId, group: u64, start: u64) -> Rank {
 		Rank::Media {
-			broadcast: std::sync::Arc::new(self.broadcast.clone()),
+			broadcast: self.broadcast.clone(),
 			priority: crate::priority::Priority::new(self.priority, subscribe.0, group)
 				.with_order(self.order)
 				.with_start(start),

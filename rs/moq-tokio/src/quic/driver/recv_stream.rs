@@ -648,7 +648,8 @@ pub struct Stopper {
 impl Stopper {
     /// Stop accepting data, as [`RecvStream::stop`] does.
     ///
-    /// The stream's own handle learns of it on its next read, which yields `ClosedStream`.
+    /// The stream's own handle learns of it on its next read, which yields `ClosedStream`;
+    /// a read parked on the stream is woken for it.
     pub fn stop(&self, error_code: VarInt) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("Stopper::stop");
         if self.is_0rtt && conn.check_0rtt().is_err() {
@@ -656,6 +657,10 @@ impl Stopper {
         }
         conn.inner.recv_stream(self.stream).stop(error_code)?;
         conn.check_credit();
+        // A stop produces no readable event, so the parked read would never hear of it.
+        if let Some(waker) = conn.blocked_readers.remove(&self.stream) {
+            waker.wake();
+        }
         conn.wake();
         Ok(())
     }

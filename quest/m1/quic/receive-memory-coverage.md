@@ -24,10 +24,10 @@ to configure a window below `MIN_RECEIVE_WINDOW`.
 
 The sender is a Bun script using `@moq/web-transport`, pinned to the test
 server's certificate hash with WebSocket disabled. It mirrors the Rust tests
-in `rs/moq-tokio/tests/receive_credit.rs`. A low-priority track sends a frame
+in `rs/moq-tokio/tests/integration/receive_credit.rs`. A low-priority track sends a frame
 larger than the window. A high-priority frame then has to complete, and a
 later low-priority group has to arrive after the low stream is stopped. Run
-it from Rust the way `rs/moq-tokio/tests/max_age.rs` drives its Bun client,
+it from Rust the way `rs/moq-tokio/tests/integration/max_age.rs` drives its Bun client,
 and wire it into the interop workflow, since normal CI has no Bun.
 
 The benchmark sweeps concurrent streams and frame sizes, and compares a

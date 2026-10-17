@@ -318,6 +318,11 @@ impl RecvStream {
 		match Self::read(&self.shared, self.id, max, held) {
 			// moq-quic hands out at most `max`.
 			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
+			// What a stop discarded is not the stream's end.
+			Read::Finished if self.shared.recv_stopped(self.id) => {
+				self.stopped = true;
+				Poll::Ready(Err(Error::Quic("stream stopped".to_string())))
+			}
 			Read::Finished => {
 				self.finished = true;
 				Poll::Ready(Ok(None))
@@ -479,8 +484,9 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 /// Stops a [`RecvStream`] without borrowing it.
 ///
-/// The stream's own handle learns of it on its next read, which fails as stopped. What its
-/// closed-watch read ahead stays with that handle until it stops or drops.
+/// The stream's own handle learns of it on its next read, which fails as stopped, and a
+/// read parked on the stream is woken for it. What its closed-watch read ahead stays with
+/// that handle until it stops or drops.
 #[derive(Clone)]
 pub struct Stopper {
 	shared: Shared,
@@ -488,15 +494,24 @@ pub struct Stopper {
 }
 
 impl Stopper {
+	/// Stop the stream with `code`, as [`stop`](web_transport_trait::poll::RecvStream::stop)
+	/// does.
+	pub fn stop(&self, code: u32) {
+		self.stop_code(code.into());
+	}
+
 	/// [`RecvStream::stop_code`] from outside the stream.
 	pub(crate) fn stop_code(&self, code: u64) {
-		// Err means the stream is already gone, which is what we wanted.
-		let _ = self
+		let stopped = self
 			.shared
 			.conn
 			.borrow_mut()
 			.recv_stream(self.id)
 			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+		// Err means the stream is already gone, which is what we wanted.
+		if stopped.is_ok() {
+			self.shared.stop_recv(self.id);
+		}
 		self.shared.check_credit();
 		self.shared.kick();
 	}

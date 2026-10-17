@@ -1770,6 +1770,48 @@ async fn stream_drop_removes_blocked_reader() {
     }
 }
 
+/// A read parked on a stream wakes when a `Stopper` stops it, and fails as closed.
+#[tokio::test]
+async fn stopper_wakes_a_parked_read() {
+    let _guard = subscribe();
+    let endpoint_factory = EndpointFactory::new();
+    let server = endpoint_factory.endpoint();
+    let server_address = server.local_addr().unwrap();
+    let client = endpoint_factory.endpoint();
+
+    let server_task = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let mut stream = conn.accept_uni().await.unwrap();
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+
+        let stopper = stream.stopper();
+        let (waker, wake_counter) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 64];
+        let read_fut = stream.read(&mut buf);
+        tokio::pin!(read_fut);
+        assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
+
+        stopper.stop(0u32.into()).unwrap();
+        assert_eq!(wake_counter.wakes(), 1, "the parked read was not woken");
+        assert!(matches!(
+            read_fut.as_mut().poll(&mut cx),
+            Poll::Ready(Err(crate::quic::driver::ReadError::ClosedStream))
+        ));
+        conn.close(0u32.into(), b"done");
+    });
+
+    let conn = client
+        .connect(server_address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let mut stream = conn.open_uni().await.unwrap();
+    stream.write_all(b"hello").await.unwrap();
+    server_task.await.unwrap();
+}
+
 /// Test that dropping a `RecvStream` after cancelling a read and then
 /// explicitly `stop`ing it doesn't panic.
 #[tokio::test]

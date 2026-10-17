@@ -196,6 +196,92 @@ fn held_reads_spend_the_connection_window() {
 		.expect("worker");
 }
 
+/// A read parked on a stream wakes when its `Stopper` stops it, and fails rather than
+/// reading what the stop discarded as the stream's end.
+#[test]
+fn a_stopper_wakes_and_fails_a_parked_read() {
+	use std::sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	};
+
+	#[derive(Default)]
+	struct Wakes(AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
+	let server = quic::Endpoint::new(
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	dial.alpn = vec![ALPN.to_string()];
+	dial.verify = false;
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			// Held open, so the stream never finishes on its own.
+			let mut send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			let written = within(
+				&handle,
+				"the write",
+				std::future::poll_fn(|cx| send.poll_write(cx, b"hello")),
+			)
+			.await
+			.expect("write");
+			let mut recv = within(
+				&handle,
+				"the stream",
+				std::future::poll_fn(|cx| accepted.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+			read(&handle, &mut recv, written).await;
+
+			let stopper = recv.stopper();
+			let wakes = Arc::new(Wakes::default());
+			let waker = Waker::from(wakes.clone());
+			let mut cx = Context::from_waker(&waker);
+			let mut buf = [0u8; 64];
+			assert!(recv.poll_read(&mut cx, &mut buf).is_pending());
+
+			stopper.stop(0);
+			assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "the parked read was not woken");
+			assert!(
+				matches!(recv.poll_read(&mut cx, &mut buf), Poll::Ready(Err(_))),
+				"a stopped stream read as finished"
+			);
+			drop(send);
+		})
+		.expect("worker");
+}
+
 #[test]
 fn chunked_writes_stop_at_the_window() {
 	const STREAM_WINDOW: usize = 4096;

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::{Error, SEGMENT};
 use super::endpoint;
@@ -58,6 +58,9 @@ pub(crate) struct State {
 	/// driver's per-event path, and moq-quic assigns the ids.
 	readable: FxHashMap<StreamId, kio::WaiterList>,
 	writable: FxHashMap<StreamId, kio::WaiterList>,
+	/// Receive streams a [`Stopper`](super::Stopper) stopped, so their handle's next read
+	/// fails rather than reading the discarded tail as the stream's end.
+	stopped: FxHashSet<StreamId>,
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
 	/// `STOP_SENDING`.
 	finishing: FxHashMap<StreamId, kio::WaiterList>,
@@ -104,6 +107,7 @@ impl State {
 			open_waiters: kio::WaiterList::new(),
 			readable: FxHashMap::default(),
 			writable: FxHashMap::default(),
+			stopped: FxHashSet::default(),
 			finishing: FxHashMap::default(),
 			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
@@ -128,6 +132,7 @@ impl State {
 	/// be parked.
 	fn forget_recv(&mut self, id: StreamId) {
 		self.readable.remove(&id);
+		self.stopped.remove(&id);
 	}
 
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
@@ -253,6 +258,21 @@ impl Inner {
 	/// The same for the read half, which parks on its own table.
 	pub(crate) fn forget_recv(&self, id: StreamId) {
 		self.state.borrow_mut().forget_recv(id);
+	}
+
+	/// Record that a [`Stopper`](super::Stopper) stopped receive stream `id`, waking a read
+	/// parked on it: a stop produces no readable event.
+	pub(crate) fn stop_recv(&self, id: StreamId) {
+		let mut state = self.state.borrow_mut();
+		state.stopped.insert(id);
+		if let Some(mut waiters) = state.readable.remove(&id) {
+			waiters.wake();
+		}
+	}
+
+	/// Whether a [`Stopper`](super::Stopper) stopped receive stream `id`.
+	pub(crate) fn recv_stopped(&self, id: StreamId) -> bool {
+		self.state.borrow().stopped.contains(&id)
 	}
 
 	/// Wake anyone parked on stream `id` being readable.
