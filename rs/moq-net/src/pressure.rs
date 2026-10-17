@@ -248,22 +248,23 @@ impl Eviction {
 	/// Run `serve` to its end, or fail it with [`Error::Evicted`](crate::Error::Evicted)
 	/// once the monitor chooses the stream, whatever `serve` is parked on.
 	pub async fn guard<T>(&self, serve: impl Future<Output = Result<T, crate::Error>>) -> Result<T, crate::Error> {
-		let Some(slot) = &self.0 else {
-			return serve.await;
-		};
 		let mut serve = std::pin::pin!(serve);
 		std::future::poll_fn(|cx| {
-			if let Poll::Ready(res) = serve.as_mut().poll(cx) {
-				return Poll::Ready(res);
-			}
-			// After `serve`, whose reads register on the same slot, so the eviction wakes
-			// this task at the top rather than a wait that will not look.
-			match slot.poll_evicted(cx) {
-				true => Poll::Ready(Err(crate::Error::Evicted)),
-				false => Poll::Pending,
-			}
+			let res = serve.as_mut().poll(cx);
+			self.check(cx, res)
 		})
 		.await
+	}
+
+	/// [`Self::guard`] for a state machine owning the stream: a pending `res` fails with
+	/// [`Error::Evicted`](crate::Error::Evicted) once the monitor chooses the stream. Call
+	/// it on the machine's result, after its reads, which register on the same slot, so the
+	/// eviction wakes the machine at the top rather than a wait that will not look.
+	pub fn check<T>(&self, cx: &Context<'_>, res: Poll<Result<T, crate::Error>>) -> Poll<Result<T, crate::Error>> {
+		match (res, &self.0) {
+			(Poll::Pending, Some(slot)) if slot.poll_evicted(cx) => Poll::Ready(Err(crate::Error::Evicted)),
+			(res, _) => res,
+		}
 	}
 }
 

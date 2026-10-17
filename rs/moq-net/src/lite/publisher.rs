@@ -239,6 +239,7 @@ where
 					self.children.push(Control {
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
+						eviction: stream.reader.eviction(),
 						state: ControlState::Start { stream },
 					});
 				}
@@ -285,6 +286,8 @@ struct Control<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	// Handed to the children that arm timers (PROBE, announce linger).
 	runtime: crate::time::Clock,
+	/// Heard here because a child may park off the stream's reader.
+	eviction: crate::pressure::Eviction,
 	state: ControlState<S>,
 }
 
@@ -313,7 +316,8 @@ impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Err(err) = ready!(self.poll_serve(waiter)) {
+		let res = self.poll_serve(waiter);
+		if let Err(err) = ready!(self.eviction.check(&waiter.context(), res)) {
 			let err = lite::error::control(&mut self.shared.session.clone(), err);
 			tracing::warn!(%err, "control stream error");
 		}
@@ -5361,6 +5365,7 @@ mod tests {
 			let mut control = Control {
 				shared: probe.shared,
 				runtime: crate::time::Clock::sim(),
+				eviction: crate::pressure::Eviction::none(),
 				state: ControlState::Goaway { stream },
 			};
 			assert!(control.poll(&kio::Waiter::noop()).is_ready());
@@ -5396,6 +5401,7 @@ mod tests {
 			let mut control = Control {
 				shared: probe.shared,
 				runtime: crate::time::Clock::sim(),
+				eviction: crate::pressure::Eviction::none(),
 				state: ControlState::Start { stream },
 			};
 			assert!(control.poll(&kio::Waiter::noop()).is_ready());
@@ -6334,6 +6340,7 @@ mod tests {
 			let mut control = Control {
 				shared: shared.clone(),
 				runtime: crate::time::Clock::sim(),
+				eviction: crate::pressure::Eviction::none(),
 				state: ControlState::Subscribe(RequestServe::new(shared, probe.stream.unwrap())),
 			};
 			assert!(
@@ -6386,6 +6393,7 @@ mod tests {
 			let mut control = Control {
 				shared: shared.clone(),
 				runtime: crate::time::Clock::sim(),
+				eviction: crate::pressure::Eviction::none(),
 				state: ControlState::Subscribe(RequestServe::new(shared, probe.stream.unwrap())),
 			};
 			let pending =
@@ -6425,6 +6433,7 @@ mod tests {
 				let mut control = Control {
 					shared: probe.shared,
 					runtime: crate::time::Clock::sim(),
+					eviction: crate::pressure::Eviction::none(),
 					state: ControlState::Goaway {
 						stream: probe.stream.unwrap(),
 					},
@@ -6447,6 +6456,7 @@ mod tests {
 				let mut control = Control {
 					shared: probe.shared,
 					runtime: crate::time::Clock::sim(),
+					eviction: crate::pressure::Eviction::none(),
 					state: ControlState::Goaway {
 						stream: probe.stream.unwrap(),
 					},

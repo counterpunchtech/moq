@@ -974,9 +974,15 @@ where
 
 		let uni = uni.clone();
 		let fatal = fatal.clone();
+		// Its handler may park off the reader. Dropping it lets go of the stream's credit.
+		let eviction = reader.eviction();
 		tasks.push(async move {
-			if let Err(err) = uni.serve(reader).await {
-				fatal.lock().get_or_insert(err);
+			match eviction.guard(uni.serve(reader)).await {
+				Ok(()) => {}
+				Err(Error::Evicted) => tracing::debug!("uni stream evicted"),
+				Err(err) => {
+					fatal.lock().get_or_insert(err);
+				}
 			}
 		});
 	}
@@ -1238,9 +1244,15 @@ where
 		// header here could block later streams whose unread data holds flow control.
 		let bidi = bidi.clone();
 		let fatal = fatal.clone();
+		// Its handler may park off the reader. Dropping it lets go of the stream's credit.
+		let eviction = stream.reader.eviction();
 		tasks.push(async move {
-			if let Err(err) = bidi.serve(stream).await {
-				fatal.lock().get_or_insert(err);
+			match eviction.guard(bidi.serve(stream)).await {
+				Ok(()) => {}
+				Err(Error::Evicted) => tracing::debug!("request stream evicted"),
+				Err(err) => {
+					fatal.lock().get_or_insert(err);
+				}
 			}
 		});
 	};

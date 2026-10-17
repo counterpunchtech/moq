@@ -1315,6 +1315,8 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
+	/// Heard here because the link cost wait parks off the stream's reader.
+	eviction: crate::pressure::Eviction,
 	state: PrefixState<S>,
 }
 
@@ -1358,6 +1360,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		Self {
 			subscriber,
 			prefix,
+			eviction: crate::pressure::Eviction::none(),
 			state: PrefixState::Open,
 		}
 	}
@@ -1365,7 +1368,9 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.poll_run(waiter)
+		let res = self.poll_run(waiter);
+		self.eviction
+			.check(&waiter.context(), res)
 			.map_err(|err| lite::error::control(&mut self.subscriber.session.clone(), err))
 	}
 
@@ -1380,6 +1385,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						&mut cx
 					))?;
 					stream.reader.track(&self.subscriber.pressure, Rank::Control);
+					self.eviction = stream.reader.eviction();
 
 					stream.writer.buffer(&lite::ControlType::Announce)?;
 					// Lite04/05: ask the peer to filter out announces that already passed
@@ -4184,6 +4190,60 @@ mod tests {
 		drop(prefix);
 		let _a = slots.acquire().expect("the failed stream kept a slot");
 		let _b = slots.acquire().expect("the failed stream kept a slot");
+	}
+
+	/// A prefix stream waiting on the peer's SETUP for its link cost holds what it read
+	/// past ANNOUNCE_OK, so it still has to hear the pressure monitor choose it.
+	#[moq_net_sim::test]
+	async fn an_evicted_prefix_waiting_on_its_link_cost_lets_go() {
+		const VERSION: Version = Version::Lite06;
+		let mut script = Vec::new();
+		lite::AnnounceOk {
+			origin: crate::Hop::new(9).unwrap(),
+			active: 1,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		lite::AnnounceBroadcast::Active {
+			epoch: None,
+			suffix: lite::PathRef::literal(Path::new("a")),
+			hops: lite::HopsRef::literal(crate::Hops::new()),
+			cost: crate::origin::Cost::default(),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session: crate::lite::test_transport::ScriptedSession::new(script),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			// No configured cost, and a SETUP that never arrives.
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			cost: None,
+			peer_hop: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let pressure = subscriber.pressure.clone();
+		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+
+		let res = {
+			let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+			let waited = moq_net_sim::timeout(std::time::Duration::from_secs(1), run.as_mut()).await;
+			assert!(waited.is_err(), "the prefix did not wait for its link cost: {waited:?}");
+			assert!(pressure.held() > 0, "the parked prefix holds its read-ahead");
+
+			assert!(pressure.evict());
+			moq_net_sim::timeout(std::time::Duration::from_secs(1), run)
+				.await
+				.expect("the evicted prefix never woke")
+		};
+		assert!(matches!(res, Err(Error::Evicted)), "{res:?}");
+		drop(prefix);
+		assert_eq!(pressure.held(), 0, "the evicted prefix let go of its credit");
 	}
 }
 
