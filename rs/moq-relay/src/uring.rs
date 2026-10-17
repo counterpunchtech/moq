@@ -128,6 +128,7 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
+						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -697,7 +698,7 @@ async fn serve_connection(
 	};
 	let request = deadline
 		.bound(server.accept_request_lite(
-			std::time::Instant::now(),
+			moq_net::time::now(),
 			moq_uring::transport::Session::new(transport, binding),
 		))
 		.await

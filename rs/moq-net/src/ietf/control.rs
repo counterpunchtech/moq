@@ -270,7 +270,7 @@ impl Control {
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
-	pub async fn next_request_id(&self, runtime: &crate::time::Clock) -> Result<RequestId, Error> {
+	pub async fn next_request_id(&self, runtime: &crate::time::Deadlines) -> Result<RequestId, Error> {
 		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {
@@ -529,10 +529,10 @@ mod tests {
 	}
 
 	/// Allocation waits until every overlapping legacy header hold has ended.
-	#[test]
-	fn overlapping_send_holds_block_allocation_until_all_end() {
+	#[moq_clock::test]
+	async fn overlapping_send_holds_block_allocation_until_all_end() {
 		let control = Control::new(None, false);
-		let clock = crate::time::Clock::sim();
+		let clock = crate::time::sim();
 		let a = control.sending();
 		let b = control.sending();
 		drop(a);

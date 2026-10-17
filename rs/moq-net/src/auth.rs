@@ -1370,7 +1370,7 @@ struct Held {
 	hold: Option<Hold>,
 	/// The token of the renewal being verified, until the serve loop applies its verdict.
 	renewing: Option<kio::Shared<Issue>>,
-	clock: crate::time::Clock,
+	clock: crate::time::Deadlines,
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -1379,7 +1379,7 @@ impl RequestGrant {
 	/// expiry, or the refusal to answer the request with: the acceptor's own, or
 	/// [`Error::Unauthorized`] for a grant that does not cover it or has already expired.
 	pub(crate) fn new(
-		clock: &crate::time::Clock,
+		clock: &crate::time::Deadlines,
 		verdict: RequestVerdict,
 		res: std::result::Result<Grant, Refusal>,
 		path: crate::PathOwned,
@@ -1533,7 +1533,7 @@ pub(crate) async fn until<F: std::future::Future>(
 /// Whether `grant` covers a `kind` request at `path` and has not already expired: admitting
 /// an expired one until its deadline fires would let others act on it meanwhile.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
-fn live(clock: &crate::time::Clock, kind: RequestKind, path: &str, grant: &Grant) -> bool {
+fn live(clock: &crate::time::Deadlines, kind: RequestKind, path: &str, grant: &Grant) -> bool {
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
 }
 
@@ -2032,7 +2032,7 @@ mod request_token_tests {
 
 	/// A request token reaches the app's acceptor like any other token, and the grant the
 	/// app answers is what the verdict resolves to.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_token_reaches_the_acceptor() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().expect("take the requests");
@@ -2048,7 +2048,7 @@ mod request_token_tests {
 
 	/// An AUTH token has no type, so a request token of any type but out-of-band cannot reach
 	/// the acceptor as one: it is unsupported, never handed over as if it were a plain token.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_typed_request_token_is_unsupported() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2085,7 +2085,7 @@ mod request_token_tests {
 	/// request message, not the AUTH stream, so `requests()` stays live on a session whose
 	/// `supported` is false, even once the peer turns out not to speak AUTH. This is the shape
 	/// a standard moq-transport peer presents when it does not negotiate the AUTH extension.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_token_is_verified_without_the_auth_extension() {
 		let handle = Handle::new(false);
 		let mut requests = handle.requests().expect("take the requests");
@@ -2101,7 +2101,7 @@ mod request_token_tests {
 
 	/// With no `requests()` consumer, a request token cannot be verified in band, so the verdict
 	/// is Unsupported and the caller refuses the request NOT_SUPPORTED.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn no_consumer_refuses_a_request_token_as_unsupported() {
 		let handle = Handle::new(true);
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2111,7 +2111,7 @@ mod request_token_tests {
 
 	/// A refused request token resolves to the refusal, which the caller sends the peer as
 	/// UNAUTHORIZED.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_refused_request_token_is_unauthorized() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2126,7 +2126,7 @@ mod request_token_tests {
 
 	/// A grant the acceptor revoked, dropped or replaced before the verdict was read is admitted
 	/// as it stands now, never as first issued.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_grant_ended_before_admission_is_refused() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2157,7 +2157,7 @@ mod request_token_tests {
 
 	/// The grant lives exactly as long as the request: dropping the verdict ends the
 	/// acceptor's issued grant, so it never outlives the request nor joins the union.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn dropping_the_verdict_ends_the_grant() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2171,7 +2171,7 @@ mod request_token_tests {
 
 	/// A request token never joins the session union: the union stays what the connection
 	/// credential earned, not what a request token granted.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_token_never_joins_the_union() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2194,7 +2194,7 @@ mod request_token_tests {
 	/// The session's scope for unnamed requests is the connection credential's grant and every
 	/// grant issued to an AUTH token, and nothing a request token earned: a token on one
 	/// request never widens what tokenless requests may do.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn the_scope_is_session_tokens_only() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2240,7 +2240,7 @@ mod request_token_tests {
 	}
 
 	/// Revoking or dropping an AUTH token's grant takes it out of the scope.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_ended_auth_grant_leaves_the_scope() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2262,7 +2262,7 @@ mod request_token_tests {
 
 	/// A session never authorized is bound by its origin handles alone, whatever its AUTH
 	/// tokens were granted: the scope only exists once the connection credential has a grant.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unauthorized_session_has_no_scope() {
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2276,7 +2276,7 @@ mod request_token_tests {
 
 	use std::time::Duration;
 
-	fn grant_in(runtime: &crate::time::Clock, secs: u64) -> Grant {
+	fn grant_in(runtime: &crate::time::Deadlines, secs: u64) -> Grant {
 		Grant {
 			publish: Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
@@ -2285,9 +2285,9 @@ mod request_token_tests {
 	}
 
 	/// The request grant carries the acceptor's expiry, which is the deadline it lapses at.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_grant_has_the_acceptors_expiry() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2310,9 +2310,9 @@ mod request_token_tests {
 
 	/// A grant that has already expired never admits the request or renews it, even for the
 	/// moment before its deadline would fire.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_already_expired_grant_is_refused() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let expired = || Grant {
@@ -2358,9 +2358,9 @@ mod request_token_tests {
 	}
 
 	/// An accepted REQUEST_UPDATE replaces the grant and its expiry.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_renewal_token_replaces_the_grant_and_expiry() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 
@@ -2396,9 +2396,9 @@ mod request_token_tests {
 
 	/// With no accepted renewal, the deadline ends the request as Expired, and the
 	/// session is not closed by it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn the_deadline_expires_the_request_without_renewal() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2422,9 +2422,9 @@ mod request_token_tests {
 
 	/// A renewal the acceptor granted before the old deadline lapsed keeps the request, even
 	/// when the serve loop applies it only after the deadline.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_granted_renewal_outlives_the_old_deadline() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2444,7 +2444,7 @@ mod request_token_tests {
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().accept(second);
-		moq_net_sim::sleep(Duration::from_secs(61)).await;
+		moq_clock::sleep(Duration::from_secs(61)).await;
 
 		let pending = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter).is_pending())).await;
 		assert!(pending, "the lapsed deadline ended a request whose renewal was granted");
@@ -2460,9 +2460,9 @@ mod request_token_tests {
 	/// untouched and ends only when its own deadline lapses. The serve loops end the request on
 	/// a refusal separately (a refused renewal ends only that request); this covers only that
 	/// the grant object is not mutated.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_refused_renewal_leaves_the_grant() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2506,9 +2506,9 @@ mod request_token_tests {
 
 	/// An acceptor-side update that no longer covers the request ends it, even when the
 	/// replacement has no expiry to lapse at; one that still covers it is folded in.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_update_that_stops_covering_ends_the_request() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);
@@ -2530,7 +2530,7 @@ mod request_token_tests {
 		assert!(pending, "a covering update keeps the request");
 
 		issued.update(Grant::default());
-		let err = moq_net_sim::timeout(
+		let err = moq_clock::timeout(
 			Duration::from_secs(1),
 			kio::wait(|waiter| request_grant.poll_ended(waiter)),
 		)
@@ -2589,9 +2589,9 @@ mod request_token_tests {
 
 	/// An acceptor-side revoke ends the request before the deadline, and does not close the
 	/// session.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_acceptor_revoke_ends_the_request() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
 		let verdict = handle.verify_request(token(b"jwt", 0), None);

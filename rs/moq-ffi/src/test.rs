@@ -286,6 +286,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 		bitrate: None,
 		enabled: true,
 		container: MoqContainer::Legacy,
+		jitter_us: None,
 	}
 }
 
@@ -297,6 +298,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		sample_rate: None,
 		channels: None,
 		max_delay_us: None,
+		delay_us: None,
 	}
 }
 
@@ -654,6 +656,94 @@ async fn raw_audio_activity() {
 			.expect("expected a re-anchored raw audio frame");
 	}
 	assert_eq!(resumed.timestamp_us, RESUMED_TIMESTAMP_US);
+
+	audio.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
+/// The decoder's playout delay is configurable and stays observable while a read waits:
+/// the decoder sits behind the read's lock, so the getter must not need it.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn raw_audio_decode_delay() {
+	use crate::audio::*;
+
+	// 20 ms of mono silence at 48 kHz.
+	const FRAME_SAMPLES: usize = 960;
+	const FRAME_US: u64 = 20_000;
+	const FIXED_US: u64 = 80_000;
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let audio = MoqAudioProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		},
+		MoqAudioEncoderOutput {
+			track: Some("microphone".into()),
+			codec: MoqAudioCodec::opus(),
+			sample_rate: None,
+			channels: None,
+			bitrate: None,
+			frame_duration_us: FRAME_US as u32,
+			preset: None,
+		},
+		None,
+	)
+	.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for raw audio catalog")
+		.unwrap()
+		.expect("expected a raw audio catalog");
+	let rendition = catalog.audio.get("microphone").unwrap().clone();
+
+	let subscribe = |delay_us| {
+		MoqAudioConsumer::subscribe(
+			&consumer,
+			"microphone".into(),
+			rendition.clone(),
+			MoqAudioDecoderOutput {
+				delay_us,
+				..audio_output()
+			},
+		)
+	};
+	let fixed = subscribe(Some(FIXED_US)).await.unwrap();
+	let estimated = subscribe(None).await.unwrap();
+	assert_eq!(fixed.delay_us(), FIXED_US);
+	let initial = estimated.delay_us();
+
+	// Both reads park on the decoder before any audio exists.
+	let read = |decoded: Arc<MoqAudioConsumer>| tokio::spawn(async move { decoded.next().await });
+	let (fixed_read, estimated_read) = (read(fixed.clone()), read(estimated.clone()));
+	tokio::task::yield_now().await;
+	assert_eq!(fixed.delay_us(), FIXED_US, "readable while a read holds the decoder");
+
+	for i in 0..2 {
+		audio
+			.write(MoqAudioFrame {
+				timestamp_us: i * FRAME_US,
+				data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
+			})
+			.unwrap();
+	}
+	for read in [fixed_read, estimated_read] {
+		tokio::time::timeout(TIMEOUT, read)
+			.await
+			.expect("timed out waiting for decoded audio")
+			.unwrap()
+			.unwrap()
+			.expect("expected a decoded frame");
+	}
+
+	assert_eq!(fixed.delay_us(), FIXED_US, "a fixed delay ignores arrivals");
+	// The decoded frame's duration joins the estimate, so the mirror must have moved.
+	assert_ne!(estimated.delay_us(), initial, "the estimate updates as frames are read");
 
 	audio.finish().unwrap();
 	broadcast.close().unwrap();
@@ -5200,13 +5290,13 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.grant(), Some(1_000_000));
 
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = moq_clock::Instant::now() + TIMEOUT;
 	loop {
 		if video.applied_bitrate() == 1_000_000 {
 			break;
 		}
 		assert!(
-			std::time::Instant::now() < deadline,
+			moq_clock::Instant::now() < deadline,
 			"encoder did not follow the shrinking grant, last applied {}",
 			video.applied_bitrate()
 		);
@@ -5994,7 +6084,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 			.unwrap();
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
-		let start = std::time::Instant::now();
+		let start = moq_clock::Instant::now();
 		let err = tokio::time::timeout(TIMEOUT, publisher.shutdown())
 			.await
 			.expect("shutdown")

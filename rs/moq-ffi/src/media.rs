@@ -137,6 +137,10 @@ pub struct MoqAudio {
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	pub container: MoqContainer,
+	/// The publisher's worst-case delay between a frame being ready and its flush, in
+	/// microseconds, which floors an estimated playout delay. Absent means frames flush at once.
+	#[uniffi(default = None)]
+	pub jitter_us: Option<u64>,
 }
 
 /// A payload and the time it should be presented.
@@ -509,6 +513,9 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					bitrate: config.bitrate,
 					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
+					jitter_us: config
+						.jitter
+						.map(|jitter| jitter.as_micros().try_into().unwrap_or(u64::MAX)),
 				},
 			))
 		})
@@ -950,7 +957,7 @@ impl MoqMediaTrackProducer {
 		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, std::time::Instant::now())?;
+		media.import.flush(timestamp, moq_clock::Instant::now())?;
 		Ok(())
 	}
 
@@ -1791,7 +1798,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = std::time::Instant::now();
+				let start = moq_clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

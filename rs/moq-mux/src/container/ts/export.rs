@@ -166,7 +166,7 @@ where
 	/// edge: a test exporting a broadcast it wrote whole.
 	replay: bool,
 	/// Wakes the export when the next grid slot is due on the jitter buffer's clock.
-	slot_timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>>,
+	slot_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 	/// Output frames ready to hand out, one per grid slot, each with what it tells
 	/// [`Self::stats`] once returned.
 	queue: VecDeque<(Frame, Tally)>,
@@ -219,9 +219,9 @@ struct Pending {
 	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
 	cut: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
-	arrived: web_async::time::Instant,
+	arrived: moq_clock::Instant,
 	/// When it was read: the latest it could have arrived.
-	read: web_async::time::Instant,
+	read: moq_clock::Instant,
 }
 
 /// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
@@ -250,7 +250,7 @@ struct Track {
 	/// When the source was last found empty. A frame read since arrived no earlier, and
 	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
 	/// that polls late (a sink sleeping to pace its writes) does not make it late.
-	empty: web_async::time::Instant,
+	empty: moq_clock::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
@@ -302,7 +302,7 @@ impl Track {
 		Self {
 			source,
 			pending: None,
-			empty: web_async::time::Instant::now(),
+			empty: moq_clock::now(),
 			restart: 0,
 			base: (0, 0, 0),
 			finished: false,
@@ -386,7 +386,7 @@ impl Track {
 						skip: self.base.1 + self.source.skips(),
 						cut: self.base.2 + self.source.cuts(),
 						arrived: self.empty,
-						read: web_async::time::Instant::now(),
+						read: moq_clock::now(),
 					};
 					// A new timeline must reach the reset before tune-in alignment can drop it.
 					if let Some(start) = input.video_start
@@ -407,7 +407,7 @@ impl Track {
 					break;
 				}
 				Poll::Pending => {
-					self.empty = web_async::time::Instant::now();
+					self.empty = moq_clock::now();
 					break;
 				}
 			}
@@ -661,6 +661,10 @@ impl Track {
 			true => (Duration::from(decode) + jitter.delay()).saturating_sub(Duration::from(key)),
 			false => Duration::ZERO,
 		};
+		// Logical clocks can begin at zero. Shift both readings by the same representable amount so
+		// their ordering survives even when the full replay lead would precede the clock's origin.
+		let ahead = ahead.min(arrived.duration_since(moq_clock::Instant::ZERO));
+		let ahead = ahead.min(read.duration_since(moq_clock::Instant::ZERO));
 		let arrival = Arrival {
 			arrived: arrived - ahead,
 			read: read - ahead,
@@ -1274,7 +1278,7 @@ where
 			}
 			// Hand the held frames to the jitter buffer in arrival order, so the
 			// earliest anchors its clock, then read on.
-			let mut held: Vec<(web_async::time::Instant, String)> = self
+			let mut held: Vec<(moq_clock::Instant, String)> = self
 				.tracks
 				.iter()
 				.filter_map(|(name, t)| t.pending.as_ref().map(|p| (p.arrived, name.clone())))
@@ -1730,7 +1734,7 @@ where
 			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
 			track.finished = false;
-			track.empty = web_async::time::Instant::now();
+			track.empty = moq_clock::now();
 		}
 		Ok(())
 	}
@@ -1790,7 +1794,7 @@ where
 	/// When the next queued frame is due, or the next grid slot while media is queued or
 	/// every source has finished and the tail runs out.
 	#[cfg(test)]
-	pub(super) fn next_due(&self) -> Option<web_async::time::Instant> {
+	pub(super) fn next_due(&self) -> Option<moq_clock::Instant> {
 		let finished = !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished);
 		let slot = self
 			.slot_due()
@@ -2513,7 +2517,7 @@ where
 	/// never on when they arrived, and the output keeps the clock's pace while media is queued
 	/// (in the schedule or still in the jitter buffer) or still to decode. `None` without a
 	/// delay, where frames settle the slots instead.
-	fn slot_due(&self) -> Option<(u128, web_async::time::Instant)> {
+	fn slot_due(&self) -> Option<(u128, moq_clock::Instant)> {
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
 		Some((known, self.jitter.at(settled)?))
@@ -2561,10 +2565,10 @@ where
 	/// Lay out every grid slot whose time has come, and wake when the next one is due.
 	fn lay_due(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
 		while let Some((known, at)) = self.slot_due() {
-			if web_async::time::Instant::now() < at {
+			if moq_clock::now() < at {
 				let timer = self
 					.slot_timer
-					.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
+					.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
 				if timer.deadline() != at {
 					timer.as_mut().reset(at);
 				}
@@ -3772,7 +3776,7 @@ mod tests {
 		let stream = bytes::Bytes::from(frame.repeat(3));
 		// In microseconds, as every hang frame is.
 		let us = |ms: u64| Timestamp::from_micros(ms * 1_000).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = moq_clock::now();
 		for (pts, payload) in [(us(0), stream.slice(..200)), (us(64), stream.slice(200..))] {
 			let frame = super::Frame {
 				timestamp: pts,
