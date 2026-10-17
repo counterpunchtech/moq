@@ -79,7 +79,11 @@ impl Leased {
     /// Drop the first `n` leased bytes, returning the credit they and every taken byte free.
     fn consume(&mut self, n: usize) -> u64 {
         let mut left = n;
-        assert!(n as u64 <= self.len, "consumed {n} of {} leased bytes", self.len);
+        assert!(
+            n as u64 <= self.len,
+            "consumed {n} of {} leased bytes",
+            self.len
+        );
         self.len -= n as u64;
         while left > 0 {
             let front = self.chunks.front_mut().expect("counted above");

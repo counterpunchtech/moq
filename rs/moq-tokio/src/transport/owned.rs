@@ -52,7 +52,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	type RecvStream = S::Recv;
 	type Error = Error<S::Error>;
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		backend::Session::poll_accept_uni(self, cx).map_ok(S::recv).map_err(Error)
+		backend::Session::poll_accept_uni(self, cx)
+			.map_ok(S::recv)
+			.map_err(Error)
 	}
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_accept_bi(self, cx)

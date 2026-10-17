@@ -509,11 +509,7 @@ impl Pair {
                     let _ = conn.send_stream(id).set_priority(priority.into());
                 }
             }
-            Op::Read {
-                who,
-                stream,
-                max,
-            } => {
+            Op::Read { who, stream, max } => {
                 let (peer, sent) = self.writer(who);
                 if let Some(id) = pick(&peer.recv, stream) {
                     match leased(id) {
@@ -693,12 +689,7 @@ fn send_stream(peer: &mut Peer, index: u8) -> Option<(StreamId, &mut Connection)
 }
 
 /// Read up to `max` bytes from a stream in order, checking each against what was sent.
-fn read(
-    peer: &mut Peer,
-    sent: &HashMap<(Side, StreamId), Sent>,
-    id: StreamId,
-    max: usize,
-) {
+fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, max: usize) {
     let writer = !peer.side;
     let Some((_, conn)) = &mut peer.conn else {
         return;
@@ -775,7 +766,11 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
     let mut checked = 0;
     for chunk in lease.chunks() {
         for &byte in chunk.iter().take(n - checked) {
-            assert_eq!(byte, stream_byte(writer, id, *offset), "corrupt stream data");
+            assert_eq!(
+                byte,
+                stream_byte(writer, id, *offset),
+                "corrupt stream data"
+            );
             *offset += 1;
             checked += 1;
         }

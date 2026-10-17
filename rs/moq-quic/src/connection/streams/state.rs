@@ -3187,7 +3187,11 @@ mod tests {
         assert_eq!(lease(&mut client, id), 32);
         assert_eq!(client.credit_stats().leased, 32);
         assert_eq!(client.local_max_data, initial, "leased, not returned");
-        assert_eq!(lease(&mut client, id), 32, "a second lease sees the same bytes");
+        assert_eq!(
+            lease(&mut client, id),
+            32,
+            "a second lease sees the same bytes"
+        );
 
         let mut pending = Retransmits::default();
         let taken = recv(&mut client, &mut pending, id).take(10);
@@ -3212,7 +3216,11 @@ mod tests {
         assert_eq!(lease(&mut client, id), 32);
         assert!(client.leased(id).unwrap().is_fin());
         assert!(!client.recv.contains_key(&id), "reclaimed");
-        assert_eq!(wait(&mut client, id, 64), Ok(()), "a FIN ends the wait short");
+        assert_eq!(
+            wait(&mut client, id, 64),
+            Ok(()),
+            "a FIN ends the wait short"
+        );
 
         consume(&mut client, id, 32);
         assert_eq!(client.local_max_data, initial + 32);
@@ -3235,8 +3243,15 @@ mod tests {
 
             if reset_first {
                 reset(&mut client, id, 128);
-                assert_eq!(wait(&mut client, id, 33), Err(LeaseError::Reset(0u32.into())));
-                assert_eq!(client.local_max_data, initial + 128 - 32, "all but the lease");
+                assert_eq!(
+                    wait(&mut client, id, 33),
+                    Err(LeaseError::Reset(0u32.into()))
+                );
+                assert_eq!(
+                    client.local_max_data,
+                    initial + 128 - 32,
+                    "all but the lease"
+                );
             }
             let _ = stop(&mut client, id, 0);
             if !reset_first {
@@ -3246,7 +3261,11 @@ mod tests {
             }
             assert!(!client.recv.contains_key(&id));
             assert!(client.leases.is_empty());
-            assert_eq!(client.local_max_data, initial + 128, "reset_first: {reset_first}");
+            assert_eq!(
+                client.local_max_data,
+                initial + 128,
+                "reset_first: {reset_first}"
+            );
             assert_eq!(client.credit_stats().leased, 0);
         }
     }
@@ -3270,7 +3289,10 @@ mod tests {
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
         data(&mut client, id, 0, 32, false);
         let window = client.receive_window as usize;
-        assert!(matches!(wait(&mut client, id, window), Err(LeaseError::Blocked(_))));
+        assert!(matches!(
+            wait(&mut client, id, window),
+            Err(LeaseError::Blocked(_))
+        ));
         assert_eq!(wait(&mut client, id, window + 1), Err(LeaseError::TooLarge));
 
         // Taken bytes still count against it.
@@ -3320,9 +3342,18 @@ mod tests {
         assert_eq!(readable(&mut client), [high, low]);
         assert_eq!(lease(&mut client, high), WINDOW as usize);
         assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
-        assert!(matches!(wait(&mut client, high, 2000), Err(LeaseError::Blocked(_))));
-        assert!(matches!(wait(&mut client, low, 2000), Err(LeaseError::Blocked(_))));
-        assert!(client.leased(low).is_some_and(|lease| !lease.evicted), "a byte of credit left");
+        assert!(matches!(
+            wait(&mut client, high, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(matches!(
+            wait(&mut client, low, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(
+            client.leased(low).is_some_and(|lease| !lease.evicted),
+            "a byte of credit left"
+        );
 
         data(&mut client, low, WINDOW - 1, 1, false);
         // The arrival woke the reader of `low`, which may yet consume.
@@ -3333,11 +3364,23 @@ mod tests {
         assert_eq!(readable(&mut client), [low], "the evicted reader wakes");
         assert_eq!(wait(&mut client, low, 1), Err(LeaseError::Evicted));
         assert_eq!(client.credit_stats().leased, WINDOW);
-        assert_eq!(client.local_max_data, 3 * WINDOW, "the evicted credit returns");
-        assert_eq!(lease(&mut client, high), WINDOW as usize, "the other keeps its bytes");
+        assert_eq!(
+            client.local_max_data,
+            3 * WINDOW,
+            "the evicted credit returns"
+        );
+        assert_eq!(
+            lease(&mut client, high),
+            WINDOW as usize,
+            "the other keeps its bytes"
+        );
 
         let stopped = stop(&mut client, low, 7);
-        assert_eq!(stopped.stop_sending.len(), 1, "the application's code tells the peer");
+        assert_eq!(
+            stopped.stop_sending.len(),
+            1,
+            "the application's code tells the peer"
+        );
         assert_eq!(stopped.stop_sending[0].error_code, 7u32.into());
         // Late data on the evicted stream is credited on arrival.
         data(&mut client, low, WINDOW, 10, true);
@@ -3354,7 +3397,10 @@ mod tests {
         assert_eq!(lease(&mut client, old), WINDOW as usize);
         data(&mut client, new, 0, WINDOW as usize, false);
         let _ = readable(&mut client);
-        assert!(matches!(wait(&mut client, new, 2000), Err(LeaseError::Blocked(_))));
+        assert!(matches!(
+            wait(&mut client, new, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
         assert_eq!(wait(&mut client, new, 1), Err(LeaseError::Evicted));
         assert_eq!(lease(&mut client, old), WINDOW as usize);
     }
@@ -3370,7 +3416,10 @@ mod tests {
         let mut pending = Retransmits::default();
         recv(&mut client, &mut pending, fresh).set_priority(-1);
         data(&mut client, fresh, 0, WINDOW as usize, false);
-        assert!(matches!(wait(&mut client, waiting, 2000), Err(LeaseError::Blocked(_))));
+        assert!(matches!(
+            wait(&mut client, waiting, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
         assert!(client.leases.values().all(|lease| !lease.evicted));
 
         assert_eq!(lease(&mut client, fresh), WINDOW as usize);
@@ -3389,8 +3438,14 @@ mod tests {
         data(&mut client, b, 0, WINDOW as usize, false);
         assert_eq!(lease(&mut client, a), WINDOW as usize);
         consume(&mut client, a, 1);
-        assert!(matches!(wait(&mut client, b, 2000), Err(LeaseError::Blocked(_))));
-        assert!(matches!(wait(&mut client, a, 2000), Err(LeaseError::Blocked(_))));
+        assert!(matches!(
+            wait(&mut client, b, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(matches!(
+            wait(&mut client, a, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
         assert!(client.leases.values().all(|lease| !lease.evicted));
     }
 

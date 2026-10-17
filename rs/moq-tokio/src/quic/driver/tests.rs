@@ -1892,7 +1892,11 @@ async fn leases_spend_the_connection_window() {
     let fin = poll_fn(|cx| recv.poll_lease(cx, 401).map_ok(|lease| lease.is_fin())).await;
     assert!(fin.unwrap(), "the FIN ends a wait for more");
     writer.await.unwrap();
-    assert_eq!(server.stats().credit.leased, 400, "a lease outlives its stream");
+    assert_eq!(
+        server.stats().credit.leased,
+        400,
+        "a lease outlives its stream"
+    );
     drop(recv);
     assert_eq!(server.stats().credit.leased, 0);
 }
@@ -1916,11 +1920,11 @@ async fn stuck_window_evicts_the_lower_priority() {
         async { endpoint.accept().await.unwrap().await }
     )
     .unwrap();
-    let writers = [client.open_uni().await.unwrap(), client.open_uni().await.unwrap()].map(|mut send| {
-        tokio::spawn(async move {
-            send.write_all(&[7; WINDOW]).await.is_ok()
-        })
-    });
+    let writers = [
+        client.open_uni().await.unwrap(),
+        client.open_uni().await.unwrap(),
+    ]
+    .map(|mut send| tokio::spawn(async move { send.write_all(&[7; WINDOW]).await.is_ok() }));
 
     let mut low = server.accept_uni().await.unwrap();
     let mut high = server.accept_uni().await.unwrap();
@@ -1935,7 +1939,10 @@ async fn stuck_window_evicts_the_lower_priority() {
     // The peer hears of the eviction once the stream is stopped.
     drop((low, high));
     let [low, high] = writers;
-    assert!(!low.await.unwrap(), "the evicted stream's writer is stopped");
+    assert!(
+        !low.await.unwrap(),
+        "the evicted stream's writer is stopped"
+    );
     assert!(high.await.unwrap());
 }
 

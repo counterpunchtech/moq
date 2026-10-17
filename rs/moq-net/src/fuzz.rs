@@ -1088,7 +1088,12 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>, frame::ProducerOwned)>>,
+	streams: Vec<
+		Option<(
+			coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>,
+			frame::ProducerOwned,
+		)>,
+	>,
 	groups: Vec<group::Producer>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
@@ -1127,7 +1132,10 @@ impl FrameRecv {
 					chunk,
 					ready: true,
 				};
-				Some((coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05), frame))
+				Some((
+					coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+					frame,
+				))
 			})
 			.collect();
 

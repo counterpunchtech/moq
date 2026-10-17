@@ -55,7 +55,9 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll the stream for a lease of at least `want` bytes.
 	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<S::Lease<'_>, Error>> {
 		let version = &self.version;
-		self.stream.poll_lease(cx, want).map_err(|err| version.transport_error(err))
+		self.stream
+			.poll_lease(cx, want)
+			.map_err(|err| version.transport_error(err))
 	}
 
 	/// Poll `decode` against the leased bytes, leasing more until it stops coming up
@@ -448,7 +450,11 @@ mod tests {
 		] {
 			let mut reader = stop_log(VERSION);
 			reader.abort(&err);
-			assert_eq!(reader.stream.get_ref().stops, vec![expected], "{err:?} used the wrong registry");
+			assert_eq!(
+				reader.stream.get_ref().stops,
+				vec![expected],
+				"{err:?} used the wrong registry"
+			);
 		}
 
 		// The two registries disagree about 0 and 1, which is what makes the mix-up silent.

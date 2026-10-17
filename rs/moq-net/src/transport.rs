@@ -910,7 +910,11 @@ mod tests {
 		};
 		assert!(lease.is_fin());
 		assert_eq!(lease.take(2), Bytes::from_static(b"ab"));
-		assert_eq!(lease.take(10), Bytes::from_static(b"c"), "take stops at a chunk boundary");
+		assert_eq!(
+			lease.take(10),
+			Bytes::from_static(b"c"),
+			"take stops at a chunk boundary"
+		);
 		assert_eq!(lease.len(), 2);
 		lease.consume(0);
 

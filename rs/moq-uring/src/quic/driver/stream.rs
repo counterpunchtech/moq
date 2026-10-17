@@ -312,7 +312,11 @@ impl RecvStream {
 	/// the stream with the lowest priority goes first, and the newest of
 	/// those that tie.
 	pub fn set_priority(&mut self, priority: i64) {
-		self.shared.conn.borrow_mut().recv_stream(self.id).set_priority(priority);
+		self.shared
+			.conn
+			.borrow_mut()
+			.recv_stream(self.id)
+			.set_priority(priority);
 	}
 
 	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read).

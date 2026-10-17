@@ -111,7 +111,11 @@ impl RecvStream {
     ///
     /// The lease holds the connection's lock: drop it before touching any other stream.
     /// Do not mix with the plain reads on one stream, which skip the leased bytes.
-    pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, ReadError>> {
+    pub fn poll_lease(
+        &mut self,
+        cx: &mut Context<'_>,
+        want: usize,
+    ) -> Poll<Result<Lease<'_>, ReadError>> {
         let mut conn = self.conn.state.lock("RecvStream::poll_lease");
         if self.is_0rtt {
             conn.check_0rtt().map_err(|()| ReadError::ZeroRttRejected)?;

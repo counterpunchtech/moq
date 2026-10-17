@@ -55,8 +55,8 @@ mod connection;
 pub use crate::connection::{
     Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats,
     CreditStats, Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats,
-    ReadError, ReadableError, RecvStream, RttEstimator, SendDatagramError, SendDomain, SendGroup, SendGroups, SendStream,
-    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    ReadError, ReadableError, RecvStream, RttEstimator, SendDatagramError, SendDomain, SendGroup,
+    SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;

@@ -922,7 +922,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 					let priority = track.subscription().map_or(0, |sub| sub.priority);
-					self.reader.set_priority(crate::priority::recv_group(priority, hdr.sequence));
+					self.reader
+						.set_priority(crate::priority::recv_group(priority, hdr.sequence));
 
 					// The timescale came from TRACK_INFO (read before this subscription was
 					// even registered), so frames decode immediately. No SUBSCRIBE_OK to

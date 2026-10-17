@@ -55,7 +55,11 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 	type Error = adapter::Error<quic::Error>;
 	type Lease<'a> = quic::Lease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut std::task::Context<'_>, want: usize) -> std::task::Poll<Result<Self::Lease<'_>, Self::Error>> {
+	fn poll_lease(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		want: usize,
+	) -> std::task::Poll<Result<Self::Lease<'_>, Self::Error>> {
 		quic::web::RecvStream::poll_lease(self, cx, want).map_err(adapter::Error)
 	}
 	fn set_priority(&mut self, priority: i64) {

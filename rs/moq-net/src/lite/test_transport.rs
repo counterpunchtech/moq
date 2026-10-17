@@ -767,7 +767,11 @@ pub enum Close {
 impl poll::Chunks for Script {
 	type Error = SinkError;
 
-	fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+	fn poll_read_chunk(
+		&mut self,
+		_cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
 		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
 			let take = max.min(script.len());

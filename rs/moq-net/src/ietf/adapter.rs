@@ -432,7 +432,9 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 
 	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_, S>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_lease(cx, want).map(|r| r.map(AdapterLease::Real).map_err(real_error)),
+			Self::Real(s) => s
+				.poll_lease(cx, want)
+				.map(|r| r.map(AdapterLease::Real).map_err(real_error)),
 			Self::Virtual(s) => s.poll_lease(cx, want).map_ok(AdapterLease::Virtual),
 		}
 	}
@@ -1133,7 +1135,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 
 		let waiter = self.park.hold(cx);
 		match std::task::ready!(self.shared.incoming.poll_pop(waiter)) {
-			Some((send, recv)) => Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv))))),
+			Some((send, recv)) => Poll::Ready(Ok((
+				AdapterSend::Virtual(send),
+				AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
+			))),
 			None => Poll::Ready(Err(crate::Error::Closed)),
 		}
 	}
@@ -1143,7 +1148,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		_cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let (send, recv) = self.shared.open_outgoing(self.version);
-		Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)))))
+		Poll::Ready(Ok((
+			AdapterSend::Virtual(send),
+			AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
+		)))
 	}
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
@@ -1575,10 +1583,7 @@ mod tests {
 
 		// Drain the advertisement the stream opened with, so both halves are quiescent
 		// and a later read only sees what the terminal message routes.
-		assert_eq!(
-			read_virtual(&mut recv).await.unwrap(),
-			Some(encode_msg(&msg, version))
-		);
+		assert_eq!(read_virtual(&mut recv).await.unwrap(), Some(encode_msg(&msg, version)));
 		recv
 	}
 
