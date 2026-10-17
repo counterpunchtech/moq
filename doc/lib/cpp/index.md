@@ -104,10 +104,9 @@ auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
 auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
-    for (const auto &[name, video] : catalog->video) {
-        // The track is the rendition's `track` when set, otherwise its catalog key.
-        auto track = video.track.value_or(name);
-        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {track, video.container}).get());
+    for (const auto &[id, video] : catalog->video) {
+        // The rendition carries its own broadcast and track, which the subscribe follows.
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{id, video}}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
@@ -239,7 +238,8 @@ the bundled `tl::expected` has nothing to throw.
 
 Everything else maps one to one onto the
 [shared feature list](/lib/#what-every-binding-can-do): each generated
-`moq::MoqFoo` is also `moq::Foo`, and each Rust method keeps its name. The
+`moq::MoqFoo` is also `moq::Foo`, and each Rust method keeps its name.
+[Layers](/lib/layers) maps each wrapped Rust layer to its `moq::` types. The
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally

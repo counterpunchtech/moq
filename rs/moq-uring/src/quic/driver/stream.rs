@@ -5,7 +5,7 @@
 //! buffer; the handles just kick the driver so egress reaches the wire and
 //! park on the per-stream waiter lists the driver wakes.
 
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, Bytes, BytesMut};
 use moq_quic::{Checkpoint, StreamId, VarInt};
@@ -101,7 +101,11 @@ impl SendStream {
 impl web_transport_trait::poll::SendStream for SendStream {
 	type Error = Error;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+	fn poll_write(&mut self, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		self.poll_write_buf(cx, &mut buf)
+	}
+
+	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		let waiter = self.park.hold(cx);
 		if self.fin || self.reset {
 			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
@@ -109,7 +113,21 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		let result = self.shared.conn.borrow_mut().send_stream(self.id).write(buf);
+		let result = {
+			let mut conn = self.shared.conn.borrow_mut();
+			let mut stream = conn.send_stream(self.id);
+			// Bytes taken from `buf` cannot go back, so take only what moq-quic
+			// accepts. It keeps the chunk by reference, which for a `Bytes`
+			// source means no copy at all.
+			match stream.write_limit().min(buf.chunk().len()) {
+				// Blocked, failing, or nothing to write; the empty write says which.
+				0 => stream.write(&[]),
+				take => stream.write_chunks(&mut [buf.copy_to_bytes(take)]).map(|written| {
+					debug_assert_eq!(written.bytes, take, "moq-quic accepted less than its write limit");
+					written.bytes
+				}),
+			}
+		};
 		match result {
 			Ok(n) => {
 				self.shared.kick();
@@ -258,62 +276,48 @@ impl RecvStream {
 	/// application message keeps the message flowing, while the connection
 	/// window these bytes occupy stays spent until the credit is dropped.
 	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<(Bytes, Credit)>, Error>> {
-		let waiter = self.park.hold(cx);
-		let credit = |inner| Credit {
-			shared: self.shared.clone(),
-			inner,
-		};
-		if max == 0 {
-			return Poll::Ready(Ok(Some((Bytes::new(), credit(moq_quic::Credit::default())))));
-		}
-		if !self.backlog.is_empty() {
-			let n = max.min(self.backlog.len());
-			let bytes = self.backlog.split_to(n).freeze();
-			let inner = self.backlog_credit.split(n as u64);
-			// A `poll_closed` parked at the read-ahead cap waits for this room.
-			self.shared.wake_readable(self.id);
-			return Poll::Ready(Ok(Some((bytes, credit(inner)))));
-		}
-		if self.finished {
-			return Poll::Ready(Ok(None));
-		}
 		let mut held = moq_quic::Credit::default();
-		match Self::read(&self.shared, self.id, max, Some(&mut held)) {
-			Read::Chunk(bytes) => Poll::Ready(Ok(Some((bytes, credit(held))))),
-			Read::Finished => {
-				self.finished = true;
-				Poll::Ready(Ok(None))
-			}
-			Read::Blocked => {
-				if let Some(err) = self.shared.closed() {
-					return Poll::Ready(Err(err));
-				}
-				self.shared.park_readable(self.id, waiter);
-				Poll::Pending
-			}
-			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
-		}
+		let chunk = ready!(self.poll_chunk(cx, max, Some(&mut held)))?;
+		Poll::Ready(Ok(chunk.map(|bytes| {
+			let credit = Credit {
+				shared: self.shared.clone(),
+				inner: held,
+			};
+			(bytes, credit)
+		})))
 	}
 
 	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), which
 	/// returns the credit for the bytes read to the peer.
 	fn poll_read_plain(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
+		let Some(chunk) = ready!(self.poll_chunk(cx, dst.len(), None))? else {
+			return Poll::Ready(Ok(None));
+		};
+		dst[..chunk.len()].copy_from_slice(&chunk);
+		Poll::Ready(Ok(Some(chunk.len())))
+	}
+
+	/// Up to `max` bytes, with the credit for them moved into `held` or else
+	/// returned to the peer.
+	fn poll_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+		held: Option<&mut moq_quic::Credit>,
+	) -> Poll<Result<Option<Bytes>, Error>> {
 		let waiter = self.park.hold(cx);
-		if dst.is_empty() {
-			return Poll::Ready(Ok(Some(0)));
+		if max == 0 {
+			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
 		if !self.backlog.is_empty() {
-			return Poll::Ready(Ok(Some(self.drain(dst))));
+			return Poll::Ready(Ok(Some(self.drain(max, held))));
 		}
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		match Self::read(&self.shared, self.id, dst.len(), None) {
-			Read::Chunk(bytes) => {
-				// moq-quic hands out at most `dst.len()`.
-				dst[..bytes.len()].copy_from_slice(&bytes);
-				Poll::Ready(Ok(Some(bytes.len())))
-			}
+		match Self::read(&self.shared, self.id, max, held) {
+			// moq-quic hands out at most `max`.
+			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
 			Read::Finished => {
 				self.finished = true;
 				Poll::Ready(Ok(None))
@@ -397,20 +401,22 @@ impl RecvStream {
 		read
 	}
 
-	/// Move up to `dst.len()` read-ahead bytes out of the backlog, returning
-	/// their credit to the peer.
+	/// Take up to `max` read-ahead bytes out of the backlog, with their credit
+	/// moved into `held` or else returned to the peer.
 	///
 	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
 	/// waiting for is what this just made.
-	fn drain(&mut self, dst: &mut [u8]) -> usize {
-		let n = dst.len().min(self.backlog.len());
-		dst[..n].copy_from_slice(&self.backlog[..n]);
-		self.backlog.advance(n);
-		release(&self.shared, self.backlog_credit.split(n as u64));
-		if n > 0 {
+	fn drain(&mut self, max: usize, held: Option<&mut moq_quic::Credit>) -> Bytes {
+		let chunk = self.backlog.split_to(max.min(self.backlog.len())).freeze();
+		let credit = self.backlog_credit.split(chunk.len() as u64);
+		match held {
+			Some(held) => held.merge(credit),
+			None => release(&self.shared, credit),
+		}
+		if !chunk.is_empty() {
 			self.shared.wake_readable(self.id);
 		}
-		n
+		chunk
 	}
 }
 
@@ -419,6 +425,10 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		self.poll_read_plain(cx, dst)
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		self.poll_chunk(cx, max, None)
 	}
 
 	fn stop(&mut self, code: u32) {

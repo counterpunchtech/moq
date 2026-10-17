@@ -8666,7 +8666,7 @@ mod tests {
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
 		crate::auth::Requests,
-		crate::auth::Token,
+		crate::auth::Auth,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
@@ -8684,7 +8684,7 @@ mod tests {
 	) -> (
 		Subscriber<S>,
 		crate::auth::Requests,
-		crate::auth::Token,
+		crate::auth::Auth,
 		origin::Consumer,
 		S,
 	) {

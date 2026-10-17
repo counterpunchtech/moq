@@ -379,6 +379,17 @@ impl Subscriber {
 		}
 	}
 
+	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<std::ops::Range<u64>> {
+		let mut reader = self.reader();
+		let sub = ready!(reader.poll_serving(waiter));
+		match sub {
+			Some(sub) => sub.poll_drop(waiter),
+			None => Poll::Pending,
+		}
+	}
+
 	/// Raise the local read floor; see [`track::Subscriber::set_groups`].
 	pub(crate) fn raise_start_to(&mut self, start: u64) {
 		self.reader().raise_start_to(start)
