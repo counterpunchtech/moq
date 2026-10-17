@@ -228,6 +228,216 @@ async fn ietf_partial_frame_gives_way() {
 	the_less_urgent_partial_frame_gives_way("moq-transport-16").await;
 }
 
+/// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
+/// publisher dialing it whose connection can also send raw streams.
+struct Reversed {
+	broadcast: moq_net::broadcast::Producer,
+	remote: moq_net::broadcast::Consumer,
+	/// The publisher's connection, for streams no session would send.
+	conn: driver::Connection,
+	_sessions: (moq_net::Session, moq_net::Session),
+	_endpoints: (driver::Endpoint, driver::Endpoint),
+}
+
+async fn reversed(version: &str) -> Reversed {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let version: moq_net::Version = version.parse().expect("version");
+	let alpn = version.alpn().as_bytes().to_vec();
+
+	let rcgen::CertifiedKey { cert, signing_key } =
+		rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
+	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+	let mut tls = rustls::ServerConfig::builder()
+		.with_no_client_auth()
+		.with_single_cert(vec![cert.der().clone()], key.into())
+		.expect("tls");
+	tls.alpn_protocols = vec![alpn.clone()];
+	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
+	let mut config = driver::ServerConfig::with_crypto(Arc::new(quic));
+	config.transport_config(Arc::new(transport(WINDOW as u64)));
+	let server = driver::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
+	let addr = server.local_addr().expect("addr");
+
+	let mut tls = rustls::ClientConfig::builder()
+		.dangerous()
+		.with_custom_certificate_verifier(Arc::new(AnyCert))
+		.with_no_client_auth();
+	tls.alpn_protocols = vec![alpn];
+	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
+	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
+	let (conn, accepted) = tokio::join!(
+		async {
+			client
+				.connect_with(driver::ClientConfig::new(Arc::new(quic)), addr, "localhost")
+				.expect("connect")
+				.await
+				.expect("handshake")
+		},
+		async { server.accept().await.expect("incoming").await.expect("accept") },
+	);
+
+	let publisher = moq_tokio::origin::spawn();
+	let broadcast = publisher.create_broadcast("room").expect("broadcast");
+	broadcast.announce(Default::default()).expect("announce");
+	let subscriber = moq_tokio::origin::spawn();
+	let session = |conn: driver::Connection| {
+		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Binding::InBand)
+	};
+	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
+	let client_session = tokio::spawn({
+		let session = session(conn.clone());
+		let publisher = publisher.consume();
+		async move {
+			let (client, driver) = moq_net::Client::new()
+				.with_versions(version.into())
+				.with_publisher(publisher)
+				.connect(moq_net::time::Instant::now(), session)
+				.await
+				.expect("client handshake");
+			tokio::spawn(moq_net::time::run(driver));
+			client
+		}
+	});
+	let (server_session, server_driver) = moq_net::Server::new()
+		.with_versions(version.into())
+		.with_subscriber(subscriber.clone())
+		.accept(moq_net::time::Instant::now(), session(accepted))
+		.await
+		.expect("server handshake");
+	tokio::spawn(moq_net::time::run(server_driver));
+	let client_session = client_session.await.expect("client task");
+
+	Reversed {
+		broadcast,
+		remote: room(&subscriber).await,
+		conn,
+		_sessions: (client_session, server_session),
+		_endpoints: (client, server),
+	}
+}
+
+impl Reversed {
+	/// Subscribe to a new track at `priority`.
+	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
+		let track = self.broadcast.create_track(name, timed()).unwrap();
+		(track, subscribe(&self.remote, name, priority).await)
+	}
+
+	/// Send each of `streams` on a new stream to the subscriber, held open so only it can
+	/// end the stream, and wait until it has stopped `stopped` of them. `bi` opens
+	/// bidirectional ones, where moq-lite carries control requests.
+	async fn raw(&self, bi: bool, streams: Vec<Vec<u8>>, stopped: usize) {
+		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+		for bytes in streams {
+			let (conn, tx) = (self.conn.clone(), tx.clone());
+			tokio::spawn(async move {
+				let (mut send, _recv) = match bi {
+					true => conn.open_bi().await.map(|(send, recv)| (send, Some(recv))),
+					false => conn.open_uni().await.map(|send| (send, None)),
+				}
+				.expect("open");
+				if send.write_all(&bytes).await.is_ok() {
+					std::future::pending::<()>().await;
+				}
+				let _ = tx.send(());
+			});
+		}
+		for _ in 0..stopped {
+			tokio::time::timeout(TIMEOUT, rx.recv())
+				.await
+				.expect("stop timed out")
+				.expect("a writer");
+		}
+	}
+}
+
+/// A moq-lite message of type `kind` whose size prefix claims `size` bytes but carries
+/// only `body` of them, so it never completes.
+fn partial_message(kind: u8, size: u32, body: usize) -> Vec<u8> {
+	assert!(body < size as usize);
+	let mut bytes = vec![kind];
+	// A 4-byte varint.
+	bytes.extend_from_slice(&(0x8000_0000 | size).to_be_bytes());
+	bytes.resize(bytes.len() + body, 0);
+	bytes
+}
+
+/// Group headers that never complete fill the window: one is stopped, and a subscription
+/// that starts afterwards still delivers.
+#[tokio::test]
+async fn unidentified_headers_give_way() {
+	let setup = reversed("moq-lite-06").await;
+	// GROUP, together more than the window and each short of its declared size.
+	let partial = partial_message(0x00, (WINDOW / 2) as u32, WINDOW / 2 - 1);
+	setup.raw(false, vec![partial; 2], 1).await;
+	let (track, mut sub) = setup.subscribe("video", 1).await;
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, vec![3u8; 4096]).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next_frame(&mut sub).await.len(), 4096);
+}
+
+/// Control requests that never complete fill the window: one is stopped with its stream,
+/// and the session carries on.
+#[tokio::test]
+async fn partial_control_requests_give_way() {
+	let setup = reversed("moq-lite-06").await;
+	// ANNOUNCE_PLEASE at its largest, five together more than the window and each short
+	// of it: two have to go before the rest fit.
+	let size = u16::MAX as usize;
+	let partial = partial_message(0x01, size as u32, size - 1);
+	setup.raw(true, vec![partial; 5], 2).await;
+	let (track, mut sub) = setup.subscribe("video", 1).await;
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, vec![3u8; 4096]).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next_frame(&mut sub).await.len(), 4096);
+}
+
+/// A frame nearly as large as the window completes while partial frames of a less urgent
+/// track keep arriving, each stopped as it gets in the way.
+async fn the_largest_unit_completes_under_pressure(version: &str) {
+	let setup = reversed(version).await;
+	let (low, _low_sub) = setup.subscribe("low", 1).await;
+	let (high, mut high_sub) = setup.subscribe("high", 200).await;
+
+	// Several groups' worth of frames that never finish, opened before and after.
+	let mut partial = Vec::new();
+	let mut open_partial = || {
+		// Leaked, so the frame can borrow its group for the rest of the test.
+		let group = Box::leak(Box::new(low.append_group().unwrap()));
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: WINDOW as u64,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		frame.write(vec![1u8; WINDOW / 4]).unwrap();
+		partial.push(frame);
+	};
+	open_partial();
+	open_partial();
+
+	// Room for the stream's headers and nothing else.
+	let payload = Bytes::from(vec![2u8; WINDOW - 64]);
+	let mut group = high.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	group.finish().unwrap();
+	open_partial();
+
+	assert_eq!(next_frame(&mut high_sub).await.len(), payload.len(), "{version}");
+}
+
+#[tokio::test]
+async fn lite_largest_unit_completes_under_pressure() {
+	the_largest_unit_completes_under_pressure("moq-lite-06").await;
+}
+
+#[tokio::test]
+async fn ietf_largest_unit_completes_under_pressure() {
+	the_largest_unit_completes_under_pressure("moq-transport-16").await;
+}
+
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
 /// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
 /// receiver stops it, a high-priority frame completes, and a later low group arrives.
