@@ -62,7 +62,7 @@ keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh sti
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
+stream_receive_window = 8388608      # Per-stream window. Omit to follow receive_window.
 send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
@@ -80,8 +80,8 @@ value, here or in `[peer.quic]`, is refused at startup. When incomplete
 messages fill the window, the relay cancels the least urgent stream, the
 oldest group's before a newer one's. Over iroh the window bounds only
 unread data, and over WebSocket or TCP nothing bounds incomplete messages.
-Keep `stream_receive_window` well under it so one slow group cannot starve the
-connection.
+`stream_receive_window` follows it by default: stream credit returns as bytes
+are read, so a smaller one only adds round trips to a large frame.
 
 ## \[session] and \[peer]
 

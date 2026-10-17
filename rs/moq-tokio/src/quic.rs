@@ -279,10 +279,12 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	/// Per-stream receive window, in bytes. Unset follows
+	/// [`receive_window`](Self::receive_window).
 	///
-	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
-	/// can't starve the rest of the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so a smaller window only adds round trips to a large frame. The
+	/// connection window bounds what incomplete messages hold.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-stream-receive-window",
@@ -715,7 +717,7 @@ pub struct Resolved {
 	pub congestion_control: Option<CongestionControl>,
 	/// Connection-wide receive window in bytes, or `None` for the 128 MiB default.
 	pub receive_window: Option<u64>,
-	/// Per-stream receive window in bytes, or `None` for the backend default.
+	/// Per-stream receive window in bytes, or `None` to follow the connection window.
 	pub stream_receive_window: Option<u64>,
 	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
 	pub send_window: Option<u64>,

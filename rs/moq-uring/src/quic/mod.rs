@@ -122,10 +122,10 @@ pub struct Transport {
 	/// partial one can stall the connection.
 	pub receive_window: Option<u64>,
 	/// How much unread data one peer may have in flight on a single stream,
-	/// in bytes. `None` leaves the 4 MiB default.
+	/// in bytes. `None` follows [`receive_window`](Self::receive_window).
 	///
-	/// Keep it under [`receive_window`](Self::receive_window) so one stream
-	/// cannot fill the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so a smaller window only adds round trips to a large frame.
 	pub stream_receive_window: Option<u64>,
 	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
 	/// the peer allows. `None` leaves the 16 MiB default.
