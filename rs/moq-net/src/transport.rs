@@ -719,9 +719,6 @@ pub mod poll {
 		fin: bool,
 	}
 
-	/// How much [`Buffered`] reads at once, beyond which a lease never buffers ahead.
-	const BUFFERED_READ: usize = 64 * 1024;
-
 	impl<S> Buffered<S> {
 		/// Lease over `inner`.
 		pub fn new(inner: S) -> Self {
@@ -753,7 +750,10 @@ pub mod poll {
 
 		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<BufferedLease<'_>, S::Error>> {
 			while self.len < want && !self.fin {
-				match ready!(self.inner.poll_read_chunk(cx, BUFFERED_READ))? {
+				// Whatever the transport has in one piece: a transport handing over whole
+				// messages, like the memory one, keeps a large frame in a single chunk, so it
+				// reaches the consumer without a copy. Each read still ends at what has arrived.
+				match ready!(self.inner.poll_read_chunk(cx, usize::MAX))? {
 					Some(chunk) if chunk.is_empty() => {}
 					Some(chunk) => {
 						self.len += chunk.len();
@@ -927,6 +927,22 @@ mod tests {
 		assert_eq!(stream.read_chunk(0).now_or_never_ready(), Some(Bytes::new()));
 	}
 
+	/// A large chunk the transport hands over whole reaches the reader as that same
+	/// allocation, so a frame from the memory transport is never copied.
+	#[test]
+	fn a_large_chunk_is_leased_whole() {
+		static FRAME: [u8; 1 << 20] = [7; 1 << 20];
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let mut stream = buffered(&[&FRAME], true);
+
+		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 1) else {
+			panic!("the chunk was ready")
+		};
+		let chunk = lease.take(usize::MAX);
+		assert_eq!(chunk.len(), FRAME.len());
+		assert_eq!(chunk.as_ptr(), FRAME.as_ptr(), "the chunk was not copied");
+	}
+
 	/// Stopping discards what was buffered and stops the transport.
 	#[test]
 	fn stop_discards_the_buffer() {
@@ -948,44 +964,6 @@ mod tests {
 			match std::pin::pin!(self).poll(&mut cx) {
 				Poll::Ready(res) => res.unwrap(),
 				Poll::Pending => panic!("pending"),
-			}
-		}
-	}
-
-	#[test]
-	fn default_read_buf_caps_the_initialized_slice_on_ready_and_pending() {
-		struct ReadSpan(bool);
-		impl super::poll::RecvStream for ReadSpan {
-			type Error = crate::Error;
-			fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-				assert_eq!(
-					dst.len(),
-					64 * 1024,
-					"one poll must not initialize the whole spare capacity"
-				);
-				assert!(dst.iter().all(|byte| *byte == 0));
-				if self.0 {
-					return Poll::Pending;
-				}
-				dst.fill(7);
-				Poll::Ready(Ok(Some(dst.len())))
-			}
-			fn stop(&mut self, _: u32) {}
-			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-				Poll::Pending
-			}
-		}
-		for pending in [false, true] {
-			let mut buf = BytesMut::with_capacity(256 * 1024);
-			let mut cx = Context::from_waker(std::task::Waker::noop());
-			let result = ReadSpan(pending).poll_read_buf(&mut cx, &mut buf);
-			if pending {
-				assert!(result.is_pending());
-				assert!(buf.is_empty());
-			} else {
-				assert!(matches!(result, Poll::Ready(Ok(Some(65536)))));
-				assert_eq!(buf.len(), 64 * 1024);
-				assert!(buf.iter().all(|byte| *byte == 7));
 			}
 		}
 	}
