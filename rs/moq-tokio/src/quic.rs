@@ -661,16 +661,11 @@ fn validate_windows(quic: &Config) -> crate::Result<()> {
 			_ => {}
 		}
 	}
-	quic.receive_window.map_or(Ok(()), validate_receive_window)
-}
-
-/// Refuse a connection receive window that cannot fit the largest message.
-fn validate_receive_window(window: u64) -> crate::Result<()> {
-	match window < moq_net::transport::MIN_RECEIVE_WINDOW {
-		true => Err(crate::Error::ReceiveWindowTooSmall(
+	match quic.receive_window {
+		Some(window) if window < moq_net::transport::MIN_RECEIVE_WINDOW => Err(crate::Error::ReceiveWindowTooSmall(
 			moq_net::transport::MIN_RECEIVE_WINDOW,
 		)),
-		false => Ok(()),
+		_ => Ok(()),
 	}
 }
 
