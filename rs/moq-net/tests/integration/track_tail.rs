@@ -586,3 +586,67 @@ async fn a_declared_publisher_is_waited_on_past_the_grace() {
 		drop((pair, _keep));
 	}
 }
+
+/// The declaration holds per hop: a relay whose upstream publisher declared waits for its
+/// late stream past the grace, and its own downstream subscriber, also declared to, waits
+/// on the relay in turn. Without it the relay gives up after the grace and ends the track.
+#[moq_net_sim::test]
+async fn a_declared_publisher_is_waited_on_through_a_relay() {
+	for reliable_reset in [true, false] {
+		let version: Version = "moq-lite-07-wip".parse().unwrap();
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let mut track = broadcast.create_track("video", timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let relay = produce_origin(2);
+		let mut options = MockConnectOptions::new(version);
+		options.transport = reliable(reliable_reset);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(relay.clone());
+		let upstream = connect_mock(options).await;
+
+		let subscriber = produce_origin(3);
+		let mut options = MockConnectOptions::new(version);
+		options.transport = reliable(reliable_reset);
+		options.server_publish = Some(relay.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let downstream = connect_mock(options).await;
+
+		let consumer = subscriber.consume();
+		moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+			.await
+			.expect("announce timeout")
+			.expect("routed");
+		let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves");
+
+		let reader = read_track(remote, Duration::ZERO);
+		moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
+			.await
+			.expect("no subscriber appeared");
+
+		upstream.server_transport.hold_unis();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+		track.finish_at(moq_net::track::Position::group(1)).unwrap();
+		drop(track);
+
+		moq_net_sim::sleep(GRACE * 3).await;
+		assert_eq!(reader.is_finished(), !reliable_reset, "gave up on the stream");
+		upstream.server_transport.release_unis();
+		let (frames, failed, _) = moq_net_sim::timeout(TIMEOUT, reader)
+			.await
+			.expect("the subscription never ended")
+			.expect("reader panicked");
+		assert!(failed.is_empty(), "{reliable_reset}");
+		match reliable_reset {
+			true => assert_eq!(frames, [PAYLOAD]),
+			false => assert!(frames.is_empty()),
+		}
+		drop((upstream, downstream, broadcast, publisher, relay, subscriber));
+	}
+}
