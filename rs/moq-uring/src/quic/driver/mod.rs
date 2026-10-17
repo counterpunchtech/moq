@@ -32,8 +32,10 @@ use super::qlog;
 use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
 use crate::udp;
 
+/// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
+const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
-/// the largest one. Each stream may use all of it.
+/// the largest one.
 const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
 const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
 /// Unacknowledged outgoing data to buffer, whatever the peer allows.
@@ -273,7 +275,7 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 	};
 	let stream_window = match config.stream_receive_window {
 		Some(window) => varint_window("stream receive window", window)?,
-		None => connection_window,
+		None => STREAM_WINDOW.into(),
 	};
 	let send_window = config.send_window.unwrap_or(u64::from(SEND_WINDOW));
 	transport.stream_receive_window(stream_window);
@@ -389,7 +391,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 #[cfg(test)]
 mod tests {
-	use super::{CONNECTION_WINDOW, SEND_WINDOW, Transport, transport_config};
+	use super::{CONNECTION_WINDOW, SEND_WINDOW, STREAM_WINDOW, Transport, transport_config};
 
 	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
 	/// space keeps `receive_window` from matching `stream_receive_window`, and
@@ -404,7 +406,7 @@ mod tests {
 		assert!(has_window(
 			&transport,
 			"stream_receive_window",
-			u64::from(CONNECTION_WINDOW)
+			u64::from(STREAM_WINDOW)
 		));
 		assert!(has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
 		assert!(has_window(&transport, "send_window", u64::from(SEND_WINDOW)));
@@ -441,16 +443,6 @@ mod tests {
 		assert!(has_window(&transport, "receive_window", max_varint));
 		assert!(has_window(&transport, "stream_receive_window", max_varint));
 		assert!(has_window(&transport, "send_window", u64::MAX));
-	}
-
-	#[test]
-	fn the_stream_window_follows_the_receive_window() {
-		let config = Transport {
-			receive_window: Some(256 << 20),
-			..Default::default()
-		};
-		let transport = transport_config(&config).expect("windows");
-		assert!(has_window(&transport, "stream_receive_window", 256 << 20));
 	}
 
 	#[test]

@@ -32,6 +32,8 @@ mod driver;
 
 pub use driver::{Connection, Lease, RecvStream, SendGroup, SendStream};
 pub use endpoint::Endpoint;
+/// The flow-control limits a live connection can change; see [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError};
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -122,10 +124,10 @@ pub struct Transport {
 	/// partial one can stall the connection.
 	pub receive_window: Option<u64>,
 	/// How much unread data one peer may have in flight on a single stream,
-	/// in bytes. `None` follows [`receive_window`](Self::receive_window).
+	/// in bytes. `None` leaves the 4 MiB default.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
-	/// complete, so a smaller window only adds round trips to a large frame.
+	/// complete, so this only paces one stream.
 	pub stream_receive_window: Option<u64>,
 	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
 	/// the peer allows. `None` leaves the 16 MiB default.
@@ -162,22 +164,6 @@ impl Default for Transport {
 			qlog: None,
 		}
 	}
-}
-
-/// The flow-control limits an established connection can change, such as a
-/// relay widening them once it knows the peer is another relay.
-///
-/// [`Connection::set_limits`] refuses a stream count past 2^60 or a receive
-/// window past a QUIC varint. Each is non-zero because zero streams or a zero
-/// window credits nothing and wedges the connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-	/// Max concurrent streams the peer may open, per direction.
-	pub max_streams: std::num::NonZeroU64,
-	/// Connection-wide receive window, in bytes.
-	pub receive_window: std::num::NonZeroU64,
-	/// Cap on unacknowledged outgoing data, in bytes.
-	pub send_window: std::num::NonZeroU64,
 }
 
 /// The congestion control family a connection runs.
@@ -274,6 +260,9 @@ pub enum Error {
 	/// This endpoint closed the connection locally.
 	#[error("locally closed")]
 	Closed,
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] LimitsError),
 }
 
 impl web_transport_trait::Error for Error {
