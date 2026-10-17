@@ -88,6 +88,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 					| Error::Stream(_)
 					| Error::Remote(_)
 					| Error::Transport(_)
+					| Error::IdleTimeout
 					| Error::Decode(crate::DecodeError::Short),
 				)) => {
 					pending.swap_remove(index);
@@ -409,7 +410,7 @@ where
 			self.subscriber.abort(err);
 		}
 		match &res {
-			Err(Error::Transport(_)) => {
+			Err(Error::Transport(_) | Error::IdleTimeout) => {
 				tracing::info!("session terminated");
 				self.session.close(SessionError::Internal.to_code(), "");
 			}
@@ -571,7 +572,7 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			err => crate::auth::protocol_error(err),
 		};
 		match &err {
-			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
+			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
 				tracing::debug!(%err, "auth token ended")
 			}
 			err => tracing::warn!(%err, "auth token ended"),

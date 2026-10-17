@@ -648,7 +648,7 @@ where
 /// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
 fn close<S: crate::transport::poll::Session>(session: &mut S, res: &Result<(), Error>) {
 	match res {
-		Err(err @ Error::Transport(_)) => {
+		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
 			tracing::info!(%err, "session terminated");
 			session.close(super::error::to_session_code(&SessionError::Internal), "");
 		}
@@ -1125,7 +1125,12 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 fn died_before_header(err: &Error) -> bool {
 	matches!(
 		err,
-		Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Transport(_) | Error::Decode(DecodeError::Short)
+		Error::Cancel
+			| Error::Stream(_)
+			| Error::Remote(_)
+			| Error::Transport(_)
+			| Error::IdleTimeout
+			| Error::Decode(DecodeError::Short)
 	)
 }
 
