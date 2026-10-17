@@ -465,6 +465,11 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 			}
 			match Self::read(&self.shared, self.id, READ_CHUNK, Some(&mut self.backlog_credit)) {
 				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
+				// What a stop discarded is not the stream's end, so the next read fails.
+				Read::Finished if self.shared.recv_stopped(self.id) => {
+					self.stopped = true;
+					return Poll::Ready(Ok(()));
+				}
 				Read::Finished => {
 					self.finished = true;
 					return Poll::Ready(Ok(()));

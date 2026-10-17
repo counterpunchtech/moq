@@ -197,7 +197,8 @@ fn held_reads_spend_the_connection_window() {
 }
 
 /// A read parked on a stream wakes when its `Stopper` stops it, and fails rather than
-/// reading what the stop discarded as the stream's end.
+/// reading what the stop discarded as the stream's end, even after the closed-watch saw
+/// the stop first.
 #[test]
 fn a_stopper_wakes_and_fails_a_parked_read() {
 	use std::sync::{
@@ -273,6 +274,7 @@ fn a_stopper_wakes_and_fails_a_parked_read() {
 
 			stopper.stop(0);
 			assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "the parked read was not woken");
+			assert!(recv.poll_closed(&mut cx).is_ready(), "the closed-watch missed the stop");
 			assert!(
 				matches!(recv.poll_read(&mut cx, &mut buf), Poll::Ready(Err(_))),
 				"a stopped stream read as finished"
