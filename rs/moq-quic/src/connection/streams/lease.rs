@@ -142,8 +142,10 @@ impl RecvStream<'_> {
         let transmit = self.fill()?;
         let receive_window = self.state.receive_window;
         let lease = self.state.leases.get_mut(&self.id).expect("filled above");
+        // Taken bytes do not count: a unit that outgrows the window with them is one the stuck
+        // window evicts by rank, so it gives way like any other rather than failing alone.
         let want = want as u64;
-        if want.saturating_add(lease.held - lease.len) > receive_window {
+        if want > receive_window {
             return Err(LeaseError::TooLarge);
         }
         if lease.len < want {

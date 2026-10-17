@@ -3295,10 +3295,13 @@ mod tests {
         ));
         assert_eq!(wait(&mut client, id, window + 1), Err(LeaseError::TooLarge));
 
-        // Taken bytes still count against it.
+        // Taken bytes do not: a frame past the window waits, and gives way to eviction.
         let mut pending = Retransmits::default();
         let _ = recv(&mut client, &mut pending, id).take(10);
-        assert_eq!(wait(&mut client, id, window - 9), Err(LeaseError::TooLarge));
+        assert!(matches!(
+            wait(&mut client, id, window - 9),
+            Err(LeaseError::Blocked(_))
+        ));
     }
 
     /// A connection with a 2 * `window` receive window, and its streams 0 and 1.
@@ -3385,6 +3388,26 @@ mod tests {
         // Late data on the evicted stream is credited on arrival.
         data(&mut client, low, WINDOW, 10, true);
         assert_eq!(client.local_max_data, 3 * WINDOW + 10);
+    }
+
+    /// A frame past the window: once its taken bytes fill the window, waiting for one more
+    /// evicts it like any stuck holder, so its group reads as evicted rather than broken.
+    #[test]
+    fn a_frame_past_the_window_is_evicted() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [frame, _]) = stuck(WINDOW / 2);
+        data(&mut client, frame, 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, frame), WINDOW as usize);
+        let mut pending = Retransmits::default();
+        let taken = recv(&mut client, &mut pending, frame).take(usize::MAX);
+        assert_eq!(taken.len(), WINDOW as usize);
+
+        assert_eq!(
+            wait(&mut client, frame, 1),
+            Err(LeaseError::Blocked(ShouldTransmit(true)))
+        );
+        assert_eq!(wait(&mut client, frame, 1), Err(LeaseError::Evicted));
+        assert_eq!(client.local_max_data, 2 * WINDOW, "the evicted credit returns");
     }
 
     /// Ties go to the newest stream; a parked holder that never waits is a candidate too.

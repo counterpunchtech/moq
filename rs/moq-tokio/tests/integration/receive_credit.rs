@@ -228,6 +228,46 @@ async fn ietf_partial_frame_gives_way() {
 	the_less_urgent_partial_frame_gives_way("moq-transport-16").await;
 }
 
+/// A frame larger than the whole window, which can never complete: the stuck window
+/// evicts it like any other, so its reader learns the group was evicted and is not
+/// fetched again.
+#[tokio::test]
+async fn lite_frame_past_the_window_gives_way() {
+	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
+	let (low, mut low_sub) = setup.subscribe("low", 1).await;
+
+	let mut low_group = low.append_group().unwrap();
+	let mut low_frame = low_group
+		.create_frame(frame::Info {
+			size: 2 * WINDOW as u64,
+			timestamp: Some(Timestamp::ZERO),
+		})
+		.unwrap();
+	low_frame.write(vec![1u8; 2 * WINDOW]).unwrap();
+
+	let mut partial = partial_frame(&mut low_sub).await;
+	loop {
+		match tokio::time::timeout(TIMEOUT, partial.read_chunk())
+			.await
+			.expect("the partial frame neither failed nor grew")
+		{
+			Ok(Some(_)) => {}
+			Ok(None) => panic!("a frame larger than the window completed"),
+			Err(err) => {
+				assert!(matches!(err, moq_net::Error::Evicted), "{err}");
+				break;
+			}
+		}
+	}
+
+	drop(low_frame);
+	drop(low_group);
+	let mut group = low.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..]);
+}
+
 /// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
 /// publisher dialing it whose connection can also send raw streams.
 struct Reversed {
