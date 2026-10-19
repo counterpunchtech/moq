@@ -29,6 +29,7 @@ mod session;
 mod setup;
 mod stream;
 mod subscribe;
+mod subscribe_all;
 #[cfg(feature = "async")]
 mod subscriber;
 #[cfg(all(test, feature = "async"))]
@@ -58,6 +59,7 @@ pub(super) use session::*;
 pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
+pub use subscribe_all::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 #[allow(unused_imports)]

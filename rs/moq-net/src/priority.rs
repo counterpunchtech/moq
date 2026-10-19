@@ -20,8 +20,8 @@ use crate::track::Order;
 // Priority ordering: higher track value = higher priority, then subscription, then
 // group sequence in that subscription's own direction.
 
-/// A group stream's rank: its subscription's track priority, the subscription it
-/// belongs to, its group sequence in that subscription's [`Order`], and the first object
+/// A group stream's rank: its subscription's track priority, the subscription (and the
+/// track within it, for a SUBSCRIBE_ALL) it belongs to, its group sequence in that subscription's [`Order`], and the first object
 /// it carries.
 ///
 /// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`:
@@ -38,6 +38,7 @@ use crate::track::Order;
 pub struct Priority {
 	track: u8,
 	subscribe: u64,
+	lane: u64,
 	order: Order,
 	group: u64,
 	start: u64,
@@ -49,10 +50,17 @@ impl Priority {
 		Self {
 			track,
 			subscribe,
+			lane: 0,
 			order: Order::Descending,
 			group,
 			start: 0,
 		}
+	}
+
+	/// Scope the group tie-break to one track of a subscription that carries several.
+	pub fn with_lane(mut self, lane: u64) -> Self {
+		self.lane = lane;
+		self
 	}
 
 	/// Rank groups of the same subscription in `order` instead.
@@ -78,6 +86,7 @@ impl Ord for Priority {
 			// stable and independent of either one's direction. The older (lower id)
 			// subscription goes first.
 			.then(self.subscribe.cmp(&other.subscribe))
+			.then(self.lane.cmp(&other.lane))
 			// Only an update in flight leaves one subscription's groups in two orders, and
 			// keeping the two apart keeps the comparison total meanwhile.
 			.then((self.order == Order::Ascending).cmp(&(other.order == Order::Ascending)))

@@ -21,9 +21,10 @@ pub enum Version {
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_END
 	/// carries the number of group streams opened, replacing SUBSCRIBE_DROP.
 	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. Adds the Auth Stream. The wire format is
-	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
-	/// only when explicitly requested; the default version sets leave it out.
+	/// live announcement on the same stream. Adds the Auth Stream and the Subscribe All
+	/// Stream. The wire format is still work-in-progress, so it is advertised over ALPN
+	/// as `moq-lite-07-wip` and only when explicitly requested; the default version sets
+	/// leave it out.
 	Lite07,
 }
 
@@ -128,6 +129,17 @@ impl Version {
 	/// learn its grant. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_auth(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether the session has the Subscribe All Stream (0x8) and the group stream (0x2)
+	/// that carries its tracks. Added in lite-07; nothing emulates it on older versions.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_subscribe_all(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,

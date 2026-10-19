@@ -15,6 +15,8 @@ pub enum ControlType {
 	Goaway = 5,
 	Track = 6,
 	Auth = 7,
+	/// Every track of every broadcast under a prefix. Lite07+ only.
+	SubscribeAll = 8,
 }
 
 impl Decode<Version> for ControlType {
@@ -39,6 +41,8 @@ pub enum DataType {
 	Group = 0,
 	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
 	Setup = 1,
+	/// A group of a SUBSCRIBE_ALL track. Lite07+ only.
+	TrackGroup = 2,
 }
 
 impl Decode<Version> for DataType {

@@ -68,7 +68,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// `Hop::UNKNOWN` (0), the reserved "no identity" value. The assigned id stays
 	// local and is never written into a hop chain.
 	session_origin: crate::Hop,
-	subscribes: Lock<HashMap<u64, TrackEntry>>,
+	subscribes: Lock<HashMap<Feed, TrackEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
 	/// not in [`Self::subscribes`], so dropping its request reads this instead of
 	/// becoming [`Error::Dropped`].
@@ -88,6 +88,22 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	frames: frame::Budget,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
+}
+
+/// What a group stream names: a SUBSCRIBE, or one track of a SUBSCRIBE_ALL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Feed {
+	subscribe: u64,
+	track: Option<u64>,
+}
+
+impl Feed {
+	fn subscribe(id: u64) -> Self {
+		Self {
+			subscribe: id,
+			track: None,
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -495,7 +511,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	/// Remove a subscription, releasing the session's handle on its producer.
 	fn remove_subscribe(&self, id: u64) {
-		self.subscribes.lock().remove(&id);
+		self.subscribes.lock().remove(&Feed::subscribe(id));
 	}
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
@@ -507,9 +523,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
 		let dg = lite::Datagram::decode(payload, self.version, |id| {
-			subscribes.get(&id).is_some_and(|entry| entry.timescale.is_some())
+			subscribes
+				.get(&Feed::subscribe(id))
+				.is_some_and(|entry| entry.timescale.is_some())
 		})?;
-		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
+		let Some(entry) = subscribes.get_mut(&Feed::subscribe(dg.subscribe)) else {
 			// Unknown or already-closed subscription: drop the datagram.
 			return Ok(());
 		};
@@ -546,7 +564,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 // Owns the active subscriptions for exactly as long as the driver. A dropped
 // driver is how a cancelled session unwinds, so cleanup cannot depend on any
 // poll returning Ready.
-struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
+struct SubscriptionCleanup(Lock<HashMap<Feed, TrackEntry>>);
 
 impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
@@ -781,11 +799,21 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					if matches!(kind, lite::DataType::Setup) && self.subscriber.version.has_setup_stream() {
 						self.subscriber.peer_setup.claim()?;
 					}
-					let UniState::Start { reader } = std::mem::replace(&mut self.state, UniState::Done) else {
+					let UniState::Start { mut reader } = std::mem::replace(&mut self.state, UniState::Done) else {
 						unreachable!()
 					};
 					self.state = match kind {
-						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
+						lite::DataType::Group => {
+							UniState::Group(GroupRecv::new(self.subscriber.clone(), reader, false))
+						}
+						lite::DataType::TrackGroup if self.subscriber.version.has_subscribe_all() => {
+							UniState::Group(GroupRecv::new(self.subscriber.clone(), reader, true))
+						}
+						// A stream type this version predates resets only that stream.
+						lite::DataType::TrackGroup => {
+							reader.abort(&Error::UnexpectedStream);
+							return Poll::Ready(Ok(()));
+						}
 						lite::DataType::Setup => UniState::Setup { reader },
 					};
 				}
@@ -829,6 +857,8 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 struct GroupRecv<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	reader: Reader<S::RecvStream, Version>,
+	/// Whether the stream carries a SUBSCRIBE_ALL track (0x2) rather than a SUBSCRIBE's.
+	listed: bool,
 	state: GroupRecvState,
 }
 
@@ -852,12 +882,33 @@ enum GroupRecvState {
 }
 
 impl<S: crate::transport::poll::Session> GroupRecv<S> {
-	fn new(subscriber: Subscriber<S>, reader: Reader<S::RecvStream, Version>) -> Self {
+	fn new(subscriber: Subscriber<S>, reader: Reader<S::RecvStream, Version>, listed: bool) -> Self {
 		Self {
 			subscriber,
 			reader,
+			listed,
 			state: GroupRecvState::Header,
 		}
+	}
+
+	/// Read the stream's header: the feed it belongs to, then the group's sequence and
+	/// first frame.
+	fn poll_header(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(Feed, lite::Group), Error>> {
+		if !self.listed {
+			let hdr = ready!(self.reader.poll_decode::<lite::Group>(cx))?;
+			return Poll::Ready(Ok((Feed::subscribe(hdr.subscribe), hdr)));
+		}
+		let hdr = ready!(self.reader.poll_decode::<lite::TrackGroup>(cx))?;
+		let feed = Feed {
+			subscribe: hdr.subscribe,
+			track: Some(hdr.track),
+		};
+		let group = lite::Group {
+			subscribe: hdr.subscribe,
+			sequence: hdr.sequence,
+			frame_start: hdr.frame_start,
+		};
+		Poll::Ready(Ok((feed, group)))
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -865,11 +916,11 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			match &mut self.state {
 				GroupRecvState::Header => {
 					let mut cx = waiter.context();
-					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+					let (feed, hdr) = ready!(self.poll_header(&mut cx))?;
 
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
-						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+						let entry = subs.get_mut(&feed).ok_or(Error::Cancel)?;
 
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
@@ -2181,7 +2232,7 @@ mod tests {
 				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
-					7,
+					Feed::subscribe(7),
 					TrackEntry {
 						producer: track,
 						timescale: Some(Timescale::MILLI),
@@ -2237,7 +2288,7 @@ mod tests {
 			);
 			track.finish_at(Position::group(3)).unwrap();
 			subscriber.subscribes.lock().insert(
-				7,
+				Feed::subscribe(7),
 				TrackEntry {
 					producer: track.clone(),
 					timescale: Some(Timescale::MILLI),
@@ -2246,7 +2297,7 @@ mod tests {
 			);
 
 			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+			let mut group = GroupRecv::new(subscriber, Reader::new(recv, version), false);
 			let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 			match version {
 				Version::Lite05 => {
@@ -2307,7 +2358,7 @@ mod tests {
 			.unwrap();
 		before.finish().unwrap();
 		subscriber.subscribes.lock().insert(
-			7,
+			Feed::subscribe(7),
 			TrackEntry {
 				producer: track.clone(),
 				timescale: Some(Timescale::MILLI),
@@ -2316,7 +2367,7 @@ mod tests {
 		);
 
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version), false);
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 		(res, track)
 	}
@@ -2374,7 +2425,7 @@ mod tests {
 		cached.finish().unwrap();
 		let tail = kio::Producer::new(Tail::default());
 		subscriber.subscribes.lock().insert(
-			7,
+			Feed::subscribe(7),
 			TrackEntry {
 				producer: track.clone(),
 				timescale: Some(Timescale::MILLI),
@@ -2383,7 +2434,7 @@ mod tests {
 		);
 
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version), false);
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
 		drop(group);
@@ -2652,7 +2703,7 @@ mod tests {
 			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
-			7,
+			Feed::subscribe(7),
 			TrackEntry {
 				producer,
 				timescale: Some(Timescale::MILLI),
@@ -2850,7 +2901,7 @@ mod tests {
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
-		assert!(subscribes.lock().contains_key(&0), "registered before the wire");
+		assert!(subscribes.lock().contains_key(&Feed::subscribe(0)), "registered before the wire");
 
 		let Ok(mut open) = gate.write() else {
 			panic!("gate closed")
@@ -5184,7 +5235,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_delay)));
 		self.subscriber.subscribes.lock().insert(
-			id,
+			Feed::subscribe(id),
 			TrackEntry {
 				producer: producer.clone(),
 				timescale,

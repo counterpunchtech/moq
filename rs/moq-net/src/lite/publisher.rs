@@ -22,6 +22,10 @@ use crate::{
 
 use super::Version;
 
+#[path = "all_serve.rs"]
+mod all_serve;
+use all_serve::AllServe;
+
 pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The runtime that arms the publisher's timers.
 	pub runtime: crate::time::Deadlines,
@@ -298,6 +302,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	TrackInfo(RequestServe<S, TrackInfoServe>),
 	Probe(ProbeServe<S>),
 	Auth(AuthServe<S>),
+	SubscribeAll(AllServe<S>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
 	Goaway {
 		stream: Stream<S, Version>,
@@ -337,6 +342,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
 						lite::ControlType::Auth => version.has_auth(),
+						lite::ControlType::SubscribeAll => version.has_subscribe_all(),
 						_ => true,
 					});
 
@@ -364,6 +370,9 @@ impl<S: crate::transport::poll::Session> Control<S> {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
 						lite::ControlType::Auth => ControlState::Auth(AuthServe::new(self.shared.clone(), stream)?),
+						lite::ControlType::SubscribeAll => {
+							ControlState::SubscribeAll(AllServe::new(self.shared.clone(), stream))
+						}
 						lite::ControlType::Goaway => ControlState::Goaway { stream },
 						lite::ControlType::Session => return Poll::Ready(Err(Error::UnexpectedStream)),
 					};
@@ -374,6 +383,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
+				ControlState::SubscribeAll(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
 					let mut cx = waiter.context();
 					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
@@ -2027,6 +2037,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						timescale,
 						runtime: shared.runtime.clone(),
 						opens: Default::default(),
+						track: None,
 					};
 
 					let bounds = Bounds::from(msg.as_ref());
@@ -3211,6 +3222,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	runtime: crate::time::Deadlines,
 	/// The group streams this subscription opened, shared by every group it serves.
 	opens: Arc<Opens>,
+	/// The Track ID within a SUBSCRIBE_ALL, or `None` for a SUBSCRIBE.
+	track: Option<u64>,
 }
 
 /// Counts a subscription's group streams for lite-07's SUBSCRIBE_END.
@@ -3319,6 +3332,26 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	}
 }
 
+/// Where a [`TrackRun`] sends its SUBSCRIBE responses: its own Subscribe Stream, or the
+/// Subscribe All Stream it shares with the other tracks of a SUBSCRIBE_ALL.
+trait Respond {
+	/// Deliver what was buffered before more is selected.
+	fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>>;
+
+	/// Buffer one response.
+	fn respond(&mut self, resp: lite::SubscribeResponse) -> Result<(), Error>;
+}
+
+impl<W: crate::transport::poll::SendStream> Respond for Writer<W, Version> {
+	fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+		Writer::poll_flush(self, cx)
+	}
+
+	fn respond(&mut self, resp: lite::SubscribeResponse) -> Result<(), Error> {
+		self.buffer(&resp)
+	}
+}
+
 /// A subscription's run loop: one subscriber cursor serving groups, datagrams,
 /// and SUBSCRIBE_UPDATE messages, with an in-flight group machine per group.
 struct TrackRun<S: crate::transport::poll::Session> {
@@ -3366,7 +3399,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		let emit_range = ctx.version.has_track_stream();
 		let count_streams = ctx.version.has_stream_count();
-		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
+		// A SUBSCRIBE_ALL track is delivered on streams only.
+		let datagrams = ctx.track.is_none() && ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
 		let served = (emit_range && !count_streams).then(RangeSet::new);
 
@@ -3458,8 +3492,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 	/// Serve until the live edge reaches the track's boundary.
 	#[cfg(test)]
-	fn poll(&mut self, writer: &mut Writer<S::SendStream, Version>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		while ready!(self.poll_step(writer, waiter))?.is_continue() {}
+	fn poll(&mut self, out: &mut impl Respond, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		while ready!(self.poll_step(out, waiter))?.is_continue() {}
 		Poll::Ready(Ok(()))
 	}
 
@@ -3468,12 +3502,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// requester while work stays ready.
 	fn poll_step(
 		&mut self,
-		writer: &mut Writer<S::SendStream, Version>,
+		out: &mut impl Respond,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let mut cx = waiter.context();
 		// Deliver the buffered range messages before selecting more work.
-		ready!(writer.poll_flush(&mut cx))?;
+		ready!(out.poll_flush(&mut cx))?;
 
 		// Drive the in-flight group machines; completions just retire.
 		let _ = self.children.poll(waiter);
@@ -3484,7 +3518,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Poll::Ready(Err(err));
 		}
 
-		if self.poll_forward_drop(writer, waiter)? {
+		if self.poll_forward_drop(out, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -3493,7 +3527,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if let Some(group) = self.first.take() {
 			match self.track.poll_start(waiter) {
 				Poll::Ready(source) => {
-					self.start(group, source, writer)?;
+					self.start(group, source, out)?;
 					return Poll::Ready(Ok(ControlFlow::Continue(())));
 				}
 				Poll::Pending => {
@@ -3521,7 +3555,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			&& start > largest
 		{
 			self.start = Some(start.group);
-			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+			out.respond(lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: start.group,
 				largest: Some(largest),
 			}))?;
@@ -3558,7 +3592,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							&& let Some(end) = group.sequence.checked_add(1)
 						{
 							// Lite-05/06 name it now; a no-op on other versions.
-							self.drop_range(group.sequence..end, writer)?;
+							self.drop_range(group.sequence..end, out)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
@@ -3573,7 +3607,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					// even if trailing groups (below `group`) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
+					out.respond(lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
 				}
 				Recv::Finished if self.count_streams && !self.end_sent => {
 					// The count is final only once no served group is still waiting to
@@ -3586,10 +3620,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					let group = final_sequence(ready!(self.track.poll_finished(waiter))?);
 					let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
 					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
+					out.respond(lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
 				}
 				Recv::Finished => {
-					self.drop_unserved(writer)?;
+					self.drop_unserved(out)?;
 					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
 			}
@@ -3597,7 +3631,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 
 		// Receiving can queue a stale skip after the poll above found nothing, without a wake.
-		if self.poll_forward_drop(writer, waiter)? {
+		if self.poll_forward_drop(out, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 		Poll::Pending
@@ -3608,7 +3642,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// for it instead.
 	fn poll_forward_drop(
 		&mut self,
-		writer: &mut Writer<S::SendStream, Version>,
+		out: &mut impl Respond,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
 		if self.start.is_none() || self.served.is_none() {
@@ -3617,7 +3651,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let Poll::Ready(range) = self.track.poll_drop(waiter) else {
 			return Ok(false);
 		};
-		self.drop_range(range, writer)?;
+		self.drop_range(range, out)?;
 		Ok(true)
 	}
 
@@ -3640,7 +3674,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	}
 
 	/// Drop whatever part of `range` this subscription has not been served or dropped yet.
-	fn drop_range(&mut self, range: Range<u64>, writer: &mut Writer<S::SendStream, Version>) -> Result<(), Error> {
+	fn drop_range(&mut self, range: Range<u64>, out: &mut impl Respond) -> Result<(), Error> {
 		let Some(served) = &mut self.served else {
 			return Ok(());
 		};
@@ -3650,7 +3684,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let gaps: Vec<_> = served.gaps(&range).collect();
 		for gap in gaps {
 			served.insert(gap.clone());
-			writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+			out.respond(lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 				start: gap.start,
 				end: gap.end - 1,
 				error: 0,
@@ -3662,7 +3696,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Name every sequence from the start to the end that this subscription never got. The
 	/// track has ended, so none of them will be served now: groups it never produced (a
 	/// skipped sequence), and groups the cursor passed over (stale, or missing their head).
-	fn drop_unserved(&mut self, writer: &mut Writer<S::SendStream, Version>) -> Result<(), Error> {
+	fn drop_unserved(&mut self, out: &mut impl Respond) -> Result<(), Error> {
 		let Some(start) = self.start else {
 			// Without a SUBSCRIBE_START the subscriber owes itself no group (see
 			// `SubStream::owed`) and settles on the FIN alone, so there is nothing to drop.
@@ -3675,7 +3709,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
 		let end = final_sequence(self.track.subscription().end().map_or(fin, |end| end.min(fin)));
-		self.drop_range(start..end, writer)
+		self.drop_range(start..end, out)
 	}
 }
 
@@ -3691,7 +3725,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		&mut self,
 		group: group::Consumer,
 		source: Option<u64>,
-		writer: &mut Writer<S::SendStream, Version>,
+		out: &mut impl Respond,
 	) -> Result<(), Error> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
 		// A skipped group is never served, so it cannot be where the feed starts. This stops
@@ -3708,7 +3742,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			Poll::Ready(largest) => largest,
 			Poll::Pending => None,
 		};
-		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+		out.respond(lite::SubscribeResponse::Start(lite::SubscribeStart {
 			group: start,
 			largest,
 		}))?;
@@ -3746,7 +3780,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			None => Rank::Queue(
 				self.ctx
 					.priority
-					.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order)),
+					.insert(
+						Priority::new(steer.priority, self.ctx.id, sequence)
+							.with_lane(self.ctx.track.unwrap_or(0))
+							.with_order(steer.order),
+					),
 			),
 		};
 		self.children
@@ -3901,12 +3939,24 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
 
-					let msg = lite::Group {
-						subscribe: self.ctx.id,
-						sequence: self.sequence,
-						frame_start: self.frame_start,
+					let header = match self.ctx.track {
+						None => writer.buffer(&lite::DataType::Group).and_then(|()| {
+							writer.buffer(&lite::Group {
+								subscribe: self.ctx.id,
+								sequence: self.sequence,
+								frame_start: self.frame_start,
+							})
+						}),
+						Some(track) => writer.buffer(&lite::DataType::TrackGroup).and_then(|()| {
+							writer.buffer(&lite::TrackGroup {
+								subscribe: self.ctx.id,
+								track,
+								sequence: self.sequence,
+								frame_start: self.frame_start,
+							})
+						}),
 					};
-					if let Err(err) = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg)) {
+					if let Err(err) = header {
 						// The header wrote nothing, so the group-stream reset has nothing to pin
 						// it to this subscription. The run loop reads the slot and resets the
 						// subscribe stream instead.
@@ -4238,6 +4288,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4283,6 +4334,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4332,6 +4384,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4399,6 +4452,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4475,6 +4529,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4523,6 +4578,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4570,6 +4626,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
@@ -4629,6 +4686,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 		let bounds = Bounds {
 			start_group: Some(0),
@@ -5460,6 +5518,7 @@ mod serve_group_test {
 				timescale: Some(crate::Timescale::MILLI),
 				runtime: crate::time::sim(),
 				opens: opens.clone(),
+				track: None,
 			};
 			let bounds = Bounds {
 				start_group: Some(start_group),

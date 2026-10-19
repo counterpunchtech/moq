@@ -138,7 +138,7 @@ pub(super) fn pad_group_order(w: &mut Encoder<'_>, version: Version) -> Result<(
 
 /// Decode the byte after the subscriber priority shared by SUBSCRIBE and SUBSCRIBE_UPDATE:
 /// lite-07's `Group Order`, or the retired `Ordered` byte an older layout still carries.
-fn decode_order(r: &mut Decoder<'_>, version: Version) -> Result<Order, DecodeError> {
+pub(super) fn decode_order(r: &mut Decoder<'_>, version: Version) -> Result<Order, DecodeError> {
 	if !version.has_order() {
 		skip_group_order(r, version)?;
 		return Ok(Order::Descending);
@@ -152,7 +152,7 @@ fn decode_order(r: &mut Decoder<'_>, version: Version) -> Result<Order, DecodeEr
 
 /// Encode the inverse of [`decode_order`]. A wire without `Group Order` serves newest
 /// first, so an ascending subscription over it falls back to descending.
-fn encode_order(w: &mut Encoder<'_>, version: Version, order: Order) -> Result<(), EncodeError> {
+pub(super) fn encode_order(w: &mut Encoder<'_>, version: Version, order: Order) -> Result<(), EncodeError> {
 	if !version.has_order() {
 		return pad_group_order(w, version);
 	}
