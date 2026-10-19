@@ -80,9 +80,9 @@ pub(crate) use origin_impl::interest_prefixes;
 // pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::Snapshot;
 
-// A route's answer to a reader listing the broadcasts under a prefix.
+// A handler's answer to a reader listing the broadcasts under a prefix.
 #[cfg(feature = "async")]
-pub(crate) use origin_impl::Listing;
+pub(crate) use origin_impl::{Lister, Listing};
 
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]

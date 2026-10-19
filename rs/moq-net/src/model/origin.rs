@@ -16,7 +16,7 @@ use rand::RngExt;
 mod listing;
 pub use listing::Broadcasts;
 #[cfg_attr(not(feature = "async"), allow(unused_imports))]
-pub(crate) use listing::Listing;
+pub(crate) use listing::{Lister, Listing};
 
 use super::{
 	Requests, WeakCache, WeakEntry,
@@ -1201,8 +1201,8 @@ struct ServeState {
 	// since the release wakes the front while the updater still holds it.
 	renewals: Arc<AtomicU64>,
 
-	// The prefixes readers want the broadcasts of; see [`Broadcasts`].
-	listings: listing::Listings,
+	// Where the handler takes the prefixes readers want the broadcasts of; see [`Broadcasts`].
+	lister: listing::Lister,
 
 	// Set when the announcement is retracted or the origin tears down: new requests
 	// fail immediately and the handler observes the end instead of parking forever.
@@ -2081,9 +2081,19 @@ impl Producer {
 	/// The prefix must overlap this producer's pattern scope. Individual requests
 	/// remain authoritative and are refused when they do not match the scope.
 	pub fn dynamic(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
+		self.dynamic_listed(prefix, route, Lister::default())
+	}
+
+	/// [`Self::dynamic`], with readers listing the route asking `lister`, which the handler
+	/// shares between every route it serves.
+	pub(crate) fn dynamic_listed(&self, prefix: impl AsPath, route: Route, lister: Lister) -> Result<Dynamic, Error> {
 		let announcing = Announcing::new(self, prefix)?;
 		let serve = kio::Shared::<ServeState>::default();
-		serve.lock().requests.add_handler();
+		{
+			let mut state = serve.lock();
+			state.requests.add_handler();
+			state.lister = lister;
+		}
 		let announcement = announcing.announce(
 			route,
 			Serving {
@@ -2482,8 +2492,9 @@ impl AnnounceProducer {
 			// already handed to the handler resolves through its own `Request`.
 			if let Some(server) = &entry.server {
 				let mut server = server.lock();
+				// The lister stays open: the handler may share it with routes still live, and
+				// a reader stops reading it once no route it knows is served by it.
 				server.closed = true;
-				server.listings.close();
 				for producer in server.requests.drain_all() {
 					if let Ok(mut request) = producer.write() {
 						request.resolved.get_or_insert(Err(Error::Unroutable));
@@ -2631,7 +2642,7 @@ impl DriverState {
 		for server in servers {
 			let mut server = server.lock();
 			server.closed = true;
-			server.listings.close();
+			server.lister.close();
 			for producer in server.requests.drain_all() {
 				if let Ok(mut request) = producer.write() {
 					request.resolved.get_or_insert(Err(Error::Closed));

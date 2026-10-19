@@ -187,3 +187,8 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "subscribe-all"
+harness = false
+required-features = ["async"]

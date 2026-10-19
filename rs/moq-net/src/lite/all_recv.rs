@@ -1,8 +1,8 @@
 //! The SUBSCRIBE_ALL a session opens upstream for one prefix, feeding every listing of it.
 //!
-//! Each route the peer announces is its own handler, so a reader listing a prefix asks
-//! every one of them. The session answers all of those with a single request per prefix:
-//! the peer lists everything it holds there, whichever of its routes serves it.
+//! Every route the peer announces shares the session's lister, so readers ask the session
+//! once per prefix, and the session answers with a single request: the peer lists
+//! everything it holds there, whichever of its routes serves it.
 
 use super::*;
 

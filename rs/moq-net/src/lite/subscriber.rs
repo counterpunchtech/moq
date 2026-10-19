@@ -86,9 +86,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// Sources minted by the announce half, drained by the driver into
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<MintedSource>,
-	/// Listings the announce half's routes were asked for, drained by the driver into
-	/// one [`ListServe`] per prefix.
-	listings: kio::Queue<crate::model::Listing>,
+	/// Where readers ask every route this session announces for a listing, taken by the
+	/// driver into one [`ListServe`] per prefix.
+	lister: crate::model::Lister,
 	/// How many TRACK_STARTs each open SUBSCRIBE_ALL has read, for a group stream that
 	/// arrives ahead of its track's.
 	started: Lock<HashMap<u64, kio::Consumer<u64>>>,
@@ -147,7 +147,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			peer_setup: config.peer_setup,
 			cost: config.cost,
 			sources: kio::Queue::new(),
-			listings: kio::Queue::new(),
+			lister: Default::default(),
 			started: Default::default(),
 			going_away: config.going_away,
 			auth: config.auth,
@@ -691,8 +691,11 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		}
 		let _ = self.sources.poll(waiter);
 
-		while let Poll::Ready(Ok(listing)) = self.subscriber.listings.poll_pop(waiter) {
-			self.list(listing);
+		// An older peer has no SUBSCRIBE_ALL, and nothing emulates it: the listing ends empty.
+		while let Poll::Ready(listing) = self.subscriber.lister.poll_requested(waiter) {
+			if self.subscriber.version.has_subscribe_all() {
+				self.list(listing);
+			}
 		}
 		let _ = self.list_serves.poll(waiter);
 
@@ -4877,7 +4880,10 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.dynamic(&path, route.clone()) {
+		match subscriber
+			.origin
+			.dynamic_listed(&path, route.clone(), subscriber.lister.clone())
+		{
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true
@@ -4990,14 +4996,6 @@ impl Announced {
 					dynamic,
 					route: entry.live.consume(),
 				});
-			}
-			// A reader listing a prefix this route covers. The session answers every route's
-			// listing of a prefix with one SUBSCRIBE_ALL. An older peer has none, and nothing
-			// emulates it: the listing stays empty.
-			while let Poll::Ready(Ok(listing)) = entry.dynamic.poll_requested_listing(route_waiter) {
-				if subscriber.version.has_subscribe_all() {
-					let _ = subscriber.listings.try_push(listing);
-				}
 			}
 		}
 	}
