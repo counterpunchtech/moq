@@ -3500,11 +3500,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
 	/// reaches the track's boundary. Returning per item lets the caller watch the
 	/// requester while work stays ready.
-	fn poll_step(
-		&mut self,
-		out: &mut impl Respond,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<ControlFlow<()>, Error>> {
+	fn poll_step(&mut self, out: &mut impl Respond, waiter: &kio::Waiter) -> Poll<Result<ControlFlow<()>, Error>> {
 		let mut cx = waiter.context();
 		// Deliver the buffered range messages before selecting more work.
 		ready!(out.poll_flush(&mut cx))?;
@@ -3640,11 +3636,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Lite-05/06 name a sequence as soon as this cursor gives it up; whether one went out.
 	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
 	/// for it instead.
-	fn poll_forward_drop(
-		&mut self,
-		out: &mut impl Respond,
-		waiter: &kio::Waiter,
-	) -> Result<bool, Error> {
+	fn poll_forward_drop(&mut self, out: &mut impl Respond, waiter: &kio::Waiter) -> Result<bool, Error> {
 		if self.start.is_none() || self.served.is_none() {
 			return Ok(false);
 		}
@@ -3721,12 +3713,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
 	/// so the resolved start is the lower of the two: resolving from the later group would
 	/// drop the older one for good.
-	fn start(
-		&mut self,
-		group: group::Consumer,
-		source: Option<u64>,
-		out: &mut impl Respond,
-	) -> Result<(), Error> {
+	fn start(&mut self, group: group::Consumer, source: Option<u64>, out: &mut impl Respond) -> Result<(), Error> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
 		// A skipped group is never served, so it cannot be where the feed starts. This stops
 		// at the held group at the latest, since it was not skipped.
@@ -3778,13 +3765,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			// subscription on the session, and only groups of the same one may be
 			// ranked against each other by sequence, in that subscription's order.
 			None => Rank::Queue(
-				self.ctx
-					.priority
-					.insert(
-						Priority::new(steer.priority, self.ctx.id, sequence)
-							.with_lane(self.ctx.track.unwrap_or(0))
-							.with_order(steer.order),
-					),
+				self.ctx.priority.insert(
+					Priority::new(steer.priority, self.ctx.id, sequence)
+						.with_lane(self.ctx.track.unwrap_or(0))
+						.with_order(steer.order),
+				),
 			),
 		};
 		self.children

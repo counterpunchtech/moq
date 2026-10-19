@@ -47,10 +47,16 @@ struct Listed {
 
 enum ListState<S: crate::transport::poll::Session> {
 	Open,
-	Send { stream: Stream<S, Version> },
-	Run { stream: Stream<S, Version> },
+	Send {
+		stream: Stream<S, Version>,
+	},
+	Run {
+		stream: Stream<S, Version>,
+	},
 	/// Cancelled: FIN and wait for the acknowledgement.
-	Finish { writer: crate::coding::Writer<S::SendStream, Version> },
+	Finish {
+		writer: crate::coding::Writer<S::SendStream, Version>,
+	},
 	Done,
 }
 
@@ -139,11 +145,7 @@ impl<S: crate::transport::poll::Session> ListServe<S> {
 
 			match &mut self.state {
 				ListState::Open => {
-					let mut stream = ready!(Stream::poll_open(
-						&mut self.session,
-						self.subscriber.version,
-						&mut cx
-					))?;
+					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
 					let defaults = Subscription::default();
 					stream.writer.buffer(&lite::ControlType::SubscribeAll)?;
 					stream.writer.buffer(&lite::SubscribeAll {
@@ -258,7 +260,13 @@ impl<S: crate::transport::poll::Session> ListServe<S> {
 				if producer.finish_at_pending(Position::group(end.end.group)).is_err() {
 					return Err(Error::ProtocolViolation);
 				}
-				let Some(tail) = self.subscriber.subscribes.lock().get(&feed).map(|entry| entry.tail.clone()) else {
+				let Some(tail) = self
+					.subscriber
+					.subscribes
+					.lock()
+					.get(&feed)
+					.map(|entry| entry.tail.clone())
+				else {
 					return Ok(());
 				};
 				if let Ok(mut tail) = tail.write() {
@@ -290,7 +298,12 @@ impl<S: crate::transport::poll::Session> ListServe<S> {
 
 	/// A source for a listed broadcast, served like one minted for a request so the
 	/// tracks the peer does not list can still be asked for.
-	fn mint(&self, path: &PathOwned, epoch: Option<crate::Epoch>, live: &kio::Producer<()>) -> crate::broadcast::Producer {
+	fn mint(
+		&self,
+		path: &PathOwned,
+		epoch: Option<crate::Epoch>,
+		live: &kio::Producer<()>,
+	) -> crate::broadcast::Producer {
 		let source = self.subscriber.origin.create_source(path);
 		let dynamic = source.dynamic();
 		let _ = self.subscriber.sources.try_push(MintedSource {

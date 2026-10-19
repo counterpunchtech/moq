@@ -1236,12 +1236,8 @@ impl Tracks {
 		};
 		self.next = order + 1;
 		Poll::Ready(Some(
-			track::Consumer::listed(
-				track.name().clone(),
-				self.broadcast.info.clone(),
-				track.peek(),
-			)
-			.with_stats(self.broadcast.stats.clone()),
+			track::Consumer::listed(track.name().clone(), self.broadcast.info.clone(), track.peek())
+				.with_stats(self.broadcast.stats.clone()),
 		))
 	}
 

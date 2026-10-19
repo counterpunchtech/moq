@@ -330,7 +330,10 @@ mod test {
 		let (got, _) = SubscribeAll::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(got.id, 3);
 		assert_eq!(got.prefix.as_str(), "room/a");
-		assert_eq!((got.priority, got.order, got.max_delay), (7, Order::Ascending, msg.max_delay));
+		assert_eq!(
+			(got.priority, got.order, got.max_delay),
+			(7, Order::Ascending, msg.max_delay)
+		);
 
 		let update = SubscribeAllUpdate {
 			priority: 1,
@@ -339,7 +342,10 @@ mod test {
 		};
 		let buf = encode(&update, Version::Lite07).unwrap();
 		let (got, _) = SubscribeAllUpdate::decode_slice(&buf, Version::Lite07).unwrap();
-		assert_eq!((got.priority, got.order, got.max_delay), (1, Order::Descending, Duration::ZERO));
+		assert_eq!(
+			(got.priority, got.order, got.max_delay),
+			(1, Order::Descending, Duration::ZERO)
+		);
 	}
 
 	/// Older versions have no Subscribe All Stream, and nothing emulates it.
@@ -406,10 +412,16 @@ mod test {
 					);
 				}
 				(SubscribeAllResponse::TrackOk(a), SubscribeAllResponse::TrackOk(b)) => {
-					assert_eq!((a.track, a.start.group, a.start.largest), (b.track, b.start.group, b.start.largest))
+					assert_eq!(
+						(a.track, a.start.group, a.start.largest),
+						(b.track, b.start.group, b.start.largest)
+					)
 				}
 				(SubscribeAllResponse::TrackEnd(a), SubscribeAllResponse::TrackEnd(b)) => {
-					assert_eq!((a.track, a.end.group, a.end.streams), (b.track, b.end.group, b.end.streams))
+					assert_eq!(
+						(a.track, a.end.group, a.end.streams),
+						(b.track, b.end.group, b.end.streams)
+					)
 				}
 				(SubscribeAllResponse::TrackReset(a), SubscribeAllResponse::TrackReset(b)) => {
 					assert_eq!((a.track, a.code), (b.track, b.code))

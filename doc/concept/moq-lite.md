@@ -209,6 +209,13 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
+On moq-lite 07 (`moq-lite-07-wip`, opt-in) a subscriber can instead ask for
+every track of every broadcast under a path prefix in one request, including
+tracks and broadcasts that appear later, so it records everything without
+reading a catalog. Only tracks a publisher creates are listed, never ones it
+serves on request, and a relay answers every such request for a prefix with
+one request upstream. Rust only for now.
+
 Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |

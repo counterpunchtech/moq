@@ -2979,7 +2979,10 @@ mod tests {
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
-		assert!(subscribes.lock().contains_key(&Feed::subscribe(0)), "registered before the wire");
+		assert!(
+			subscribes.lock().contains_key(&Feed::subscribe(0)),
+			"registered before the wire"
+		);
 
 		let Ok(mut open) = gate.write() else {
 			panic!("gate closed")

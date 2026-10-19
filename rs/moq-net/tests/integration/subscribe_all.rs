@@ -204,7 +204,11 @@ async fn broadcast_appears_and_ends(relay: bool) {
 	let end = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("track end hung");
-	assert!(matches!(end, Ok(None)), "relay={relay}: {:?}", end.map(|group| group.map(|group| group.sequence)));
+	assert!(
+		matches!(end, Ok(None)),
+		"relay={relay}: {:?}",
+		end.map(|group| group.map(|group| group.sequence))
+	);
 	let ended = moq_clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("tracks end hung");

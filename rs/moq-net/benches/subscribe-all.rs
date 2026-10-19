@@ -134,7 +134,10 @@ impl Room {
 			let origin = produce(3 + lister as u64);
 			let pair = link(&relay, &origin).await;
 			let consumer = origin.consume();
-			consumer.routed(format!("room/{}", broadcasts - 1)).await.expect("announced");
+			consumer
+				.routed(format!("room/{}", broadcasts - 1))
+				.await
+				.expect("announced");
 			let mut tracks = Vec::new();
 			let cursor = match listed {
 				true => {
@@ -272,7 +275,6 @@ fn new_broadcast_with(c: &mut Criterion, name: &str, listed: bool) {
 	}
 	group.finish();
 }
-
 
 criterion_group!(benches, round, new_broadcast);
 criterion_main!(benches);

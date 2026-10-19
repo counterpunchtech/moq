@@ -376,7 +376,9 @@ impl<S: crate::transport::poll::Session> kio::Task for ListedBroadcast<S> {
 			}
 			tracing::debug!(broadcast = %self.path, id = self.id, "broadcast ended");
 			self.ctx
-				.send(lite::SubscribeAllResponse::BroadcastEnd(lite::BroadcastEnd { broadcast: self.id }));
+				.send(lite::SubscribeAllResponse::BroadcastEnd(lite::BroadcastEnd {
+					broadcast: self.id,
+				}));
 			self.tracks = None;
 		}
 
@@ -413,7 +415,9 @@ enum ListedState<S: crate::transport::poll::Session> {
 		querying: track::Querying,
 	},
 	/// Waiting for the model subscription to be confirmed.
-	Confirm { subscribing: track::Subscribing },
+	Confirm {
+		subscribing: track::Subscribing,
+	},
 	Run(Box<TrackRun<S>>),
 	/// The track finished: draining the in-flight group streams.
 	Drain {
@@ -443,11 +447,10 @@ impl<S: crate::transport::poll::Session> kio::Task for ListedTrack<S> {
 				.shared
 				.version
 				.encode_stream_code(&crate::StreamError::from(&err));
-			self.ctx
-				.send(lite::SubscribeAllResponse::TrackReset(lite::TrackReset {
-					track,
-					code: code.into(),
-				}));
+			self.ctx.send(lite::SubscribeAllResponse::TrackReset(lite::TrackReset {
+				track,
+				code: code.into(),
+			}));
 		}
 		Poll::Ready(())
 	}
@@ -465,16 +468,15 @@ impl<S: crate::transport::poll::Session> ListedTrack<S> {
 					let info = ready!(querying.poll_ok(waiter))?;
 					let id = self.ctx.next_track.fetch_add(1, Ordering::Relaxed);
 					self.id = Some(id);
-					self.ctx
-						.send(lite::SubscribeAllResponse::TrackStart(lite::TrackStart {
-							broadcast: self.broadcast,
-							name: track.name().to_string().into(),
-							info: lite::TrackInfo {
-								priority: info.priority,
-								max_age: info.max_age,
-								timescale: info.timescale,
-							},
-						}));
+					self.ctx.send(lite::SubscribeAllResponse::TrackStart(lite::TrackStart {
+						broadcast: self.broadcast,
+						name: track.name().to_string().into(),
+						info: lite::TrackInfo {
+							priority: info.priority,
+							max_age: info.max_age,
+							timescale: info.timescale,
+						},
+					}));
 					self.seen = *self.steer.read();
 					let subscription = crate::track::Subscription {
 						priority: self.seen.priority,
@@ -579,7 +581,9 @@ impl Respond for Responder<'_> {
 	fn respond(&mut self, resp: lite::SubscribeResponse) -> Result<(), Error> {
 		let track = self.track;
 		let msg = match resp {
-			lite::SubscribeResponse::Start(start) => lite::SubscribeAllResponse::TrackOk(lite::TrackOk { track, start }),
+			lite::SubscribeResponse::Start(start) => {
+				lite::SubscribeAllResponse::TrackOk(lite::TrackOk { track, start })
+			}
 			lite::SubscribeResponse::End(end) => lite::SubscribeAllResponse::TrackEnd(lite::TrackEnd { track, end }),
 			// Lite-07 has neither, and it is the only version with SUBSCRIBE_ALL.
 			lite::SubscribeResponse::Ok(_) | lite::SubscribeResponse::Drop(_) => {

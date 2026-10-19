@@ -74,10 +74,12 @@ impl ListingReader {
 	/// The next listed broadcast, `Ready(None)` once the handler dropped the listing.
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(broadcast::Consumer, Option<crate::Epoch>)>> {
 		let next = self.next;
-		let found = self.state.poll(waiter, |state| match state.broadcasts.range(next..).next() {
-			Some((key, (broadcast, epoch))) => Poll::Ready((*key, broadcast.clone(), epoch.clone())),
-			None => Poll::Pending,
-		});
+		let found = self
+			.state
+			.poll(waiter, |state| match state.broadcasts.range(next..).next() {
+				Some((key, (broadcast, epoch))) => Poll::Ready((*key, broadcast.clone(), epoch.clone())),
+				None => Poll::Pending,
+			});
 		match ready!(found) {
 			Ok((key, broadcast, epoch)) => {
 				self.next = key + 1;
@@ -385,7 +387,7 @@ impl Broadcasts {
 		{
 			return None;
 		}
-		let scope = self.consumer.stats.egress(&self.consumer.root.join(&path).to_owned());
+		let scope = self.consumer.stats.egress(self.consumer.root.join(&path).to_owned());
 		let broadcast = broadcast.with_path(path).with_epoch(epoch).with_stats(scope);
 		yielded.push(broadcast.clone());
 		// Ended broadcasts at paths never reached again, swept once their count doubles.
@@ -404,9 +406,9 @@ impl Broadcasts {
 mod tests {
 	use std::time::Duration;
 
+	use super::super::ProduceTest;
 	use super::*;
 	use crate::{Hop, origin::Route};
-	use super::super::ProduceTest;
 
 	/// Routes sharing a handler's lister ask it once per prefix, and losing one of them
 	/// keeps the listing for the rest.
@@ -414,11 +416,18 @@ mod tests {
 	async fn routes_sharing_a_lister_are_asked_once() {
 		let origin = Hop::new(1).unwrap().produce();
 		let lister = Lister::default();
-		let a = origin.dynamic_listed("room/a", Route::default(), lister.clone()).unwrap();
-		let _b = origin.dynamic_listed("room/b", Route::default(), lister.clone()).unwrap();
+		let a = origin
+			.dynamic_listed("room/a", Route::default(), lister.clone())
+			.unwrap();
+		let _b = origin
+			.dynamic_listed("room/b", Route::default(), lister.clone())
+			.unwrap();
 		let mut cursor = origin.consume().broadcasts("room").unwrap();
 		let quiet = Duration::from_millis(10);
-		assert!(moq_clock::timeout(quiet, cursor.next()).await.is_err(), "nothing listed yet");
+		assert!(
+			moq_clock::timeout(quiet, cursor.next()).await.is_err(),
+			"nothing listed yet"
+		);
 
 		let Poll::Ready(listing) = lister.poll_requested(&kio::Waiter::noop()) else {
 			panic!("the cursor asked for a listing");
@@ -427,7 +436,10 @@ mod tests {
 		assert_eq!(listing.prefix().as_str(), "room");
 
 		drop(a);
-		assert!(moq_clock::timeout(quiet, cursor.next()).await.is_err(), "nothing listed yet");
+		assert!(
+			moq_clock::timeout(quiet, cursor.next()).await.is_err(),
+			"nothing listed yet"
+		);
 		let source = origin.create_source("room/b");
 		listing.insert(source.consume(), None);
 		let listed = moq_clock::timeout(quiet, cursor.next())
