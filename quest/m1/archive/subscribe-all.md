@@ -9,7 +9,8 @@ request and broadcasts that appear later, and delivers their groups; a
 broadcast's tracks end when it ends. It never creates a track the publisher
 serves only on request (an any-name `broadcast::Dynamic` handler such as a
 transcoder). A relay answers many downstream SUBSCRIBE_ALLs from one upstream
-request. Rust and JS both speak it.
+request. Rust speaks it here, and
+[SUBSCRIBE_ALL in js/net](/quest/m1/archive/subscribe-all-js.md) mirrors it.
 
 ## Plan
 
@@ -60,15 +61,14 @@ Guidance:
   delivered.
 - Fan-out: benchmark downstream requests against broadcast and track count per
   the AGENTS.md fan-out rule.
-- Split the JS half into its own quest if the PR grows too large to review.
+- The JS half is [SUBSCRIBE_ALL in js/net](/quest/m1/archive/subscribe-all-js.md).
 
 Test on mock time, directly and through a relay: tracks present at the
 request, a track added later (its first group arrives), a broadcast appearing
 and ending under the prefix, a new epoch at the same path, a dynamic-only track
 never created, and two downstream requests sharing one upstream request.
 
-Public API: the new prefix hook in Rust and `@moq/net`, mirrored names. Wire:
-a new lite-07-wip request.
+Public API: the new prefix hook in Rust. Wire: a new lite-07-wip request.
 
 ## Related
 

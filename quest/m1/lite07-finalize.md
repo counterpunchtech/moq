@@ -89,6 +89,7 @@ is published; older versions are unchanged.
 - [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [SUBSCRIBE_ALL](/quest/m1/archive/subscribe-all.md) - lite-07 carries the prefix-scoped request for every track of every broadcast under a path
+- [SUBSCRIBE_ALL in js/net](/quest/m1/archive/subscribe-all-js.md) - JS speaks SUBSCRIBE_ALL in both directions instead of refusing it
 
 ## Related
 
