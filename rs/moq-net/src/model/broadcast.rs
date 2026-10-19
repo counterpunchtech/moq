@@ -10,7 +10,7 @@
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
 use std::{
-	collections::HashMap,
+	collections::{BTreeMap, HashMap},
 	sync::Arc,
 	task::{Poll, ready},
 	time::Duration,
@@ -107,6 +107,12 @@ struct BroadcastState {
 	// swept as the map grows, so requests for names never served stay bounded.
 	sequences: HashMap<Arc<str>, track::Sequence>,
 
+	// The tracks the producer created, as opposed to served on request, keyed by the order
+	// they were listed so a [`Tracks`] cursor resumes after the last one it saw. Closed
+	// entries are swept as the map grows.
+	listed: BTreeMap<u64, track::TrackWeak>,
+	next_listed: u64,
+
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
@@ -120,6 +126,18 @@ impl BroadcastState {
 			Some(_) => Err(Error::Duplicate),
 			None => Ok(()),
 		}
+	}
+
+	/// Add a track the producer created to what [`Tracks`] cursors yield.
+	fn list(&mut self, weak: track::TrackWeak) {
+		use super::WeakEntry;
+		// Swept once per doubling, so a broadcast churning track names stays bounded by its
+		// live tracks at constant amortized cost.
+		if self.listed.len() >= 16 && self.listed.len().is_power_of_two() {
+			self.listed.retain(|_, track| !track.is_closed());
+		}
+		self.listed.insert(self.next_listed, weak);
+		self.next_listed += 1;
 	}
 
 	/// The sequence namespace for `name`, shared with every earlier track of the name.
@@ -319,6 +337,7 @@ impl Producer {
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
 			let _ = state.tracks.insert(name, track.weak());
+			state.list(track.weak());
 			return Ok(track);
 		}
 
@@ -327,6 +346,7 @@ impl Producer {
 			.with_stats(self.stats.clone())
 			.with_sequence(sequence);
 		state.insert_track(track.weak())?;
+		state.list(track.weak());
 		Ok(track)
 	}
 
@@ -348,7 +368,26 @@ impl Producer {
 			.with_stats(self.stats.clone())
 			.with_sequence(state.sequence(&name));
 		state.insert_track(request.weak())?;
+		state.list(request.weak());
 		Ok(request)
+	}
+
+	/// List the live track `name` as if this producer had created it, so [`Tracks`] cursors
+	/// yield it. A relay calls it when a peer announces a track this broadcast already
+	/// serves on request, joining that copy instead of creating a second one. Returns
+	/// whether such a track exists.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn list_track(&self, name: &str) -> bool {
+		let mut state = self.state.lock();
+		let Some(weak) = state.tracks.get(name) else {
+			return false;
+		};
+		use super::WeakEntry;
+		if !state.listed.values().any(|listed| listed.same_channel(&weak)) {
+			state.list(weak);
+		}
+		true
 	}
 
 	/// Create a track with a unique name using the given suffix.
@@ -998,6 +1037,19 @@ impl Consumer {
 		)
 	}
 
+	/// Every track the producer creates: the ones open now, in the order they were
+	/// created, then each new one as it appears, until the broadcast ends.
+	///
+	/// A track a [`Dynamic`] serves only because someone asked for it is never yielded,
+	/// and the cursor never asks for one. Each track it does yield is that one instance,
+	/// so a later track of the same name is yielded again rather than replacing it.
+	pub fn tracks(&self) -> Tracks {
+		Tracks {
+			broadcast: self.clone(),
+			next: 0,
+		}
+	}
+
 	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
 	/// when nothing serves it yet. Errors as [`Self::track`] does.
 	pub(super) fn resolve_track(&self, name: &str) -> Result<kio::Consumer<track::TrackState>, Error> {
@@ -1145,6 +1197,58 @@ impl super::WeakEntry for WeakConsumer {
 
 	fn same_channel(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+/// The tracks a broadcast's producer creates, from [`Consumer::tracks`].
+pub struct Tracks {
+	broadcast: Consumer,
+	// The listing order of the next track to yield.
+	next: u64,
+}
+
+impl Tracks {
+	/// The broadcast these tracks belong to.
+	pub fn broadcast(&self) -> &Consumer {
+		&self.broadcast
+	}
+
+	/// Poll for the next track the producer created, or `None` once the broadcast ended.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<track::Consumer>> {
+		use super::WeakEntry;
+		let next = self.next;
+		let state = ready!(self.broadcast.state.poll(waiter, |state| {
+			let open = state.listed.range(next..).any(|(_, track)| !track.is_closed());
+			match open || state.closing {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
+		let found = state
+			.listed
+			.range(next..)
+			.find(|(_, track)| !track.is_closed())
+			.map(|(order, track)| (*order, track.clone()));
+		drop(state);
+		let Some((order, track)) = found else {
+			// Only reached once the broadcast is closing with nothing left to yield.
+			return Poll::Ready(None);
+		};
+		self.next = order + 1;
+		Poll::Ready(Some(
+			track::Consumer::listed(
+				track.name().clone(),
+				self.broadcast.info.clone(),
+				track.peek(),
+			)
+			.with_stats(self.broadcast.stats.clone()),
+		))
+	}
+
+	/// Wait for the next track the producer created, or `None` once the broadcast ended.
+	#[cfg(feature = "async")]
+	pub async fn next(&mut self) -> Option<track::Consumer> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 

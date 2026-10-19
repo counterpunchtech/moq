@@ -12,6 +12,12 @@ use std::{
 
 use rand::RngExt;
 
+#[path = "listing.rs"]
+mod listing;
+pub use listing::Broadcasts;
+#[cfg_attr(not(feature = "async"), allow(unused_imports))]
+pub(crate) use listing::Listing;
+
 use super::{
 	Requests, WeakCache, WeakEntry,
 	front::{Action, Candidate, Event, Front, Refusal},
@@ -1194,6 +1200,9 @@ struct ServeState {
 	// it asked to tell a released request from an answered one. Shared outside the lock,
 	// since the release wakes the front while the updater still holds it.
 	renewals: Arc<AtomicU64>,
+
+	// The prefixes readers want the broadcasts of; see [`Broadcasts`].
+	listings: listing::Listings,
 
 	// Set when the announcement is retracted or the origin tears down: new requests
 	// fail immediately and the handler observes the end instead of parking forever.
@@ -2474,6 +2483,7 @@ impl AnnounceProducer {
 			if let Some(server) = &entry.server {
 				let mut server = server.lock();
 				server.closed = true;
+				server.listings.close();
 				for producer in server.requests.drain_all() {
 					if let Ok(mut request) = producer.write() {
 						request.resolved.get_or_insert(Err(Error::Unroutable));
@@ -2621,6 +2631,7 @@ impl DriverState {
 		for server in servers {
 			let mut server = server.lock();
 			server.closed = true;
+			server.listings.close();
 			for producer in server.requests.drain_all() {
 				if let Ok(mut request) = producer.write() {
 					request.resolved.get_or_insert(Err(Error::Closed));

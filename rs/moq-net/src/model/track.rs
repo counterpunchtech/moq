@@ -3496,6 +3496,18 @@ impl Consumer {
 		}
 	}
 
+	/// A handle bound to one track instance, as [`broadcast::Tracks`] yields it: requests
+	/// read that instance even once its broadcast serves another under the name.
+	pub(super) fn listed(name: Arc<str>, info: Arc<broadcast::Info>, state: kio::ConsumerWeak<TrackState>) -> Self {
+		Self {
+			name,
+			broadcast: info,
+			source: Source::Track(state),
+			stats: stats::Scope::default(),
+			largest: None,
+		}
+	}
+
 	/// The track a request made now reads, joined to its consumer count. A broadcast
 	/// that cannot serve the name answers with a track closed with its error.
 	fn resolve(&self) -> kio::Consumer<TrackState> {
