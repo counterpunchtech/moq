@@ -396,6 +396,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x7  | Auth         | Either      |
 | ------- | ------------- | ----------- |
+|    0x8  | Subscribe All | Subscriber |
+| ------- | ------------- | ----------- |
 
 ### Announce
 A subscriber can open an Announce Stream to discover routes matching a prefix.
@@ -518,6 +520,27 @@ After reading the publisher's FIN, the subscriber MUST close its side (FIN) once
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 A subscriber MAY cancel by closing its side (FIN); the publisher then closes its side (FIN) without owing SUBSCRIBE_END.
 Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
+
+### Subscribe All {#subscribe-all-stream}
+A subscriber opens a Subscribe All Stream (0x8) to subscribe to every Track of every Broadcast under a prefix, including Tracks and Broadcasts that appear later.
+A subscriber that wants every Track, such as an archive, needs no catalog and opens no stream per Track.
+
+The subscriber sends a SUBSCRIBE_ALL message followed by any number of SUBSCRIBE_ALL_UPDATE messages, each of which applies to every Track of the request.
+The publisher sends a BROADCAST_START for each Broadcast it holds under the prefix, as it learns of it, and a BROADCAST_START for a new publisher instance at the same path even while the old one is listed.
+A Broadcast whose path has a `.`-prefixed segment below the prefix is not listed (see [Hidden Paths](#hidden)).
+The publisher then sends a TRACK_START for each Track the Broadcast's producer creates, and serves it as if the subscriber had sent a SUBSCRIBE for it with the request's preferences and no bounds: TRACK_OK and TRACK_END stand in for the Track's SUBSCRIBE_OK and SUBSCRIBE_END, its groups arrive on Track Group Streams (0x2), and a TRACK_RESET stands in for the reset of its Subscribe Stream.
+A Track served only on request, which a producer never creates, is never listed.
+A publisher MUST NOT deliver a Track of a SUBSCRIBE_ALL as a datagram.
+Once a Broadcast ends, the publisher sends a BROADCAST_END and lists no more of its Tracks; each listed Track still ends with its own TRACK_END or TRACK_RESET.
+
+A Track Group Stream can arrive before the TRACK_START naming its Track, since the two travel on different streams.
+The subscriber MUST NOT reject such a stream while the request is open; it waits for the TRACK_START.
+
+The request needs subscribe permission on the prefix, and the publisher MUST NOT list a Broadcast the session does not allow.
+It counts as one subscription against the publisher's bound (see [Resource Exhaustion](#resource-exhaustion)).
+A relay MAY answer every SUBSCRIBE_ALL for a prefix with one request upstream.
+The subscriber cancels by closing its side (FIN), and the publisher then closes its own without owing anything further.
+The publisher closes its side once it will list no more Broadcasts and every listed Track has ended.
 
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
@@ -698,6 +721,8 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
+|    0x2 | Track Group | Publisher |
+| ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
 Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
@@ -709,7 +734,8 @@ An endpoint with no optional capabilities sends a SETUP with an empty parameter 
 See the [Session](#session) section for how an endpoint avoids waiting on the peer's SETUP before exchanging other streams.
 
 ### Group
-A publisher creates Group Streams in response to a Subscribe Stream.
+A publisher creates Group Streams in response to a Subscribe Stream, and Track Group Streams (0x2) for a Track of a [Subscribe All Stream](#subscribe-all-stream).
+A Track Group Stream starts with a TRACK_GROUP message instead of a GROUP message and is otherwise the same.
 
 A Group Stream MUST start with a GROUP message and MAY be followed by any number of FRAME messages.
 A Group MAY contain zero FRAME messages, potentially indicating a gap in the track.
@@ -1341,6 +1367,129 @@ The publisher MUST NOT send SUBSCRIBE_END until every Group Stream it will open 
 The subscriber has received every Group Stream once it has read the header of `Stream Count` of them, which MAY happen after SUBSCRIBE_END or the FIN since streams are not ordered.
 A Group Stream reset before its header arrived is never seen, so a subscriber SHOULD bound how long it waits for the rest, for example by `Subscriber Max Age`.
 
+## SUBSCRIBE_ALL {#subscribe-all}
+SUBSCRIBE_ALL is the first message on a Subscribe All Stream.
+
+~~~
+SUBSCRIBE_ALL Message {
+  Message Length (i)
+  Subscribe ID (i)
+  Broadcast Path Prefix (s)
+  Subscriber Priority (8)
+  Group Order (8)
+  Subscriber Max Age (i)
+}
+~~~
+
+**Subscribe ID**:
+Drawn from the same space as the SUBSCRIBE `Subscribe ID`, and named by every TRACK_GROUP of the request.
+
+**Broadcast Path Prefix**:
+The prefix whose Broadcasts are listed.
+
+See [SUBSCRIBE](#subscribe) for the other fields, which apply to every listed Track.
+
+## SUBSCRIBE_ALL_UPDATE
+SUBSCRIBE_ALL_UPDATE changes the preferences of every Track of a SUBSCRIBE_ALL.
+
+~~~
+SUBSCRIBE_ALL_UPDATE Message {
+  Message Length (i)
+  Subscriber Priority (8)
+  Group Order (8)
+  Subscriber Max Age (i)
+}
+~~~
+
+## BROADCAST_START {#broadcast-start}
+BROADCAST_START lists a Broadcast on a Subscribe All Stream.
+Each one implicitly assigns the next Broadcast ID, starting at 0.
+
+~~~
+BROADCAST_START Message {
+  Type (i) = 0x0
+  Message Length (i)
+  Broadcast Path Suffix (s)
+  Epoch (b)
+}
+~~~
+
+**Broadcast Path Suffix**:
+The Broadcast's path, relative to the requested prefix.
+
+**Epoch**:
+The publisher instance, encoded as in [ANNOUNCE_START](#announce-start).
+
+## BROADCAST_END
+BROADCAST_END says a listed Broadcast has ended: no further Track of it is listed.
+
+~~~
+BROADCAST_END Message {
+  Type (i) = 0x1
+  Message Length (i)
+  Broadcast ID (i)
+}
+~~~
+
+## TRACK_START {#track-start}
+TRACK_START lists a Track of a listed Broadcast, with its [TRACK_INFO](#track-info) fields.
+Each one implicitly assigns the next Track ID, starting at 0.
+A Broadcast ID that is unknown or has ended is a PROTOCOL_VIOLATION.
+
+~~~
+TRACK_START Message {
+  Type (i) = 0x2
+  Message Length (i)
+  Broadcast ID (i)
+  Track Name (s)
+  Publisher Priority (8)
+  Publisher Max Age (i)
+  Timescale (i)
+}
+~~~
+
+## TRACK_OK
+TRACK_OK is a listed Track's [SUBSCRIBE_OK](#subscribe-ok).
+
+~~~
+TRACK_OK Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Track ID (i)
+  Group (i)
+  Largest Group (i)
+  [Largest Frame (i)]
+}
+~~~
+
+## TRACK_END
+TRACK_END is a listed Track's [SUBSCRIBE_END](#subscribe-end), counting its Track Group Streams.
+
+~~~
+TRACK_END Message {
+  Type (i) = 0x4
+  Message Length (i)
+  Track ID (i)
+  Group (i)
+  Stream Count (i)
+}
+~~~
+
+## TRACK_RESET
+TRACK_RESET ends a listed Track with an error, as a reset of its Subscribe Stream would.
+
+~~~
+TRACK_RESET Message {
+  Type (i) = 0x5
+  Message Length (i)
+  Track ID (i)
+  Error Code (i)
+}
+~~~
+
+**Error Code**:
+A stream error code (see [Stream Error Codes](#stream-error-codes)).
+
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
 
@@ -1554,6 +1703,27 @@ A non-zero value means the leading frames are not on this stream, either because
 The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a separate subscription or FETCH covers them.
 
 
+## TRACK_GROUP
+The TRACK_GROUP message starts a Track Group Stream: a GROUP of a Track listed by a SUBSCRIBE_ALL.
+
+~~~
+TRACK_GROUP Message {
+  Message Length (i)
+  Subscribe ID (i)
+  Track ID (i)
+  Group Sequence (i)
+  Frame Start (i)
+}
+~~~
+
+**Subscribe ID**:
+The SUBSCRIBE_ALL's Subscribe ID.
+
+**Track ID**:
+The Track, as assigned by its TRACK_START.
+
+See [GROUP](#group) for the other fields.
+
 ## FRAME
 The FRAME message is a payload within a group.
 
@@ -1632,6 +1802,7 @@ The `Message Length` describes the payload size on the wire.
 - Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME, and a stream type the negotiated version predates still affect only that stream.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
+- Added the Subscribe All Stream (0x8) and the Track Group Stream (0x2): SUBSCRIBE_ALL subscribes to every Track of every Broadcast under a prefix, listed with BROADCAST_START, BROADCAST_END, and TRACK_START, and served with TRACK_OK, TRACK_END, and TRACK_RESET. Earlier versions have neither.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06

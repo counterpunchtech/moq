@@ -6015,10 +6015,12 @@ mod tests {
 	async fn unknown_control_types_reset_only_their_stream() {
 		use kio::Task;
 		// An unassigned type everywhere, then types a version predates: PROBE before lite-03,
-		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH before lite-07.
+		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH and SUBSCRIBE_ALL
+		// before lite-07.
 		let cases = [
-			(Version::Lite06, 8),
-			(Version::Lite07, 8),
+			(Version::Lite06, 9),
+			(Version::Lite07, 9),
+			(Version::Lite06, lite::ControlType::SubscribeAll as u8),
 			(Version::Lite02, lite::ControlType::Probe as u8),
 			(Version::Lite03, lite::ControlType::Goaway as u8),
 			(Version::Lite04, lite::ControlType::Fetch as u8),
