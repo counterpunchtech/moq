@@ -98,7 +98,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	copies: Lock<HashMap<PathOwned, Vec<(crate::Epoch, crate::broadcast::Producer)>>>,
 	/// Every track a serve loop feeds, by broadcast path and name, for a SUBSCRIBE_ALL
 	/// listing one to join rather than feed a second copy.
-	served: Lock<HashMap<(PathOwned, Arc<str>), Vec<Served>>>,
+	served: ServedLoops,
 	going_away: crate::goaway::GoingAway,
 	auth: crate::auth::Handle,
 	/// What this session may allocate up front for frames still arriving.
@@ -5941,6 +5941,9 @@ struct Listed {
 	covered: Option<Position>,
 }
 
+/// The serve loops of a session's requested tracks, by broadcast path and track name.
+type ServedLoops = Lock<HashMap<(PathOwned, Arc<str>), Vec<Served>>>;
+
 /// A track a serve loop feeds, for a SUBSCRIBE_ALL listing it to join.
 #[derive(Clone)]
 struct Served {
@@ -5950,7 +5953,7 @@ struct Served {
 
 /// Keeps a serve loop's track in [`Subscriber::served`] for as long as it runs.
 struct ServedGuard {
-	served: Lock<HashMap<(PathOwned, Arc<str>), Vec<Served>>>,
+	served: ServedLoops,
 	key: (PathOwned, Arc<str>),
 	attach: kio::Queue<ListedFeed>,
 }

@@ -1,7 +1,7 @@
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::RangeSet;
 use std::{
-	collections::{BTreeSet, HashMap},
+	collections::HashMap,
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
@@ -4380,6 +4380,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			opens: Default::default(),
+			track: None,
 		};
 
 		let track = track::Producer::new(
