@@ -17,8 +17,9 @@ use super::{AnnounceConsumer, AnnounceEvent, Consumer};
 use crate::{AsPath, Error, PathOwned, broadcast};
 
 /// The broadcasts a handler lists under one prefix, in the order it learned them.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 #[derive(Default)]
-pub(crate) struct ListingState {
+struct ListingState {
 	// Keyed by insertion order, so a reader resumes after the last one it saw.
 	broadcasts: BTreeMap<u64, (broadcast::Consumer, Option<crate::Epoch>)>,
 	next: u64,
@@ -28,11 +29,14 @@ pub(crate) struct ListingState {
 ///
 /// Holding a broadcast here holds it for the readers to come. Readers going away is
 /// [`Self::poll_unused`]; dropping the listing ends it for them.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Listing {
 	prefix: PathOwned,
 	state: kio::Producer<ListingState>,
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl Listing {
 	/// The absolute prefix whose broadcasts are listed.
 	pub fn prefix(&self) -> &crate::Path<'_> {
@@ -95,6 +99,7 @@ impl ListingReader {
 /// One per handler, shared by every route it serves: a reader asks it once per prefix
 /// however many of its routes cover the prefix, and the handler fills one listing.
 #[derive(Clone, Default)]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Lister {
 	state: kio::Shared<Listings>,
 }

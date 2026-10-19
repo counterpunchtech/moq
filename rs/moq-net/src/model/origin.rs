@@ -16,6 +16,7 @@ use rand::RngExt;
 mod listing;
 pub use listing::Broadcasts;
 #[cfg_attr(not(feature = "async"), allow(unused_imports))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) use listing::{Lister, Listing};
 
 use super::{
@@ -2086,6 +2087,7 @@ impl Producer {
 
 	/// [`Self::dynamic`], with readers listing the route asking `lister`, which the handler
 	/// shares between every route it serves.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn dynamic_listed(&self, prefix: impl AsPath, route: Route, lister: Lister) -> Result<Dynamic, Error> {
 		let announcing = Announcing::new(self, prefix)?;
 		let serve = kio::Shared::<ServeState>::default();
