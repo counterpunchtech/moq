@@ -539,6 +539,8 @@ The subscriber MUST NOT reject such a stream while the request is open; it waits
 The request needs subscribe permission on the prefix, and the publisher MUST NOT list a Broadcast the session does not allow.
 It counts as one subscription against the publisher's bound (see [Resource Exhaustion](#resource-exhaustion)).
 A relay MAY answer every SUBSCRIBE_ALL for a prefix with one request upstream.
+Such a relay sends the highest `Subscriber Priority` and `Subscriber Max Age` its downstream readers ask for, with SUBSCRIBE_ALL_UPDATE as they change.
+A subscriber that wants a listed Track's groups below its TRACK_OK `Group` sends a SUBSCRIBE for them that ends before that `Group`; a relay without them does the same upstream.
 The subscriber cancels by closing its side (FIN), and the publisher then closes its own without owing anything further.
 The publisher closes its side once it will list no more Broadcasts and every listed Track has ended.
 

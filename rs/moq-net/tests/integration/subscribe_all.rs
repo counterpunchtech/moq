@@ -364,3 +364,255 @@ async fn older_versions_list_nothing() {
 	assert!(moq_clock::timeout(Duration::from_secs(1), cursor.next()).await.is_err());
 	assert!(!pair.client_transport.bidi_types().contains(&SUBSCRIBE_ALL));
 }
+
+/// The Subscribe Stream's type.
+const SUBSCRIBE: u8 = 0x2;
+
+/// How many SUBSCRIBEs the subscriber side of `link` opened.
+fn subscribes(link: &MockPair) -> usize {
+	link.client_transport
+		.bidi_types()
+		.into_iter()
+		.filter(|kind| *kind == SUBSCRIBE)
+		.count()
+}
+
+/// Publish `room/a` under an epoch with one timed track, `video`, holding group 0.
+fn publish_video(origin: &origin::Producer) -> (broadcast::Producer, track::Producer) {
+	let broadcast = origin.create_broadcast("room/a").unwrap();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	write(&video, 0);
+	broadcast
+		.announce(origin::Route::default().with_epoch(epochs().0))
+		.unwrap();
+	(broadcast, video)
+}
+
+/// `room/a` as a request through `origin` resolves it.
+async fn request(origin: &origin::Producer) -> broadcast::Consumer {
+	let consumer = origin.consume();
+	moq_clock::timeout(TIMEOUT, consumer.routed("room/a"))
+		.await
+		.expect("announce hung")
+		.expect("routed");
+	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room/a", None))
+		.await
+		.expect("resolve hung")
+		.expect("broadcast resolves")
+}
+
+/// The first track listed under `room` through `origin`, with the cursor that listed it.
+async fn list_video(origin: &origin::Producer) -> (origin::Broadcasts, track::Consumer) {
+	let consumer = origin.consume();
+	moq_clock::timeout(TIMEOUT, consumer.routed("room/a"))
+		.await
+		.expect("announce hung");
+	let mut cursor = consumer.broadcasts("room").unwrap();
+	let listed = next_broadcast(&mut cursor).await;
+	let track = next_track(&mut listed.tracks()).await;
+	assert_eq!(track.name(), "video");
+	(cursor, track)
+}
+
+async fn subscribe(track: &track::Consumer, subscription: track::Subscription) -> track::Subscriber {
+	moq_clock::timeout(TIMEOUT, track.subscribe(subscription.with_max_delay(Duration::from_secs(60))))
+		.await
+		.expect("subscribe hung")
+		.expect("subscribe")
+}
+
+/// Read groups until `sequence` arrives.
+async fn read_until(subscriber: &mut track::Subscriber, sequence: u64) {
+	loop {
+		let group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.expect("group hung")
+			.expect("group")
+			.expect("track ended");
+		if group.sequence == sequence {
+			return;
+		}
+	}
+}
+
+/// A track both listed and requested is one copy at every hop: a request reads the
+/// listed feed, and nothing is subscribed upstream for it.
+#[moq_clock::test]
+async fn a_listed_track_serves_requests_too() {
+	let chain = Chain::new(true).await;
+	let (_broadcast, video) = publish_video(&chain.publisher);
+	let (_cursor, listed) = list_video(&chain.subscriber).await;
+	assert_eq!(read_group(&listed).await, 0);
+
+	// The subscriber asks for the track by name, and so does another downstream of the relay.
+	let other = produce_origin(4);
+	let _other_link = link(&chain._relays[0], &other).await;
+	let mut readers = Vec::new();
+	for origin in [&chain.subscriber, &other] {
+		let track = request(origin).await.track("video").unwrap();
+		readers.push(subscribe(&track, Default::default()).await);
+	}
+	write(&video, 1);
+	for reader in &mut readers {
+		read_until(reader, 1).await;
+	}
+
+	assert_eq!(subscribes(&chain.links[0]), 0, "the relay subscribed upstream");
+	assert_eq!(subscribes(&chain.links[1]), 0, "the subscriber subscribed upstream");
+}
+
+/// A track a request already subscribed hands over to a SUBSCRIBE_ALL that lists it: the
+/// publisher then sends each new group once, not once per request.
+#[moq_clock::test]
+async fn a_subscribed_track_hands_over_to_its_listing() {
+	let chain = Chain::new(true).await;
+	let (_broadcast, video) = publish_video(&chain.publisher);
+
+	let other = produce_origin(4);
+	let _other_link = link(&chain._relays[0], &other).await;
+	let track = request(&other).await.track("video").unwrap();
+	let mut viewer = subscribe(&track, Default::default()).await;
+	read_until(&mut viewer, 0).await;
+	assert_eq!(subscribes(&chain.links[0]), 1);
+
+	let (_cursor, listed) = list_video(&chain.subscriber).await;
+	let mut lister = subscribe(&listed, Default::default()).await;
+	write(&video, 1);
+	read_until(&mut viewer, 1).await;
+	read_until(&mut lister, 1).await;
+	// Let the relay retire its own subscription once the feed covers it.
+	moq_clock::sleep(Duration::from_millis(10)).await;
+
+	let publisher = &chain.links[0].server_transport;
+	publisher.hold_unis();
+	write(&video, 2);
+	moq_clock::sleep(Duration::from_millis(10)).await;
+	let streams = 1 + publisher.release_newest_uni();
+	publisher.release_unis();
+	assert_eq!(streams, 1, "group 2 went upstream once per request");
+	read_until(&mut viewer, 2).await;
+	read_until(&mut lister, 2).await;
+}
+
+/// Write group `sequence` with `frames` frames, each payload naming its position.
+fn write_frames(track: &track::Producer, sequence: u64, frames: u64) {
+	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+	for frame in 0..frames {
+		let at = Timestamp::from_millis(sequence * 10 + frame).unwrap();
+		group
+			.write_frame(at, format!("{sequence}.{frame}").into_bytes())
+			.unwrap();
+	}
+	group.finish().unwrap();
+}
+
+/// A reader resuming a listed track mid-group reads that group from its frame on, then the
+/// live groups. The floor goes upstream as an ordinary subscriber's would, and a relay
+/// answers the same whether its cache already holds the group (`warm`) or not.
+async fn resumes_mid_group(relay: bool, warm: bool) {
+	let chain = Chain::new(relay).await;
+	let broadcast = chain.publisher.create_broadcast("room/a").unwrap();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	write_frames(&video, 0, 1);
+	write_frames(&video, 1, 4);
+	write_frames(&video, 2, 1);
+	broadcast
+		.announce(origin::Route::default().with_epoch(epochs().0))
+		.unwrap();
+
+	// Another downstream of the relay already read the whole track through it.
+	let other = produce_origin(4);
+	let mut _warmed = None;
+	if warm {
+		let link = link(&chain._relays[0], &other).await;
+		let track = request(&other).await.track("video").unwrap();
+		let mut reader = subscribe(&track, track::Subscription::default().with_groups(0..)).await;
+		read_until(&mut reader, 2).await;
+		_warmed = Some((link, reader));
+	}
+	let upstream = subscribes(&chain.links[0]);
+
+	let (_cursor, listed) = list_video(&chain.subscriber).await;
+	let floor = track::Range {
+		start: track::Anchor::Absolute(track::Position { group: 1, frame: 2 }),
+		end: None,
+	};
+	let mut resumed = subscribe(&listed, track::Subscription::default().with_ranges([floor])).await;
+	// In arrival order: the live group is already here, and the floor's group follows.
+	let mut group = loop {
+		let group = moq_clock::timeout(TIMEOUT, resumed.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("relay={relay} warm={warm}: group 1 never arrived"))
+			.expect("group")
+			.expect("track ended");
+		if group.sequence == 1 {
+			break group;
+		}
+	};
+	group.skip_to(2);
+	let mut frames = Vec::new();
+	while let Some(frame) = moq_clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("frame hung")
+		.expect("frame")
+	{
+		frames.push(String::from_utf8(frame.payload.to_vec()).unwrap());
+	}
+	assert_eq!(frames, ["1.2", "1.3"], "relay={relay} warm={warm}");
+
+	// The publisher answered the floor, unless the relay's cache already held it.
+	let asked = subscribes(&chain.links[0]) - upstream;
+	assert_eq!(asked, usize::from(!warm), "relay={relay} warm={warm}");
+}
+
+#[moq_clock::test]
+async fn resumes_a_listed_track_mid_group() {
+	resumes_mid_group(false, false).await;
+}
+
+#[moq_clock::test]
+async fn resumes_a_listed_track_mid_group_through_a_cold_relay() {
+	resumes_mid_group(true, false).await;
+}
+
+#[moq_clock::test]
+async fn resumes_a_listed_track_mid_group_through_a_warm_relay() {
+	resumes_mid_group(true, true).await;
+}
+
+/// A SUBSCRIBE_ALL carries what its tracks' readers ask for, updating it as they
+/// subscribe, through a relay too.
+async fn carries_reader_preferences(relay: bool) {
+	let chain = Chain::new(relay).await;
+	let (_broadcast, mut video) = publish_video(&chain.publisher);
+	let (_cursor, listed) = list_video(&chain.subscriber).await;
+	let mut reader = subscribe(&listed, track::Subscription::default().with_priority(7)).await;
+	read_until(&mut reader, 0).await;
+
+	let carried = kio::wait(|waiter| {
+		loop {
+			match video.poll_subscription_changed(waiter) {
+				std::task::Poll::Ready(Ok(Some(subscription))) if subscription.priority == 7 => {
+					return std::task::Poll::Ready(subscription);
+				}
+				std::task::Poll::Ready(Ok(_)) => continue,
+				std::task::Poll::Ready(Err(err)) => panic!("track aborted: {err}"),
+				std::task::Poll::Pending => return std::task::Poll::Pending,
+			}
+		}
+	});
+	let carried = moq_clock::timeout(TIMEOUT, carried)
+		.await
+		.unwrap_or_else(|_| panic!("relay={relay}: the reader's priority never reached the publisher"));
+	assert_eq!(carried.max_delay, Duration::from_secs(60), "relay={relay}");
+}
+
+#[moq_clock::test]
+async fn carries_reader_preferences_upstream() {
+	carries_reader_preferences(false).await;
+}
+
+#[moq_clock::test]
+async fn carries_reader_preferences_through_a_relay() {
+	carries_reader_preferences(true).await;
+}

@@ -20,7 +20,7 @@ use kio::Lock;
 
 #[path = "all_recv.rs"]
 mod all_recv;
-use all_recv::ListServe;
+use all_recv::{ListServe, ListedFeed, ListedResponse};
 
 pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	pub runtime: crate::time::Deadlines,
@@ -92,6 +92,13 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// How many TRACK_STARTs each open SUBSCRIBE_ALL has read, for a group stream that
 	/// arrives ahead of its track's.
 	started: Lock<HashMap<u64, kio::Consumer<u64>>>,
+	/// The copy this session holds of each broadcast an epoch names, by path: a request the
+	/// origin routes here and a SUBSCRIBE_ALL listing the broadcast resolve to the same one.
+	/// Without an epoch nothing says two are the same instance, so each keeps its own.
+	copies: Lock<HashMap<PathOwned, Vec<(crate::Epoch, crate::broadcast::Producer)>>>,
+	/// Every track a serve loop feeds, by broadcast path and name, for a SUBSCRIBE_ALL
+	/// listing one to join rather than feed a second copy.
+	served: Lock<HashMap<(PathOwned, Arc<str>), Vec<Served>>>,
 	going_away: crate::goaway::GoingAway,
 	auth: crate::auth::Handle,
 	/// What this session may allocate up front for frames still arriving.
@@ -149,6 +156,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			lister: Default::default(),
 			started: Default::default(),
+			copies: Default::default(),
+			served: Default::default(),
 			going_away: config.going_away,
 			auth: config.auth,
 			frames: Default::default(),
@@ -524,6 +533,40 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// Remove a subscription, releasing the session's handle on its producer.
 	fn remove_subscribe(&self, id: u64) {
 		self.subscribes.lock().remove(&Feed::subscribe(id));
+	}
+
+	/// The open copy of the broadcast `epoch` names at `path`, if this session holds one.
+	fn copy(&self, path: &PathOwned, epoch: Option<&crate::Epoch>) -> Option<crate::broadcast::Producer> {
+		let epoch = epoch?;
+		let copies = self.copies.lock();
+		let (_, source) = copies
+			.get(path)?
+			.iter()
+			.find(|(held, source)| held == epoch && !source.is_closed())?;
+		Some(source.clone())
+	}
+
+	/// Record the copy of the broadcast `epoch` names at `path`, for the next request or
+	/// listing of it.
+	fn hold_copy(&self, path: &PathOwned, epoch: Option<&crate::Epoch>, source: &crate::broadcast::Producer) {
+		let Some(epoch) = epoch else {
+			return;
+		};
+		let mut copies = self.copies.lock();
+		let held = copies.entry(path.clone()).or_default();
+		held.retain(|(_, source)| !source.is_closed());
+		held.push((epoch.clone(), source.clone()));
+	}
+
+	/// Forget the closed copies at `path`.
+	fn forget_copies(&self, path: &PathOwned) {
+		let mut copies = self.copies.lock();
+		if let Some(held) = copies.get_mut(path) {
+			held.retain(|(_, source)| !source.is_closed());
+			if held.is_empty() {
+				copies.remove(path);
+			}
+		}
 	}
 
 	/// Decode one datagram body and hand it to the matching subscription's producer.
@@ -1768,6 +1811,14 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 		// Newly requested tracks start now rather than on the next wake.
 		let _ = self.tracks.poll(waiter);
 		Poll::Pending
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for SourceServe<S> {
+	fn drop(&mut self) {
+		// Closed here rather than by the guard after this body, so the copy is forgotten.
+		self.source.close();
+		self.subscriber.forget_copies(&self.path);
 	}
 }
 
@@ -4979,7 +5030,13 @@ impl Announced {
 					continue;
 				};
 				let path = path.to_owned();
+				// A copy a SUBSCRIBE_ALL listed, or an earlier request resolved, serves it.
+				if let Some(copy) = subscriber.copy(&path, entry.route.epoch.as_ref()) {
+					request.accept(&copy);
+					continue;
+				}
 				let source = subscriber.origin.create_source(&path);
+				subscriber.hold_copy(&path, entry.route.epoch.as_ref(), &source);
 				// The handler exists before the requester sees the source, so a track it
 				// asks for before the serve machine first runs queues instead of failing
 				// `NotFound`. Accepted before the push, so the requester holds the source
@@ -5582,6 +5639,25 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 		Self { serve, state, gate }
 	}
 
+	/// Serve a track a SUBSCRIBE_ALL created, fed by `feed`: the upstream subscription
+	/// carries only what readers ask for below it.
+	fn listed(
+		serve: TrackServe<S>,
+		producer: track::Producer,
+		timescale: Option<Timescale>,
+		feed: ListedFeed,
+	) -> Self {
+		let dynamic = producer.dynamic();
+		let mut serve_loop = ServeLoop::serving(&serve, producer, dynamic, timescale);
+		serve_loop.listed = Some(Listed { feed, covered: None });
+		let gate = serve.gate();
+		Self {
+			serve,
+			state: TrackRunState::Serve(serve_loop),
+			gate,
+		}
+	}
+
 	/// The session no longer allows the broadcast: end the track and cancel the
 	/// upstream subscription and fetches, leaving the rest of the session alone.
 	fn revoke(&mut self) {
@@ -5849,6 +5925,66 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// The TRACK stream that answered, until a SUBSCRIBE has a response or nobody holds
 	/// the copy.
 	held: Option<HeldTrack<S>>,
+	/// The SUBSCRIBE_ALL feeding this track from its live edge, while one does. A
+	/// subscription then asks only for what the feed does not carry: a floor below it.
+	listed: Option<Listed>,
+	/// Where a SUBSCRIBE_ALL listing the track after a request did hands its feed over.
+	attach: kio::Queue<ListedFeed>,
+	_served: ServedGuard,
+}
+
+/// A listed track's feed, and how far down it and the subscriptions beside it reach.
+struct Listed {
+	feed: ListedFeed,
+	/// Everything from here on is the feed's or already delivered, once TRACK_OK said where
+	/// the feed starts.
+	covered: Option<Position>,
+}
+
+/// A track a serve loop feeds, for a SUBSCRIBE_ALL listing it to join.
+#[derive(Clone)]
+struct Served {
+	producer: track::Producer,
+	attach: kio::Queue<ListedFeed>,
+}
+
+/// Keeps a serve loop's track in [`Subscriber::served`] for as long as it runs.
+struct ServedGuard {
+	served: Lock<HashMap<(PathOwned, Arc<str>), Vec<Served>>>,
+	key: (PathOwned, Arc<str>),
+	attach: kio::Queue<ListedFeed>,
+}
+
+impl ServedGuard {
+	fn new<S: crate::transport::poll::Session>(serve: &TrackServe<S>, producer: &track::Producer) -> Self {
+		let key = (serve.path.clone(), Arc::from(serve.name.as_str()));
+		let attach = kio::Queue::new();
+		let mut served = serve.subscriber.served.lock();
+		served.entry(key.clone()).or_default().push(Served {
+			producer: producer.clone(),
+			attach: attach.clone(),
+		});
+		drop(served);
+		Self {
+			served: serve.subscriber.served.clone(),
+			key,
+			attach,
+		}
+	}
+}
+
+impl Drop for ServedGuard {
+	fn drop(&mut self) {
+		// A feed handed over too late drops with the queue, unregistering its groups.
+		self.attach.close();
+		let mut served = self.served.lock();
+		if let Some(loops) = served.get_mut(&self.key) {
+			loops.retain(|served| !served.attach.same_channel(&self.attach));
+			if loops.is_empty() {
+				served.remove(&self.key);
+			}
+		}
+	}
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -6035,8 +6171,22 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			false => request,
 		};
 		let serving = request.accept(info);
+		Self::serving(serve, serving, dynamic, timescale)
+	}
+
+	/// Serve a copy already accepted, `dynamic` fetching what its cache misses.
+	fn serving(
+		serve: &TrackServe<S>,
+		serving: track::Producer,
+		dynamic: track::Dynamic,
+		timescale: Option<Timescale>,
+	) -> Self {
 		serving.received();
+		let served = ServedGuard::new(serve, &serving);
 		Self {
+			attach: served.attach.clone(),
+			_served: served,
+			listed: None,
 			demand: serving.demand(),
 			serving,
 			dynamic,
@@ -6051,6 +6201,162 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
 		}
+	}
+
+	/// Apply a demand change: subscribe upstream for what the listed feed does not carry,
+	/// which for a track nothing lists is all of it.
+	fn steer(&mut self, serve: &TrackServe<S>, pref: Option<Subscription>) -> Result<(), ServeEnd> {
+		let pref = match &self.listed {
+			None => pref,
+			// Until TRACK_OK says where the feed starts, nothing says what it leaves out.
+			Some(Listed { covered: None, .. }) => return Ok(()),
+			Some(Listed {
+				covered: Some(covered), ..
+			}) => {
+				let covered = *covered;
+				// A floor below the feed's start, up to it. A subscription already open keeps
+				// delivering until it reaches the feed, so no group falls between the two.
+				let gap = pref.and_then(|mut pref| {
+					if matches!(self.sub, Sub::None) && pref.start().is_none_or(|start| start >= covered) {
+						return None;
+					}
+					let end = pref.end().map_or(covered, |end| end.min(covered));
+					pref.set_bounds(pref.start(), Some(end));
+					(end > pref.start().unwrap_or_default()).then_some(pref)
+				});
+				match gap {
+					Some(gap) => Some(gap),
+					None => {
+						self.release(serve);
+						return Ok(());
+					}
+				}
+			}
+		};
+		match serve.begin_subscription(
+			&mut self.serving,
+			&mut self.sub,
+			pref,
+			self.supports_update,
+			self.timescale,
+		) {
+			Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
+			Ok(Begin::None) => {}
+			// Updating the upstream failed: hand the track back for another route to resume.
+			Err(err) => return Err(ServeEnd::GiveBack(err)),
+		}
+		Ok(())
+	}
+
+	/// Cancel the upstream subscription beside a listed feed, which keeps the copy live.
+	fn release(&mut self, serve: &TrackServe<S>) {
+		let Sub::Active(active) = &mut self.sub else {
+			return;
+		};
+		serve.subscriber.remove_subscribe(active.id);
+		let _ = active.stream.writer.finish();
+		tracing::debug!(track = %serve.name, "subscribe canceled (listed)");
+		self.sub = Sub::None;
+		// The copy starts where the feed and what the subscription filled cover, which also
+		// answers a start the subscription still owed.
+		if let Some(Listed {
+			covered: Some(covered), ..
+		}) = &self.listed
+		{
+			let _ = self.serving.start_at(covered.group);
+		}
+	}
+
+	/// Take a feed handed over, then apply the listed feed's responses. `Ready(Ok)` once
+	/// the subscription should follow, saying whether the feed stopped with the track still
+	/// open, or `Ready(Err)` with how the track ends.
+	fn poll_listed(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<Result<bool, ServeEnd>> {
+		let mut changed = false;
+		while let Poll::Ready(Ok(mut feed)) = self.attach.poll_pop(waiter) {
+			// One SUBSCRIBE_ALL feeds the track at a time: another's groups go unread.
+			if self.listed.is_none() {
+				feed.count(self.serving.subscription().as_ref());
+				self.listed = Some(Listed { feed, covered: None });
+				changed = true;
+			}
+		}
+		while let Some(listed) = &mut self.listed {
+			match listed.feed.responses.poll_pop(waiter) {
+				Poll::Ready(Ok(ListedResponse::Ok(start))) => {
+					self.serving.set_live(start.largest);
+					if let Some(largest) = start.largest {
+						self.serving.report_largest(largest);
+					}
+					// An open subscription declared its own floor, below the feed's.
+					if matches!(self.sub, Sub::None) {
+						let _ = self.serving.start_at(start.group);
+					}
+					listed.covered = Some(Position::group(start.group));
+					changed = true;
+				}
+				Poll::Ready(Ok(ListedResponse::End(end))) => {
+					// Lower groups may still be on the wire behind the end, so readers wait at
+					// a hole until the feed's tail settles.
+					if self.serving.finish_at_pending(Position::group(end.group)).is_err() {
+						return Poll::Ready(Err(ServeEnd::GiveBack(Error::ProtocolViolation)));
+					}
+					if let Ok(mut tail) = listed.feed.tail.write() {
+						tail.expire(serve.subscriber.runtime.now());
+					}
+					self.mode = ServeMode::Tail {
+						settle: Settle::new(&serve.subscriber.runtime, listed.feed.tail.consume()),
+						owed: None,
+						streams: Some(end.streams),
+					};
+					return Poll::Ready(Ok(false));
+				}
+				Poll::Ready(Ok(ListedResponse::Reset(err))) => return Poll::Ready(Err(ServeEnd::GiveBack(err))),
+				// The request stopped feeding the track: it carries on like a requested one.
+				Poll::Ready(Err(_)) => {
+					self.listed = None;
+					return Poll::Ready(Ok(true));
+				}
+				Poll::Pending => break,
+			}
+		}
+		match changed {
+			true => Poll::Ready(Ok(false)),
+			false => Poll::Pending,
+		}
+	}
+
+	/// Ready once a subscription beside the listed feed delivered everything below it, which
+	/// cancels it: the copy then holds every group from its floor on.
+	fn poll_filled(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<()> {
+		let (
+			Some(Listed {
+				covered: Some(covered), ..
+			}),
+			Sub::Active(active),
+		) = (&self.listed, &self.sub)
+		else {
+			return Poll::Pending;
+		};
+		let covered = *covered;
+		let Some(floor) = active.start.or(active.served.map(Position::group)) else {
+			return Poll::Pending;
+		};
+		let groups = floor.group..covered.group;
+		let tail = active.tail.consume();
+		let filled = tail
+			.poll(waiter, |tail| match tail.covers(groups.clone()) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.is_ready();
+		if !filled {
+			return Poll::Pending;
+		}
+		if let Some(listed) = &mut self.listed {
+			listed.covered = Some(floor.min(covered));
+		}
+		self.release(serve);
+		Poll::Ready(())
 	}
 
 	fn poll(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<ServeEnd> {
@@ -6112,6 +6418,34 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 
 					// Biased: demand first, then completions, then closures.
 
+					// (0) A SUBSCRIBE_ALL's feed of the track: what it says, or a feed handed
+					// over, moves what the subscription has to carry.
+					match self.poll_listed(serve, waiter) {
+						Poll::Ready(Ok(took_over)) => {
+							if matches!(self.mode, ServeMode::Select) {
+								let mut pref = self.serving.subscription();
+								// A feed that stopped leaves the cache current to its newest group,
+								// so ask from there rather than from a live edge past a gap.
+								if took_over
+									&& matches!(self.sub, Sub::None)
+									&& let Some(pref) = &mut pref
+									&& pref.start().is_none()
+								{
+									pref.set_bounds(self.serving.latest_sequence().map(Position::group), pref.end());
+								}
+								if let Err(end) = self.steer(serve, pref) {
+									return Poll::Ready(end);
+								}
+							}
+							continue;
+						}
+						Poll::Ready(Err(end)) => return Poll::Ready(end),
+						Poll::Pending => {}
+					}
+					if self.poll_filled(serve, waiter).is_ready() {
+						continue;
+					}
+
 					// (1) Track demand: a fetch, a subscription change, or the origin
 					// handing the track to another route.
 
@@ -6134,18 +6468,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					}
 					match self.serving.poll_subscription_changed(waiter) {
 						Poll::Ready(Ok(pref)) => {
-							match serve.begin_subscription(
-								&mut self.serving,
-								&mut self.sub,
-								pref,
-								self.supports_update,
-								self.timescale,
-							) {
-								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
-								Ok(Begin::None) => {}
-								// Updating the upstream failed: hand the track back for
-								// another route to resume.
-								Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+							if let Some(listed) = &mut self.listed {
+								listed.feed.count(pref.as_ref());
+							}
+							if let Err(end) = self.steer(serve, pref) {
+								return Poll::Ready(end);
 							}
 							continue;
 						}
@@ -6163,7 +6490,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
 					// fetches keep it alive: work already accepted still gets finished.
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
+					// A listed copy stays for as long as its feed: it is part of the listing.
+					if self.listed.is_none() && self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
 						self.held = None;
 						if self.linger.deadline().is_none() {
 							let now = serve.subscriber.runtime.now();

@@ -390,6 +390,25 @@ impl Producer {
 		true
 	}
 
+	/// Whether `track` is the live track this broadcast serves under its name.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn serves(&self, track: &track::Producer) -> bool {
+		use super::WeakEntry;
+		let mut state = self.state.lock();
+		state
+			.tracks
+			.get(track.name())
+			.is_some_and(|live| live.same_channel(&track.weak()))
+	}
+
+	/// Whether the broadcast has ended: it takes no new tracks.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn is_closed(&self) -> bool {
+		self.state.lock().closing
+	}
+
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.

@@ -3371,8 +3371,9 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	start: Option<u64>,
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
-	// Groups skipped for a missing head before the start resolved, which it must not name.
-	skipped: BTreeSet<u64>,
+	// Groups given up before the start resolved (a missing head, stale, or dropped
+	// upstream), which it must not name.
+	skipped: RangeSet<u64>,
 	end_sent: bool,
 	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
 	// boundary is known, once every group below it has opened its stream.
@@ -3413,7 +3414,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start: None,
 			first: None,
-			skipped: BTreeSet::new(),
+			skipped: RangeSet::new(),
 			end_sent: false,
 			count_streams,
 			served,
@@ -3446,12 +3447,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let requested = self.track.subscription().start().map(|start| start.group);
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
-		let _ = self.track.update(crate::track::Subscription {
+		let _ = self.track.update(self.listed_demand(crate::track::Subscription {
 			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
 			order: upd.order,
 			..bounds.positions()
-		});
+		}));
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
 		// drop back to 0: the cursor only rises on its own, and a finished group
@@ -3459,10 +3460,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// cursor that was already at 0 stays where the first served group put it.
 		// No fresh SUBSCRIBE_START follows: the subscriber clears its permanent-miss
 		// floor on the same update, so both sides have to change together.
-		// Pre-06 an absent start means the latest group: see the re-pin below.
+		// Pre-06 an absent start means the latest group: see the re-pin below. A listed
+		// track's floor is its resolved start (see `listed_demand`), which no update moves.
 		let lowered = match upd.start_group {
 			Some(start_group) => Some(start_group),
-			None if floored && self.ctx.version.resolves_start() => Some(0),
+			None if floored && self.ctx.version.resolves_start() && self.ctx.track.is_none() => Some(0),
 			None => None,
 		};
 		// `position_cursor` pins an unfloored SUBSCRIBE to the latest group, so a pre-06
@@ -3583,7 +3585,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						// only be reset; the next servable group resolves the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
-							self.skipped.insert(group.sequence);
+							self.skipped.insert(group.sequence..group.sequence.saturating_add(1));
 						} else if self.start.is_some()
 							&& let Some(end) = group.sequence.checked_add(1)
 						{
@@ -3633,17 +3635,21 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		Poll::Pending
 	}
 
-	/// Lite-05/06 name a sequence as soon as this cursor gives it up; whether one went out.
+	/// Lite-05/06 name a sequence as soon as this cursor gives it up; whether one was taken.
 	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
-	/// for it instead.
+	/// for it instead: polled from the first step, the cursor records what it gives up on
+	/// the way to its first group.
 	fn poll_forward_drop(&mut self, out: &mut impl Respond, waiter: &kio::Waiter) -> Result<bool, Error> {
-		if self.start.is_none() || self.served.is_none() {
+		if !self.emit_range || (self.start.is_some() && self.served.is_none()) {
 			return Ok(false);
 		}
 		let Poll::Ready(range) = self.track.poll_drop(waiter) else {
 			return Ok(false);
 		};
-		self.drop_range(range, out)?;
+		match self.start {
+			None => self.skipped.insert(range),
+			Some(_) => self.drop_range(range, out)?,
+		}
 		Ok(true)
 	}
 
@@ -3715,13 +3721,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// drop the older one for good.
 	fn start(&mut self, group: group::Consumer, source: Option<u64>, out: &mut impl Respond) -> Result<(), Error> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
-		// A skipped group is never served, so it cannot be where the feed starts. This stops
-		// at the held group at the latest, since it was not skipped.
-		while self.skipped.contains(&start) {
-			start += 1;
+		// A group given up is never served, so it cannot be where the feed starts. This stops
+		// at the held group at the latest.
+		if let Some(skipped) = self.skipped.get(&start) {
+			start = skipped.end.min(group.sequence);
 		}
-		self.skipped.clear();
+		self.skipped = RangeSet::new();
 		self.start = Some(start);
+		if self.ctx.track.is_some() {
+			let _ = self.track.update(self.listed_demand(self.track.subscription()));
+		}
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
 		// was readable.
@@ -3748,6 +3757,18 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 		self.serve(group);
 		Ok(())
+	}
+
+	/// A SUBSCRIBE_ALL track's demand from its resolved start on. It asked for no bounds,
+	/// so once its start resolves that is all it asks for, and a relay serving it still
+	/// sees another reader asking below it.
+	fn listed_demand(&self, mut subscription: crate::track::Subscription) -> crate::track::Subscription {
+		if self.ctx.track.is_some()
+			&& let Some(start) = self.start
+		{
+			subscription.set_bounds(Some(track::Position::group(start)), subscription.end());
+		}
+		subscription
 	}
 
 	/// Open a group machine for `group`.
@@ -5467,6 +5488,36 @@ mod serve_group_test {
 			run.await.unwrap();
 		}
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1), (3, 3)]);
+	}
+
+	/// SUBSCRIBE_START names where delivery starts, so a start the source declared below
+	/// cached groups this subscription's budget skips is raised past them: a warm relay
+	/// answers as a cold one would.
+	#[moq_clock::test]
+	async fn the_start_names_past_the_stale_groups_it_skips() {
+		let version = Version::Lite07;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.start_at(0).unwrap();
+		for sequence in 0..3 {
+			write_group(&mut track, sequence, sequence * 10);
+		}
+		let subscriber = track.subscribe(track::Subscription::default());
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		assert!(kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never().is_none());
+		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap().clone();
+		let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, version).unwrap();
+		let lite::SubscribeResponse::Start(start) = msg else {
+			panic!("expected SUBSCRIBE_START, got {msg:?}");
+		};
+		assert_eq!(start.group, 2, "named groups it skipped as stale");
 	}
 
 	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the

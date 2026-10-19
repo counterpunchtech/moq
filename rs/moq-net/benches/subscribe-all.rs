@@ -22,7 +22,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Epoch, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const VERSION: &str = "moq-lite-07-wip";
@@ -76,6 +76,11 @@ async fn read(subscriber: &mut track::Subscriber) -> u64 {
 	group.sequence
 }
 
+/// Announced with an epoch, so a relay's listing and its requests share one copy.
+fn route() -> origin::Route {
+	origin::Route::default().with_epoch(Epoch::mint())
+}
+
 fn subscription() -> track::Subscription {
 	track::Subscription::default().with_max_delay(Duration::from_secs(60))
 }
@@ -117,7 +122,7 @@ impl Room {
 				write(&track, 0);
 				tracks.push(track);
 			}
-			broadcast.announce(Default::default()).unwrap();
+			broadcast.announce(route()).unwrap();
 			held.push(broadcast);
 		}
 
@@ -197,7 +202,7 @@ impl Room {
 		let broadcast = self.publisher.create_broadcast(format!("room/new{index}")).unwrap();
 		let track = broadcast.create_track("0", timed()).unwrap();
 		write(&track, 0);
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce(route()).unwrap();
 		for lister in &mut self.listers {
 			let consumer = match lister.cursor.as_mut() {
 				Some(cursor) => {
