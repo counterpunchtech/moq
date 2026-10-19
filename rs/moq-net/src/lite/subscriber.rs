@@ -5641,12 +5641,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 
 	/// Serve a track a SUBSCRIBE_ALL created, fed by `feed`: the upstream subscription
 	/// carries only what readers ask for below it.
-	fn listed(
-		serve: TrackServe<S>,
-		producer: track::Producer,
-		timescale: Option<Timescale>,
-		feed: ListedFeed,
-	) -> Self {
+	fn listed(serve: TrackServe<S>, producer: track::Producer, timescale: Option<Timescale>, feed: ListedFeed) -> Self {
 		let dynamic = producer.dynamic();
 		let mut serve_loop = ServeLoop::serving(&serve, producer, dynamic, timescale);
 		serve_loop.listed = Some(Listed { feed, covered: None });

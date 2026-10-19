@@ -5547,7 +5547,11 @@ mod serve_group_test {
 		}
 		let subscriber = track.subscribe(track::Subscription::default());
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
-		assert!(kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never().is_none());
+		assert!(
+			kio::wait(|waiter| run.poll(&mut writer, waiter))
+				.now_or_never()
+				.is_none()
+		);
 		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
 			.await
 			.unwrap();

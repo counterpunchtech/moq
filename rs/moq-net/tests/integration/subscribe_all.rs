@@ -415,10 +415,13 @@ async fn list_video(origin: &origin::Producer) -> (origin::Broadcasts, track::Co
 }
 
 async fn subscribe(track: &track::Consumer, subscription: track::Subscription) -> track::Subscriber {
-	moq_clock::timeout(TIMEOUT, track.subscribe(subscription.with_max_delay(Duration::from_secs(60))))
-		.await
-		.expect("subscribe hung")
-		.expect("subscribe")
+	moq_clock::timeout(
+		TIMEOUT,
+		track.subscribe(subscription.with_max_delay(Duration::from_secs(60))),
+	)
+	.await
+	.expect("subscribe hung")
+	.expect("subscribe")
 }
 
 /// Read groups until `sequence` arrives.
