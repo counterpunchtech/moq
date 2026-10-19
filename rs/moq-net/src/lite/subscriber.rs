@@ -18,6 +18,10 @@ use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
 
+#[path = "all_recv.rs"]
+mod all_recv;
+use all_recv::ListServe;
+
 pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	pub runtime: crate::time::Deadlines,
 	pub session: S,
@@ -82,6 +86,12 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// Sources minted by the announce half, drained by the driver into
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<MintedSource>,
+	/// Listings the announce half's routes were asked for, drained by the driver into
+	/// one [`ListServe`] per prefix.
+	listings: kio::Queue<crate::model::Listing>,
+	/// How many TRACK_STARTs each open SUBSCRIBE_ALL has read, for a group stream that
+	/// arrives ahead of its track's.
+	started: Lock<HashMap<u64, kio::Consumer<u64>>>,
 	going_away: crate::goaway::GoingAway,
 	auth: crate::auth::Handle,
 	/// What this session may allocate up front for frames still arriving.
@@ -137,6 +147,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			peer_setup: config.peer_setup,
 			cost: config.cost,
 			sources: kio::Queue::new(),
+			listings: kio::Queue::new(),
+			started: Default::default(),
 			going_away: config.going_away,
 			auth: config.auth,
 			frames: Default::default(),
@@ -603,6 +615,9 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	datagrams: Option<DatagramRecv<S>>,
 	/// One machine per minted source, serving the origin's track requests.
 	sources: kio::Tasks<SourceServe<S>>,
+	/// Each prefix's upstream SUBSCRIBE_ALL, by the queue it takes further listings on.
+	lists: HashMap<PathOwned, kio::Queue<crate::model::Listing>>,
+	list_serves: kio::Tasks<ListServe<S>>,
 }
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
@@ -621,6 +636,8 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
 			sources: kio::Tasks::new(),
+			lists: HashMap::new(),
+			list_serves: kio::Tasks::new(),
 			subscriber,
 		}
 	}
@@ -674,7 +691,33 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		}
 		let _ = self.sources.poll(waiter);
 
+		while let Poll::Ready(Ok(listing)) = self.subscriber.listings.poll_pop(waiter) {
+			self.list(listing);
+		}
+		let _ = self.list_serves.poll(waiter);
+
 		Poll::Pending
+	}
+
+	/// Fill a listing from the prefix's upstream SUBSCRIBE_ALL, opening it if none is live.
+	fn list(&mut self, listing: crate::model::Listing) {
+		// The listing names the prefix absolutely; the wire speaks relative to our root.
+		let Some(prefix) = listing.prefix().strip_prefix(self.subscriber.origin.root()) else {
+			return;
+		};
+		let prefix = prefix.to_owned();
+		let listing = match self.lists.get(&prefix) {
+			Some(input) => match input.try_push(listing) {
+				Ok(()) => return,
+				Err(err) => err.into_inner(),
+			},
+			None => listing,
+		};
+		self.lists.retain(|_, input| !input.is_closed());
+		let input = kio::Queue::new();
+		self.lists.insert(prefix.clone(), input.clone());
+		self.list_serves
+			.push(ListServe::new(self.subscriber.clone(), prefix, input, listing));
 	}
 }
 
@@ -859,6 +902,10 @@ struct GroupRecv<S: crate::transport::poll::Session> {
 	reader: Reader<S::RecvStream, Version>,
 	/// Whether the stream carries a SUBSCRIBE_ALL track (0x2) rather than a SUBSCRIBE's.
 	listed: bool,
+	/// A header read ahead of its track's TRACK_START.
+	header: Option<(Feed, lite::Group)>,
+	/// How many TRACK_STARTs the stream's SUBSCRIBE_ALL has read, while waiting for one.
+	started: Option<kio::Consumer<u64>>,
 	state: GroupRecvState,
 }
 
@@ -887,6 +934,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			subscriber,
 			reader,
 			listed,
+			header: None,
+			started: None,
 			state: GroupRecvState::Header,
 		}
 	}
@@ -916,7 +965,33 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			match &mut self.state {
 				GroupRecvState::Header => {
 					let mut cx = waiter.context();
-					let (feed, hdr) = ready!(self.poll_header(&mut cx))?;
+					let (feed, hdr) = match self.header.take() {
+						Some(header) => header,
+						None => ready!(self.poll_header(&mut cx))?,
+					};
+					// A SUBSCRIBE_ALL track's group can beat its TRACK_START, which travels on
+					// another stream: wait for the request to read it.
+					if let Some(track) = feed.track
+						&& !self.subscriber.subscribes.lock().contains_key(&feed)
+					{
+						if self.started.is_none() {
+							let started = self.subscriber.started.lock().get(&feed.subscribe).cloned();
+							self.started = Some(started.ok_or(Error::Cancel)?);
+						}
+						let started = self.started.as_ref().expect("set above");
+						match started.poll(waiter, |count| match **count > track {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						}) {
+							Poll::Ready(Ok(_)) => {}
+							// The request ended before it named the track.
+							Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
+							Poll::Pending => {
+								self.header = Some((feed, hdr));
+								return Poll::Pending;
+							}
+						}
+					}
 
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
@@ -4915,6 +4990,14 @@ impl Announced {
 					dynamic,
 					route: entry.live.consume(),
 				});
+			}
+			// A reader listing a prefix this route covers. The session answers every route's
+			// listing of a prefix with one SUBSCRIBE_ALL. An older peer has none, and nothing
+			// emulates it: the listing stays empty.
+			while let Poll::Ready(Ok(listing)) = entry.dynamic.poll_requested_listing(route_waiter) {
+				if subscriber.version.has_subscribe_all() {
+					let _ = subscriber.listings.try_push(listing);
+				}
 			}
 		}
 	}

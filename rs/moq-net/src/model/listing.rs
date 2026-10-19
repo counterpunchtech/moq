@@ -61,11 +61,6 @@ impl Listing {
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
 	}
-
-	/// Whether this lists `prefix` into the same readers as `other`.
-	pub fn same_channel(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
-	}
 }
 
 /// What a [`Broadcasts`] cursor reads from one listing.
