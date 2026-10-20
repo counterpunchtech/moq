@@ -849,10 +849,8 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
             *offset + lease.len() as u64 <= written,
             "leased past what was written"
         );
-        let mut at = *offset;
-        for &byte in lease.chunks().flatten().take(n) {
+        for (at, &byte) in (*offset..).zip(lease.chunks().flatten().take(n)) {
             assert_eq!(byte, stream_byte(writer, id, at), "corrupt stream data");
-            at += 1;
         }
     }
     *offset += n as u64;
