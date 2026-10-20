@@ -179,14 +179,14 @@ impl State {
 				request.reject(err.clone());
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort_session(err.clone());
+				let _ = producer.abort(err.clone());
 			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
 				let _ = producer.handle().abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
-			let _ = producer.abort_session(err.clone());
+			let _ = producer.abort(err.clone());
 		}
 	}
 	fn close(&mut self) {

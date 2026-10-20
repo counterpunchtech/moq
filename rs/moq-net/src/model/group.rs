@@ -700,6 +700,10 @@ struct Alive {
 	// Whether the abort was the publisher giving the group up rather than cache policy
 	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
 	cut: AtomicBool,
+	// Monotone mirror of `GroupState::started` for the first frame or the finish, set after
+	// the group lock is released and before the track is told: a track scan reading a stale
+	// false judges the group frameless until that wake re-judges it.
+	started: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -823,6 +827,7 @@ impl Producer {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
 			cut: AtomicBool::new(false),
+			started: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -845,9 +850,8 @@ impl Producer {
 		self
 	}
 
-	/// The group header.
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn info(&self) -> Info {
+	/// The group's header, as it was created.
+	pub fn info(&self) -> Info {
 		self.handle.info
 	}
 
@@ -950,6 +954,7 @@ impl Producer {
 			track.share_bound(self.handle.info.sequence, start);
 		}
 		drop(track);
+		self.handle.start();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1037,6 +1042,9 @@ impl Producer {
 			track.share_bound(self.handle.info.sequence, start);
 		}
 		drop(track);
+		if count > 0 {
+			self.handle.start();
+		}
 
 		self.handle.cache.settle(now);
 		if let Some(latest) = latest {
@@ -1159,6 +1167,7 @@ impl Producer {
 			track.share_bound(self.handle.info.sequence, start);
 		}
 		drop(track);
+		self.handle.start();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1246,6 +1255,9 @@ impl Producer {
 		let mut state = modify(&self.handle.state)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		state.fin = Some(state.next_index);
+		drop(state);
+		// An empty group counts as content once it ends.
+		self.handle.start();
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
 		Ok(())
@@ -1408,6 +1420,7 @@ impl Handle {
 		}
 		let now = state.charge.add(payload + metadata + growth);
 		drop(state);
+		self.start();
 		self.cache.settle(now);
 	}
 
@@ -1535,11 +1548,29 @@ impl Handle {
 		self.state.same_channel(&other.state)
 	}
 
-	/// Whether the group opened its first frame, or ended without one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn is_started(&self) -> bool {
-		self.state.read().started()
+	/// Whether the group opened its first frame or finished, so the track counts it as
+	/// content. An aborted group is not content either way.
+	///
+	/// Reads the mirror rather than the group's state, so a track scan holding the track
+	/// lock never takes the group's.
+	pub(super) fn is_started(&self) -> bool {
+		self.alive.started.load(Ordering::Relaxed)
+	}
+
+	/// The first frame opened or the group finished: tell the track once, so it re-judges
+	/// the reads that skipped this group while it was frameless. Called with the group
+	/// lock released, since the track's is taken first.
+	fn start(&self) {
+		if self.alive.started.swap(true, Ordering::Relaxed) {
+			return;
+		}
+		let Some(track) = self.cache.track() else {
+			return;
+		};
+		let answers = track.read().reveal(self);
+		if answers && let Ok(mut state) = track.write() {
+			state.shown(self.sequence);
+		}
 	}
 
 	/// Where the group starts in presentation time: its first frame's timestamp, or

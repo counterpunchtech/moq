@@ -1604,7 +1604,7 @@ mod test {
 
 			let b = copy();
 			let dynamic = b.dynamic();
-			let mut newer = b.receive_group(group::Info { sequence: 1 }).unwrap();
+			let mut newer = b.create_group(group::Info { sequence: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
 			routes.serve(b.consume());
@@ -1621,7 +1621,7 @@ mod test {
 			);
 
 			if arrives {
-				let mut late = b.receive_group(group::Info { sequence: 0 }).unwrap();
+				let mut late = b.create_group(group::Info { sequence: 0 }).unwrap();
 				late.write_frame(ts(0), b"first".as_ref()).unwrap();
 				late.write_frame(ts(1), b"continued".as_ref()).unwrap();
 				late.finish().unwrap();
@@ -2953,6 +2953,8 @@ mod test {
 			assert_eq!(read(&mut group), Some(b"held".to_vec()));
 
 			let b = copy();
+			// A route's copy, whose received timestamps are never checked for a rewind.
+			b.received();
 			routes.serve(b.consume());
 			let groups = groups
 				.iter()
@@ -3023,7 +3025,8 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_its_successor_aborts() {
-		let mut held = Held::new(&[(3, None), (4, Some(4000)), (5, Some(5000))]);
+		// A frameless successor bounds nothing, so it takes one that started near the edge.
+		let mut held = Held::new(&[(3, Some(4950)), (4, Some(4000)), (5, Some(5000))]);
 		// Group 4 succeeds it instead, a full second behind the edge.
 		held.groups.remove(&3).unwrap().abort(Error::Dropped).unwrap();
 		assert!(held.woken(), "the successor's abort wakes the held group");
