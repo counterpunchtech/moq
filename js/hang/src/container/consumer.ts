@@ -536,7 +536,10 @@ export class Consumer {
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
-					this.#hole = this.#groups.reduce((min, group) => (group.arrived < min ? group.arrived : min), head.arrived);
+					this.#hole = this.#groups.reduce(
+						(min, group) => (group.arrived < min ? group.arrived : min),
+						head.arrived,
+					);
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
