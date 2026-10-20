@@ -6,4 +6,4 @@ Name: moq-c
 Description: Media over QUIC for C
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}
-Libs: -L${libdir} -lmoq -lmoq_ffi@MOQ_LIBS_PC@
+Libs: -L${libdir} -lmoq -lmoq_c_ffi@MOQ_LIBS_PC@

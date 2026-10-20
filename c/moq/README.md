@@ -18,6 +18,6 @@ The generator is the one the C++ package pins; see [cpp/moq](../../cpp/moq/READM
 
 ## Shape
 
-The implementation is C++17 over the generated C++ bindings, compiled into `libmoq.a` (`moq.lib`) beside moq-ffi's `libmoq_ffi.a` (`moq_ffi.lib`), so a C program needs no C++ compiler, but its link adds the C++ runtime, which the CMake package and `moq-c.pc` name. Both libraries use the release CRT (`/MD`) on MSVC in every configuration.
+The implementation is C++17 over the generated C++ bindings, compiled into `libmoq.a` (`moq.lib`) beside moq-ffi's staticlib, installed as `libmoq_c_ffi.a` (`moq_c_ffi.lib`) so moq-cpp's copy can share the prefix, so a C program needs no C++ compiler, but its link adds the C++ runtime, which the CMake package and `moq-c.pc` name. Both libraries use the release CRT (`/MD`) on MSVC in every configuration.
 
 This package and the C++ package, `moq-cpp`, each embed moq-ffi, so one program links one of them, never both, and they install to separate prefixes.

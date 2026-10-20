@@ -9,94 +9,7 @@ endif()
 project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
 set(_workspace "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-set(MOQ_FFI_DIR "" CACHE PATH "Extracted default-feature moq-ffi native package")
-if(MOQ_FFI_DIR)
-    get_filename_component(MOQ_FFI_DIR "${MOQ_FFI_DIR}" ABSOLUTE)
-    file(READ "${MOQ_FFI_DIR}/manifest.json" _manifest)
-    foreach(_field version target features profile source)
-        string(JSON _input_${_field} GET "${_manifest}" ${_field})
-    endforeach()
-    if(NOT _input_features STREQUAL "default" OR NOT _input_profile STREQUAL "release")
-        message(FATAL_ERROR "Prebuilt moq-ffi requires default features and release profile")
-    endif()
-    if(NOT _input_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$")
-        message(FATAL_ERROR "Malformed prebuilt moq-ffi version: ${_input_version}")
-    endif()
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-            set(_ffi_target aarch64-unknown-linux-gnu)
-        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-            set(_ffi_target x86_64-unknown-linux-gnu)
-        endif()
-    elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        set(_ffi_target aarch64-apple-darwin)
-    elseif(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
-        set(_ffi_target x86_64-pc-windows-msvc)
-    endif()
-    if(NOT DEFINED _ffi_target OR NOT _ffi_target STREQUAL _input_target)
-        message(FATAL_ERROR "Prebuilt moq-ffi target ${_input_target} does not match this host")
-    endif()
-else()
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(_profile debug)
-        set(_cargo_flags "")
-    else()
-        set(_profile release)
-        set(_cargo_flags --release)
-    endif()
-    # A build target, even the host's, moves the library under <triple>/, which cargo metadata
-    # does not report. A `[build] target` in a cargo config fails later, at the missing library.
-    if(DEFINED ENV{CARGO_BUILD_TARGET})
-        message(FATAL_ERROR "Unsupported CARGO_BUILD_TARGET: moq-ffi builds for the host here; unset it")
-    endif()
-    # Ask cargo, so CARGO_TARGET_DIR (even relative) and a configured build.target-dir both land
-    # where the build below puts the library.
-    execute_process(
-        COMMAND cargo metadata --locked --no-deps --format-version 1
-        WORKING_DIRECTORY "${_workspace}"
-        OUTPUT_VARIABLE _cargo_metadata
-        COMMAND_ERROR_IS_FATAL ANY
-    )
-    string(JSON _cargo_target GET "${_cargo_metadata}" target_directory)
-endif()
-
-if(MOQ_FFI_DIR)
-    set(_cargo_target "${MOQ_FFI_DIR}/lib")
-    set(_profile "")
-endif()
-if(WIN32)
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/moq_ffi.lib")
-    set(_metadata "${_cargo_target}/${_profile}/moq_ffi.dll")
-elseif(APPLE)
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
-    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.dylib")
-else()
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
-    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.so")
-endif()
-if(MOQ_FFI_DIR)
-    foreach(_input "${MOQ_FFI_LIB}" "${_metadata}" "${MOQ_FFI_DIR}/native-libs.txt")
-        if(NOT EXISTS "${_input}")
-            message(FATAL_ERROR "Missing prebuilt FFI input: ${_input}")
-        endif()
-    endforeach()
-    set(_cargo_ffi "")
-else()
-    # The OpenH264 software fallback is opt-in in Rust; the C++ package ships it, like the
-    # prebuilt input does.
-    # One cargo target per build tree, so a project adding both c/moq and cpp/moq (which build
-    # the same moq-ffi) has one rule for its outputs, as Ninja requires.
-    if(NOT TARGET moq_ffi_cargo)
-        add_custom_target(moq_ffi_cargo
-            COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags}
-            WORKING_DIRECTORY "${_workspace}"
-            BYPRODUCTS "${MOQ_FFI_LIB}" "${_metadata}"
-            COMMENT "Building moq-ffi"
-            VERBATIM
-        )
-    endif()
-    set(_cargo_ffi moq_ffi_cargo)
-endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-ffi.cmake")
 
 find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 
@@ -112,7 +25,7 @@ set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
 list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_paths)
 add_custom_target(moq_ffi ALL
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
-    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
+    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${MOQ_FFI_METADATA}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_render_paths} "${_generated}"
@@ -121,36 +34,9 @@ add_custom_target(moq_ffi ALL
     COMMENT "Rendering the moq-ffi C++ bindings"
     VERBATIM
 )
-if(_cargo_ffi)
-    add_dependencies(moq_ffi ${_cargo_ffi})
+if(MOQ_FFI_CARGO)
+    add_dependencies(moq_ffi ${MOQ_FFI_CARGO})
 endif()
-# System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
-# dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
-if(APPLE)
-    set(_platform apple)
-elseif(WIN32)
-    set(_platform windows)
-else()
-    set(_platform linux)
-endif()
-if(MOQ_FFI_DIR)
-    set(_native_libs "${MOQ_FFI_DIR}/native-libs.txt")
-else()
-    set(_native_libs "${_workspace}/rs/moq-c/native-libs/${_platform}.txt")
-endif()
-file(STRINGS "${_native_libs}" _lines)
-set(MOQ_NATIVE_LIBS "")
-foreach(_line IN LISTS _lines)
-    string(STRIP "${_line}" _line)
-    if(_line STREQUAL "" OR _line MATCHES "^#")
-        continue()
-    elseif(_line MATCHES "^framework:(.+)$")
-        list(APPEND MOQ_NATIVE_LIBS "-framework ${CMAKE_MATCH_1}")
-    else()
-        list(APPEND MOQ_NATIVE_LIBS "${_line}")
-    endif()
-endforeach()
-
 # The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
 # default, at least C++17) and with its flags.
 # Named moq-cpp so an in-tree build can sit beside moq-c's `moq` target.

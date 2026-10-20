@@ -12,7 +12,7 @@ Every call changes shape once; the names are moq-ffi's in snake case, and `<moq/
 | 0.7 | 0.8 |
 | --- | --- |
 | `#include <moq.h>` | `#include <moq/moq.h>` |
-| `-lmoq` | `-lmoq -lmoq_ffi` plus the C++ runtime; take them from `pkg-config --libs moq-c` or `moq::c` |
+| `-lmoq` | `-lmoq -lmoq_c_ffi` plus the C++ runtime; take them from `pkg-config --libs moq-c` or `moq::c` |
 | `int32_t` handles | opaque pointers, each released with its `moq_<type>_free` |
 | a negative return code, then `moq_error()` | a returned `moq_error *` (NULL on success) with `tag`, its fields, and `moq_error_message()`; free it with `moq_error_free` |
 | results written to `dst` | results written to the last argument, `out` |
@@ -49,7 +49,7 @@ moq_task *task = moq_track_consumer_read_frame(track, on_frame, user_data);
 // Free it after the callback, or before to cancel the read.
 ```
 
-The archive holds the compiled C API (`libmoq.a` / `moq.lib`) and moq-ffi's staticlib (`libmoq_ffi.a` / `moq_ffi.lib`), and links the C++ runtime.
+The archive holds the compiled C API (`libmoq.a` / `moq.lib`) and moq-ffi's staticlib, installed as `libmoq_c_ffi.a` / `moq_c_ffi.lib` so it never overwrites moq-cpp's, and links the C++ runtime.
 It embeds the same Rust runtime as the C++ package, `moq-cpp`, so a program links one of the two, never both.
 
 ## moq-c 0.7, the hand-written ABI
