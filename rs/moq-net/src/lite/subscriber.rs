@@ -42,7 +42,7 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 }
 
 #[derive(Clone)]
@@ -83,7 +83,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<MintedSource>,
 	going_away: crate::goaway::GoingAway,
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	/// What this session may allocate up front for frames still arriving.
 	frames: frame::Budget,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
@@ -2434,7 +2434,7 @@ mod tests {
 					peer_hop: None,
 					cost: None,
 					going_away: Default::default(),
-					auth: crate::auth::Handle::new(false),
+					auth: crate::auth::Link::new(false),
 				});
 				let track = track::Producer::new(
 					std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -2489,7 +2489,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 
 			let mut track = track::Producer::new(
@@ -2564,7 +2564,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let pool = crate::cache::Pool::unbounded();
 		let track = track::Producer::new(
@@ -2723,7 +2723,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let track = track::Producer::new(
@@ -2792,7 +2792,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let track = track::Producer::new(
@@ -2857,7 +2857,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -2929,7 +2929,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -2976,7 +2976,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -3075,7 +3075,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -3142,7 +3142,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -3202,7 +3202,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -3244,7 +3244,7 @@ mod tests {
 	/// holding its task and track until a token that may never be answered.
 	#[moq_clock::test]
 	async fn an_unused_track_stops_waiting_for_auth() {
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let _token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -3315,7 +3315,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -3370,7 +3370,7 @@ mod tests {
 		// Writes park, so the SUBSCRIBE is on an open stream but not yet flushed.
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
-		let auth = crate::auth::Handle::new(false);
+		let auth = crate::auth::Link::new(false);
 
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -3410,7 +3410,7 @@ mod tests {
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1, "the SUBSCRIBE stream is open");
 
-		auth.authorize(&crate::auth::Grant::default());
+		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
 
 		let unauthorized = crate::StreamError::Unauthorized.to_code();
@@ -3446,7 +3446,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast
@@ -3515,7 +3515,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
@@ -3565,7 +3565,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
@@ -4076,7 +4076,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -4131,7 +4131,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let mut announced = Announced::default();
@@ -4185,7 +4185,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let path = Path::new("pool").to_owned();
 		let mut announced = Announced::default();
@@ -4254,7 +4254,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let mut announced = Announced::default();
 		subscriber
@@ -4310,7 +4310,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -4369,7 +4369,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -4428,7 +4428,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// The sender's identity is already in the chain: the route came back through it.
@@ -4495,7 +4495,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// The path as advertised to the peer: our hop is already in the chain.
@@ -4555,7 +4555,7 @@ mod tests {
 			peer_hop: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -4602,7 +4602,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]).unwrap();
@@ -4684,7 +4684,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		(subscriber, consumer)
 	}
@@ -4752,7 +4752,7 @@ mod tests {
 		let mut cursor = consumer.announced();
 		cursor.expect_next_active("room/host").await;
 
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: Default::default(),
 			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
 			expires: None,
@@ -4793,7 +4793,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -4877,7 +4877,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
 		let mut cursor = consumer.announced();
@@ -4944,7 +4944,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		(AnnouncePrefix::new(subscriber, Path::new("").to_owned()), consumer)
 	}
@@ -5115,7 +5115,7 @@ mod tests {
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
