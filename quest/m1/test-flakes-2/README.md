@@ -33,6 +33,20 @@ known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Public API: none. Wire: none.
 
+Audit on 2026-10-19: one `just check --all` run passed on the source tree at
+`48c8a66ddd`. The Rust default pass ran 8,943 tests, including the known
+publisher-disconnect exception above. The net-feature, capture, and playback
+passes ran another 1,025, 515, and 217 tests respectively; Python ran 102.
+JS workspace tests and the remaining checks passed. Swift skipped because
+this Linux host had no Swift toolchain.
+
+The run used the pinned Nix shell on a 16-core host, with CPU affinity 0-3
+and Cargo and nextest concurrency limited to two. Sampled
+one-minute shared-host load ranged from about 1.6 to 6.1. No new flake was
+reproduced and no source fix was needed, but this single unsaturated run
+does not finish the repeated loaded-host validation. Keep this quest open
+until those runs complete. The separate media/browser harness was not run.
+
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
