@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### `MoqAudioEncoderFinish` is `MoqAudioEncoderFinished` (#PR)
+### `MoqAudioEncoderFinish` is `MoqAudioEncoderFinished` (#6052)
 
 The record `MoqAudioEncoder::finish` returns is renamed, so its C name no longer collides with the method's.
 The wrappers' `EncoderFinish` aliases are unchanged.

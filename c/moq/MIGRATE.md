@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### The C API is generated from moq-ffi (0.8.0)
+### The C API is generated from moq-ffi (#6052)
 
 moq-c 0.8.0 replaces the hand-written ABI with one generated from moq-ffi, the crate every other binding wraps, so a function here means what its method means in Python, Go, or C++.
 Every call changes shape once; the names are moq-ffi's in snake case, and `<moq/ffi/moq.h>` documents each one.

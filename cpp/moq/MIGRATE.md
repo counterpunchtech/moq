@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `AudioEncoderFinish` is `AudioEncoderFinished` (#PR)
+### `AudioEncoderFinish` is `AudioEncoderFinished` (#6052)
 
 `moq::AudioEncoder::finish` returns the renamed record; its fields are unchanged.
 
