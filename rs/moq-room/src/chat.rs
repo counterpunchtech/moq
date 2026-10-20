@@ -77,7 +77,7 @@ impl Publisher {
 		Self {
 			producer: moq_json::window::Producer::new(
 				track,
-				moq_json::window::ProducerConfig::default().with_op_ratio(0),
+				moq_json::window::ProducerConfig::default().with_ops(false),
 			),
 			expires: VecDeque::new(),
 			deadline: Deadline::new(),
