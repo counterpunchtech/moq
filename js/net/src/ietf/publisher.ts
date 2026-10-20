@@ -1618,7 +1618,7 @@ export class Publisher {
 	 * the token the request carries.
 	 *
 	 * moq-transport renames a request's token with REQUEST_UPDATE, but cannot name one on a
-	 * request that had none, nor drop one, and before draft-17 cannot update a namespace at
+	 * request that had none, nor drop one, and before draft-16 cannot update a namespace at
 	 * all: those withdraw the request and make it again.
 	 */
 	#change(
@@ -1633,7 +1633,7 @@ export class Publisher {
 		const to = target.carry(next.route.auth);
 		if (from === to) return diff;
 		const version = this.#session.version;
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (from === undefined || to === undefined || legacy) return "restart";
 		return { ...(diff === "same" ? {} : diff), token: to };
 	}
@@ -1794,8 +1794,9 @@ export class Publisher {
 	 * MAX_REQUEST_UPDATES the peer set without reading it; a change landing meanwhile waits
 	 * for the next turn. The answer decides whether the peer still holds the namespace: a
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
-	 * finished too, and an unanswered update is dropped abruptly, since a peer that ignored
-	 * it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
+	 * finished too (with nothing more sent on draft 16, where the peer cancels it), a draft-16
+	 * cancel ends it the same way, and an unanswered update is dropped, since a peer that
+	 * ignored it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
 	 *
 	 * A different original publisher is an update like any other: the receiver drains what
 	 * it already serves from the old one and never splices the two.
@@ -1819,7 +1820,15 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
 					await writer.u53(PublishNamespaceUpdate.id);
-					await new PublishNamespaceUpdate({ requestId, update, token }).encode(writer, version);
+					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
+					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
+						writer,
+						version,
+					);
+
+					// Draft 16's adapter ends the stream on the peer's PUBLISH_NAMESPACE_CANCEL, which
+					// can beat the answer.
+					if (version === Version.DRAFT_16 && (await reader.done())) return "dropped";
 
 					const typeId = await reader.u53();
 					if (typeId === RequestError.id) {
@@ -1841,15 +1850,28 @@ export class Publisher {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`publish_namespace update failed: broadcast=${path} error=${reason(e)}`);
 			requests.delete(path);
-			request.stream.abort(e);
+			// Aborting a request riding the control stream tells the peer nothing, so it would
+			// hold the namespace beside the one advertised next.
+			if (version === Version.DRAFT_16) await this.#end(request).catch(() => undefined);
+			else request.stream.abort(e);
 			return "dropped";
 		}
 
-		if (answer === "held" && auth) request.auth = auth;
-		// Before draft-17 the peer already closed out a refused request, and its STOP_SENDING
-		// can reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
-		// the loop.
-		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
+		if (answer === "held") {
+			if (auth) request.auth = auth;
+			return answer;
+		}
+		if (version === Version.DRAFT_16) {
+			// A draft-16 peer lets the namespace go with PUBLISH_NAMESPACE_CANCEL, ahead of its
+			// answer or right after a refusal, and no PUBLISH_NAMESPACE_DONE may follow a cancel.
+			requests.delete(path);
+			request.stream.abort(new Error("released by the peer"));
+		} else {
+			// The peer already closed out a refused request, and its STOP_SENDING can
+			// reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
+			// the loop.
+			await this.#withdraw(path, requests).catch(() => undefined);
+		}
 		return answer;
 	}
 

@@ -25,6 +25,7 @@ on:
       - "rs/moq-ffi/**"
       - "sh/c/**"
       - "rs/moq-c/native-libs/**"
+      - "cpp/moq/cmake/moq-ffi.cmake"
       - "Cargo.lock"
       - ".github/workflows/c.yml"
 

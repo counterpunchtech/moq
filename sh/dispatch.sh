@@ -72,13 +72,16 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(rs/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
+    # The CARLA demo's simulator worker and launchers. Its player is a JS
+    # package and its GPU bridge a Rust crate, so those modules cover them.
+    [carla]='^demo/carla/(sim/|justfile$)'
     [drafts]='^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)'
     # Quest documents form one graph, so any change validates the whole tree,
     # as does a bump of the flake-pinned validator.
@@ -94,7 +97,7 @@ declare -A scope=(
     [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
     # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$)'
+    [c]='^(c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
     [cpp]='^(cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
@@ -151,6 +154,7 @@ declare -A tools=(
     [moq_sh]='dash'
     [rs]='cargo jq'
     [bench]='cargo'
+    [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
     [quest]='quest'
     [drill]=''
@@ -187,8 +191,8 @@ declare -A compiles=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart c cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
-    fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
+    check | ci-check) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart c cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac
 
