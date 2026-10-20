@@ -486,6 +486,16 @@ jobs:
     permissions:
       contents: write
 
+  release-c:
+    name: Release C
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-c.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+
   release-moq-relay:
     name: moq-relay
     uses: ./.github/workflows/moq-relay.yml

@@ -146,7 +146,7 @@ Some highlights:
 FFI bindings around the Rust core, with idiomatic APIs in each language:
 
 - [C++](/lib/cpp/) - RAII objects and cancellable futures, `co_await`-able on C++20.
-- [C](/lib/c/) - `moq-c` static + shared library with an auto-generated header.
+- [C](/lib/c/) - `moq-c` static library with an auto-generated header.
 - [Python](/lib/py/) - `asyncio`-friendly bindings, published to PyPI.
 - [Kotlin](/lib/kt/) - Coroutines and `Flow` for Android and the JVM.
 - [Swift](/lib/swift/) - Async sequences for iOS, iPadOS, and macOS.

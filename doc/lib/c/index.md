@@ -36,6 +36,16 @@ target, and `nix build .#moq-c` produces the release layout. A bare
 pkg-config file, and omits the OpenH264 software fallback unless given
 `--features openh264`.
 
+`moq-c` and the C++ package each link in their own copy of the Rust core, so a
+program links one of the two, never both.
+
+The next release, 0.8, replaces this ABI with a C API generated from
+`moq-ffi`, the crate every other binding wraps. It installs as `<moq/moq.h>`
+with the same `moq::c` target and `moq-c.pc`, and its
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/c/moq/MIGRATE.md) maps
+each call. To try it from a checkout, `just c package` builds the archive from
+[`c/moq`](https://github.com/moq-dev/moq/tree/main/c/moq).
+
 ## Connect
 
 ```c

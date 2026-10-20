@@ -52,5 +52,4 @@ That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays
 
 ## Required
 
-- [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `AudioEncoderFinish` is `AudioEncoderFinished` (#PR)
+
+`moq::AudioEncoder::finish` returns the renamed record; its fields are unchanged.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand::is_used`, `used`, and `unused` are gone.
