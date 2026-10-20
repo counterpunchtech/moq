@@ -1,19 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::oneshot;
 use url::Url;
 
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, ffi};
 
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `close()` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
+/// A session task and the connection backing its handle.
 struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: ffi::OnStatus,
+	task: Task,
 	link: Link,
 }
 
@@ -86,7 +81,7 @@ pub(crate) struct PreparedConnect {
 #[derive(Default)]
 pub struct Session {
 	/// Session tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	task: NonZeroSlab<Option<TaskEntry>>,
+	task: NonZeroSlab<TaskEntry>,
 }
 
 impl Session {
@@ -108,13 +103,8 @@ impl Session {
 			bandwidth: moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()),
 		};
 
-		let closed = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(closed.0),
-			callback,
-			link,
-		};
-		let id = self.task.insert(Some(entry))?;
+		let (task, closed) = Task::new(callback);
+		let id = self.task.insert(TaskEntry { task, link })?;
 
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the reconnect loop:
@@ -128,7 +118,7 @@ impl Session {
 			let res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
-					_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+					_ = closed => reconnect.clone().close().await.map_err(map_connect_error),
 					res = Self::report(callback, reconnect.clone()) => res,
 				}
 			})))
@@ -146,9 +136,9 @@ impl Session {
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
 			// drop the entry. Pull it out from under the lock so the callback never
 			// runs while held.
-			let entry = State::lock().session.task.remove(id).flatten();
+			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -171,13 +161,11 @@ impl Session {
 			request = request.with_subscriber(consume.producer.clone());
 		}
 
-		let closed = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(closed.0),
-			callback,
+		let (task, closed) = Task::new(callback);
+		let id = self.task.insert(TaskEntry {
+			task,
 			link: Link::Accepted(None),
-		};
-		let id = self.task.insert(Some(entry))?;
+		})?;
 
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the session.
@@ -189,13 +177,13 @@ impl Session {
 			// A panic ends only this session, reported through the terminal callback.
 			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
-					_ = closed.1 => Ok(()),
+					_ = closed => Ok(()),
 					res = Self::serve(id, callback, request) => res,
 				}
 			})))
 			.await;
 
-			let entry = State::lock().session.task.remove(id).flatten();
+			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
 				// Close the transport now rather than whenever the last clone drops.
 				if let Link::Accepted(Some(accepted)) = &entry.link
@@ -208,7 +196,7 @@ impl Session {
 					res = Err(error);
 				}
 				let res = publish_driver.check().and_then(|()| consume_driver.check()).and(res);
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -230,7 +218,7 @@ impl Session {
 			.map(moq_net::bandwidth::Allocator::new)
 			.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited);
 
-		if let Some(entry) = State::lock().session.task.get_mut(id).and_then(|entry| entry.as_mut()) {
+		if let Some(entry) = State::lock().session.task.get_mut(id) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
 				driver: driver.clone(),
@@ -245,12 +233,7 @@ impl Session {
 	}
 
 	fn link(&self, id: Id) -> Result<&Link, Error> {
-		Ok(&self
-			.task
-			.get(id)
-			.and_then(|entry| entry.as_ref())
-			.ok_or(Error::SessionNotFound)?
-			.link)
+		Ok(&self.task.get(id).ok_or(Error::SessionNotFound)?.link)
 	}
 
 	/// The session's bandwidth allocator. Clones share one reservation registry.
@@ -331,12 +314,9 @@ impl Session {
 		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.task
 			.get_mut(id)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::SessionNotFound)?
-			.close
-			.take()
-			.ok_or(Error::SessionNotFound)?;
-		Ok(())
+			.task
+			.close(Error::SessionNotFound)
 	}
 }
 

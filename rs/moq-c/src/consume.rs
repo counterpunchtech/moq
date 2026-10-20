@@ -187,7 +187,7 @@ pub struct Consume {
 	frame: NonZeroSlab<moq_mux::container::Frame>,
 
 	/// Raw track consumer tasks (no media/container framing).
-	raw_task: NonZeroSlab<Option<RawTaskEntry>>,
+	raw_task: NonZeroSlab<RawTaskEntry>,
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
@@ -593,7 +593,7 @@ impl Consume {
 
 		let (task, close) = Task::new(on_frame);
 		let (update, updates) = mpsc::unbounded_channel();
-		let id = self.raw_task.insert(Some(RawTaskEntry { task, update }))?;
+		let id = self.raw_task.insert(RawTaskEntry { task, update })?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
@@ -606,7 +606,7 @@ impl Consume {
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.raw_task.remove(id).flatten();
+			let entry = State::lock().consume.raw_task.remove(id);
 			if let Some(entry) = entry {
 				entry.task.callback.call(res);
 			}
@@ -717,11 +717,7 @@ impl Consume {
 		track: Id,
 		subscription: Option<moq_net::track::Subscription>,
 	) -> Result<(), Error> {
-		let entry = self
-			.raw_task
-			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?;
+		let entry = self.raw_task.get_mut(track).ok_or(Error::TrackNotFound)?;
 		entry.update.send(subscription).map_err(|_| Error::TrackNotFound)?;
 		Ok(())
 	}
@@ -729,7 +725,6 @@ impl Consume {
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
 		self.raw_task
 			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?
 			.task
 			.close(Error::TrackNotFound)
