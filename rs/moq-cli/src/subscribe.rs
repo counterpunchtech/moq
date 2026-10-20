@@ -26,7 +26,7 @@ pub enum SubscribeFormat {
 
 /// `Usage` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
 /// can't derive `ValueEnum` itself).
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
 	#[usage(name = "hangz")]
@@ -45,7 +45,7 @@ impl From<CatalogFormatArg> for CatalogFormat {
 }
 
 /// `Usage` adapter for [`VideoCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum VideoCodecArg {
 	H264,
 	H265,
@@ -67,7 +67,7 @@ impl From<VideoCodecArg> for VideoCodecKind {
 }
 
 /// `Usage` adapter for [`AudioCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum AudioCodecArg {
 	Aac,
 	Opus,
@@ -86,7 +86,7 @@ impl From<AudioCodecArg> for AudioCodecKind {
 
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
-#[derive(usage::Args, Clone, Default)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.
@@ -399,11 +399,13 @@ impl Subscribe {
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
 		let mut sampled = tokio::time::Instant::now();
-		// The jitter buffer's late drops and out-of-tolerance count, as last logged.
-		let mut reported = (0, 0);
+		// The export's drop, gap and out-of-tolerance counts, as last logged.
+		let mut reported = (0, 0, 0, 0);
 		let release = |stats: &moq_mux::container::ts::stats::Export| {
 			tracing::info!(
 				dropped = stats.dropped,
+				trimmed = stats.trimmed,
+				gaps = stats.gaps,
 				drift_ppm = ?stats.drift,
 				out_of_tolerance = stats.out_of_tolerance,
 				"TS export release clock"
@@ -421,8 +423,9 @@ impl Subscribe {
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				let stats = ts.export().stats();
-				if (stats.dropped, stats.out_of_tolerance) != reported {
-					reported = (stats.dropped, stats.out_of_tolerance);
+				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
+				if counts != reported {
+					reported = counts;
 					release(&stats);
 				}
 				log.sample(stats.into());
