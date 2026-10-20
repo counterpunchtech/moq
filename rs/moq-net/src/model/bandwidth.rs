@@ -400,7 +400,7 @@ struct Registry {
 struct Entry {
 	id: u64,
 	demand: track::Demand,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
@@ -418,7 +418,7 @@ struct Share {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Want {
 	id: u64,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
@@ -646,7 +646,7 @@ mod tests {
 		Rate::from_bps(bps)
 	}
 
-	fn want(id: u64, priority: u8, max: u64) -> Want {
+	fn want(id: u64, priority: i8, max: u64) -> Want {
 		Want {
 			id,
 			priority,
@@ -655,7 +655,7 @@ mod tests {
 	}
 
 	/// A standalone track at `priority`, plus the broadcast keeping it alive.
-	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
+	fn track(priority: i8) -> (broadcast::Producer, track::Producer) {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
 			.create_track("t", track::Info::timed().with_priority(priority))

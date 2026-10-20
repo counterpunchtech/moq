@@ -17,7 +17,7 @@ use ranges::Ranges;
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
-	priority: BTreeMap<u8, usize>,
+	priority: BTreeMap<i8, usize>,
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
