@@ -49,8 +49,8 @@ before and after:
   queue.
 - **Dev shell:** `nix develop` downloads for 52 s (p90 90 s) in every job,
   even ones that compile no Rust. That overlaps with
-  [the Nix cache](/quest/m0/ci/nix-cache.md); measure what is still slow
-  once it lands.
+  [the Nix cache](/quest/m0/ci/nix-cache-verify.md); measure what is still
+  slow once it lands.
 - **Waste in the dependency graph:** both rustls backends (ring from moq-quic's
   default `rustls-ring`, aws-lc-rs from rustls, str0m, jsonwebtoken, rcgen and
   object_store), and aws-lc-sys recompiling 3 to 5 times per cold job because
@@ -59,7 +59,7 @@ before and after:
   52 crate names are duplicated on aarch64-linux (syn 1, 2 and 3; rand 0.8,
   0.9 and 0.10; three toml versions; sha2 and digest 0.10 and 0.11). Cut what
   the gate doesn't need. Dependency upgrades belong to
-  [the dependency audit](/quest/m0/audit-deps.md).
+  [the dependency audit](/quest/m1/audit-deps.md).
 - **Nightly:** about 1250 runner-minutes and 2 hours of wall time, and the
   last 5 runs failed (the Features job, plus JS benchmarks cancelled at 60
   minutes). With main's optional checks moved to nightly, a red nightly hides
