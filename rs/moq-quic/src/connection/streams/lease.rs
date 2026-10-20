@@ -319,16 +319,28 @@ impl StreamsState {
         self.add_read_credits(bytes)
     }
 
-    /// Evict the lowest-priority stream holding credit when no reader can make progress: the
+    /// Evict the lowest-priority streams holding credit while no reader can make progress: the
     /// peer has no connection credit left, and no reader has data it has not looked at yet.
     ///
     /// Waiting for a stream to be read cannot free the window then, and neither can the peer. A
     /// reader that leased and then parked, without waiting, cannot free it either, so it is a
     /// candidate too. A stream never leased is not: its reader may not have run yet, and a
     /// stream read without leases returns its credit as it reads.
-    /// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the eviction
-    /// freed; the evicted stream's reader is woken by a [`StreamEvent::Readable`].
+    ///
+    /// Credit freed while a shrunk window is in debt pays that first and may advertise nothing,
+    /// so eviction continues until the peer has credit again or no candidate is left.
+    /// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
+    /// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
     pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
+        let mut transmit = None;
+        while let Some(id) = self.stuck_victim() {
+            transmit = Some(self.evict(id));
+        }
+        transmit
+    }
+
+    /// The stream to evict if the window is stuck, per [`Self::evict_if_stuck()`].
+    fn stuck_victim(&self) -> Option<StreamId> {
         if self.local_max_data > self.data_recvd {
             return None;
         }
@@ -364,8 +376,7 @@ impl StreamsState {
             }
         }
 
-        let (_, id) = victim?;
-        Some(self.evict(id))
+        victim.map(|(_, id)| id)
     }
 
     /// Discard everything `id` holds, returning its credit, and fail its next lease.

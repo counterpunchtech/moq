@@ -3420,6 +3420,37 @@ mod tests {
             .collect()
     }
 
+    /// Credit an eviction frees pays a shrunk window's debt first, so eviction goes on until the
+    /// peer has credit again; stopping at one victim would leave the other reader and the peer
+    /// waiting on each other.
+    #[test]
+    fn stuck_window_evicts_past_shrink_debt() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        let mut pending = Retransmits::default();
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+            // Taken, so a wait for the next unit stays within the shrunk window.
+            let _ = recv(&mut client, &mut pending, id).take(WINDOW as usize);
+        }
+        assert_eq!(readable(&mut client), ids);
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(WINDOW / 2).unwrap());
+
+        assert!(matches!(
+            wait(&mut client, ids[0], 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 2);
+        assert_eq!(readable(&mut client), [ids[1], ids[0]], "newest first");
+        for id in ids {
+            assert_eq!(wait(&mut client, id, 1), Err(LeaseError::Evicted));
+        }
+        assert_eq!(client.credit_stats().leased, 0);
+        assert_eq!(client.local_max_data, max_data + WINDOW / 2);
+    }
+
     /// Once the peer has spent the window and every reader waits for more than it has, the
     /// lowest-priority stream is evicted: its credit returns, its reader wakes to an error, and
     /// the peer hears only when the application stops it.
