@@ -58,6 +58,12 @@ else
     cmake --install "$build/package" --config Release --prefix "$prefix"
 fi
 
+# Ninja refuses two rules for one output, so a dry run proves both packages share one cargo rule.
+if [[ -z "$archive" && -z "$ffi_dir" ]] && command -v ninja >/dev/null 2>&1; then
+    cmake -G Ninja -S moq/test/superbuild -B "$build/superbuild" -DCMAKE_BUILD_TYPE=Debug
+    ninja -C "$build/superbuild" -n >/dev/null
+fi
+
 run() {
     if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi
 }
