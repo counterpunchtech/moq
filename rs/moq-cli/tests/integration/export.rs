@@ -912,7 +912,10 @@ async fn redundant_failover(bufferbloat: bool) {
 		for export in &mut exports {
 			tokio::time::timeout(TIMEOUT, async {
 				loop {
-					assert!(export.child.try_wait().unwrap().is_none(), "stitching export exited");
+					if export.child.try_wait().unwrap().is_some() {
+						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
+						panic!("stitching export exited: {errors}");
+					}
 					if packets(&export.output.lock().unwrap())
 						.filter_map(|packet| pat_version(packet))
 						.any(|v| v == version)
