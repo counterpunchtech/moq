@@ -442,6 +442,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
+					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
@@ -715,6 +716,7 @@ where
 						ietf::solicit::into_setup(&mut parameters, v);
 					}
 					ietf::hidden::into_setup(&mut parameters, v);
+					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
@@ -1067,12 +1069,14 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn poll_open_uni(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
@@ -1083,8 +1087,7 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			_: Bytes,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}

@@ -154,9 +154,6 @@ pub(crate) struct StreamsState {
     initial_max_stream_data_bidi_remote: VarInt,
     /// Whether the peer accepts RESET_STREAM_AT
     pub(super) peer_reset_stream_at: bool,
-    /// Bumped when rejected 0-RTT discards our streams and their ids are opened again, so a
-    /// [`Checkpoint`](super::Checkpoint) from before cannot reach the new stream of the same id
-    pub(super) generation: u64,
 
     /// The shrink to be applied to local_max_data when receive_window is shrunk
     receive_window_shrink_debt: u64,
@@ -214,7 +211,6 @@ impl StreamsState {
             initial_max_stream_data_bidi_local: 0u32.into(),
             initial_max_stream_data_bidi_remote: 0u32.into(),
             peer_reset_stream_at: false,
-            generation: 0,
             receive_window_shrink_debt: 0,
             streams_blocked: [false, false],
             open_refused: [false, false],
@@ -240,13 +236,24 @@ impl StreamsState {
             self.max[dir as usize] = count;
         }
         self.received_max_data(params.initial_max_data);
-        for (&id, slot) in self.send.iter_mut() {
-            if id.initiator() != self.side
-                && id.dir() == Dir::Bi
-                && let Some(s) = slot.as_mut()
-            {
-                s.max_data = params.initial_max_stream_data_bidi_local.into();
-            }
+
+        // A client's 0-RTT streams opened under the remembered windows, which a server that
+        // accepts 0-RTT may only raise (RFC 9000 7.4.1). No peer stream can exist yet.
+        let side = self.side;
+        let raised: Vec<StreamId> = self
+            .send
+            .iter_mut()
+            .filter(|(id, _)| id.initiator() == side)
+            .filter_map(|(&id, slot)| {
+                let max = match id.dir() {
+                    Dir::Bi => params.initial_max_stream_data_bidi_remote,
+                    Dir::Uni => params.initial_max_stream_data_uni,
+                };
+                slot.as_mut()?.increase_max_data(max.into()).then_some(id)
+            })
+            .collect();
+        for id in raised {
+            self.send_unblocked(id);
         }
     }
 
@@ -284,7 +291,6 @@ impl StreamsState {
             }
         }
 
-        self.generation += 1;
         self.send_streams = 0;
         self.data_sent = 0;
         self.buffered_data = 0;
@@ -437,6 +443,9 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_waiting() {
+            self.events.push_back(StreamEvent::Acked { id, offset });
+        }
         if !stream.is_pending() {
             self.pending.remove(&mut stream.slot);
         }
@@ -784,6 +793,9 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let finished = stream.ack(frame);
         self.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_acked() {
+            self.events.push_back(StreamEvent::Acked { id, offset });
+        }
         if !finished {
             // The stream is unfinished or may still need retransmits
             return stream.take_held_reset();
@@ -883,20 +895,11 @@ impl StreamsState {
 
         self.insert_remote(id);
 
-        let write_limit = self.write_limit();
         let max_send_data = self.max_send_data(id);
         if let Some(ss_opt) = self.send.get_mut(&id) {
             let ss = ss_opt.get_or_insert_with(|| Send::new(max_send_data));
             if ss.increase_max_data(offset) {
-                if write_limit > 0 {
-                    self.events.push_back(StreamEvent::Writable { id });
-                } else if !ss.connection_blocked {
-                    // The stream is still blocked on the connection flow control
-                    // window. In order to get unblocked when the window relaxes
-                    // it needs to be in the connection blocked list.
-                    ss.connection_blocked = true;
-                    self.connection_blocked.push(id);
-                }
+                self.send_unblocked(id);
             }
         } else if id.initiator() == self.side && self.is_local_unopened(id) {
             debug!("got MAX_STREAM_DATA on unopened {}", id);
@@ -906,6 +909,20 @@ impl StreamsState {
         }
 
         Ok(())
+    }
+
+    /// Wake the writer of a stream whose flow control limit just rose past what it has written
+    fn send_unblocked(&mut self, id: StreamId) {
+        if self.write_limit() > 0 {
+            self.events.push_back(StreamEvent::Writable { id });
+            return;
+        }
+        // Still blocked on the connection window, so wait in the list that wakes when it relaxes
+        let ss = self.send.get_mut(&id).and_then(|s| s.as_mut()).unwrap();
+        if !ss.connection_blocked {
+            ss.connection_blocked = true;
+            self.connection_blocked.push(id);
+        }
     }
 
     /// Whether the local send buffer prevents the application from writing more data.
@@ -1187,7 +1204,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         SendStream {
             id,
@@ -1254,7 +1271,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         SendStream {
             id,
@@ -1353,6 +1370,42 @@ mod tests {
         assert!(should_transmit.0);
         assert!(pending.max_stream_id[Dir::Uni as usize]);
         assert_eq!(client.local_max_data - initial_max, MESSAGE_SIZE as u64);
+    }
+
+    /// Stopping a stream whose final size is known frees it, so its stream ID credit goes out at
+    /// once instead of waiting for the next packet to arrive.
+    #[test]
+    fn stop_after_reset_issues_stream_credit() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            1u32.into(),
+            1u32.into(),
+            1024 * 1024,
+            (1024 * 1024u32).into(),
+            (1024 * 1024u32).into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        assert_eq!(
+            client
+                .received_reset(frame::ResetStream {
+                    id,
+                    error_code: 0u32.into(),
+                    final_offset: 0u32.into(),
+                    reliable_size: None,
+                })
+                .unwrap(),
+            ShouldTransmit(false)
+        );
+
+        let mut pending = Retransmits::default();
+        RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        }
+        .stop(0u32.into())
+        .unwrap();
+        assert!(pending.max_stream_id[Dir::Uni as usize]);
     }
 
     #[test]
@@ -1612,7 +1665,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
 
         let mut stream = SendStream {
@@ -1675,9 +1728,9 @@ mod tests {
             conn_state: &state,
         };
 
-        let id_high = streams.open(Dir::Bi).unwrap();
-        let id_mid = streams.open(Dir::Bi).unwrap();
-        let id_low = streams.open(Dir::Bi).unwrap();
+        let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_mid = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_low = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut mid = SendStream {
             id: id_mid,
@@ -1731,8 +1784,8 @@ mod tests {
                 state: &mut server,
                 conn_state: &state,
             };
-            let id_low = streams.open(Dir::Bi).unwrap();
-            let id_high = streams.open(Dir::Bi).unwrap();
+            let id_low = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
 
             let mut low = SendStream {
                 id: id_low,
@@ -1793,8 +1846,8 @@ mod tests {
             conn_state: &state,
         };
 
-        let id_high = streams.open(Dir::Bi).unwrap();
-        let id_mid = streams.open(Dir::Bi).unwrap();
+        let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_mid = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut mid = SendStream {
             id: id_mid,
@@ -1862,9 +1915,9 @@ mod tests {
             };
 
             // a, b and c all have the same priority
-            let id_a = streams.open(Dir::Bi).unwrap();
-            let id_b = streams.open(Dir::Bi).unwrap();
-            let id_c = streams.open(Dir::Bi).unwrap();
+            let id_a = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_b = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_c = streams.open(Dir::Bi, Default::default()).unwrap();
 
             let mut stream_a = SendStream {
                 id: id_a,
@@ -1944,9 +1997,9 @@ mod tests {
         };
 
         // a, and b have the same priority, c has higher priority
-        let id_a = streams.open(Dir::Bi).unwrap();
-        let id_b = streams.open(Dir::Bi).unwrap();
-        let id_c = streams.open(Dir::Bi).unwrap();
+        let id_a = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_b = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_c = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut stream_a = SendStream {
             id: id_a,
@@ -2051,7 +2104,7 @@ mod tests {
             conn_state: &state,
         };
 
-        let id = streams.open(Dir::Uni).unwrap();
+        let id = streams.open(Dir::Uni, Default::default()).unwrap();
         let mut stream = SendStream {
             id,
             state: &mut server,
@@ -2498,7 +2551,7 @@ mod tests {
             state: &mut server,
             conn_state: &conn_state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .expect("should be able to open a stream");
 
         let mut stream = SendStream {
@@ -2573,7 +2626,7 @@ mod tests {
             state: &mut server,
             conn_state: &conn_state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .expect("should be able to open a stream");
 
         let mut stream = SendStream {
@@ -2903,7 +2956,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -2914,7 +2967,7 @@ mod tests {
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert!(pending.reset_stream.is_empty());
         assert_eq!(server.buffered_data, 4);
 
@@ -2947,7 +3000,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -2956,7 +3009,7 @@ mod tests {
             conn_state: &state,
         };
         stream.write(b"hello world").unwrap();
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert_eq!(pending.reset_stream, &[(id, 4)]);
         assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
 
@@ -2976,7 +3029,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -2987,7 +3040,7 @@ mod tests {
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
 
         server.reset_acked(id, 4);
         assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
@@ -3019,7 +3072,7 @@ mod tests {
                 state: &mut server,
                 conn_state: &state,
             }
-            .open(Dir::Uni)
+            .open(Dir::Uni, Default::default())
             .unwrap();
             let mut stream = SendStream {
                 id,
@@ -3028,7 +3081,7 @@ mod tests {
                 conn_state: &state,
             };
             stream.write(b"hello world").unwrap();
-            stream.reset_to(7u32.into(), 4).unwrap();
+            stream.reset_at(4, 7u32.into()).unwrap();
             assert_eq!(pending.reset_stream.is_empty(), !reset_stream_at);
 
             assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
@@ -3052,7 +3105,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -3064,7 +3117,7 @@ mod tests {
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
         assert_eq!(sent[0].offsets, 0..11);
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert_eq!(server.buffered_data, 4);
 
         // Only the lost prefix is retransmitted, without the FIN of a stream that was never finished
@@ -3093,7 +3146,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -3103,7 +3156,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         stream.state.received_stop_sending(id, 9u32.into());
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
 
         let send = server.send[&id].as_ref().unwrap();
         let frame = send.reset_frame(id, true).unwrap();
@@ -3483,8 +3536,8 @@ mod tests {
     fn send_group_from_another_connection() {
         let mut a = make(Side::Client);
         let mut b = make(Side::Client);
-        let group = crate::SendGroups { state: &mut a }.open(0, None);
-        let _other = crate::SendGroups { state: &mut b }.open(0, None);
+        let group = crate::SendGroups { state: &mut a }.open(0);
+        let _other = crate::SendGroups { state: &mut b }.open(0);
         crate::SendGroups { state: &mut b }.set_priority(&group, 1);
     }
 
@@ -3495,7 +3548,7 @@ mod tests {
         let mut b = make(Side::Client);
         let domain = crate::SendGroups { state: &mut a }.open_domain();
         let _other = crate::SendGroups { state: &mut b }.open_domain();
-        let _ = crate::SendGroups { state: &mut b }.open(0, Some(&domain));
+        let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
     }
 
     /// Ingest and read rounds across many streams, with a plain read or a lease consumed whole.

@@ -129,13 +129,13 @@ fn webtransport_echo_end_to_end() {
 	let client = tokio_client(format!("https://{addr}/echo?token=abc"), |session| {
 		Box::pin(async move {
 			// Bidirectional echo.
-			let (mut send, mut recv) = session.open_bi().await.expect("open_bi");
+			let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open_bi");
 			send.write_all(PAYLOAD).await.expect("write");
 			send.finish().expect("finish");
 			assert_eq!(read_all(&mut recv).await, PAYLOAD, "bidi echo");
 
 			// Unidirectional, both directions.
-			let mut send = session.open_uni().await.expect("open_uni");
+			let mut send = session.open_uni(Default::default()).await.expect("open_uni");
 			send.write_all(PAYLOAD).await.expect("write");
 			send.finish().expect("finish");
 			let mut recv = session.accept_uni().await.expect("accept_uni");
@@ -143,7 +143,7 @@ fn webtransport_echo_end_to_end() {
 
 			// Datagram echo.
 			session
-				.send_datagram(PAYLOAD.to_vec().into(), None, 0)
+				.send_datagram(PAYLOAD.to_vec().into(), Default::default())
 				.expect("send datagram");
 			let echoed = session.read_datagram().await.expect("read datagram");
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
@@ -341,6 +341,8 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
+// Its timeout is a watchdog on the tokio peer, not the worker.
+#[allow(clippy::disallowed_methods)]
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
 	std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -500,7 +502,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 			assert_eq!(&buf[..n], PAYLOAD);
 
 			// Tell it we have the payload, so the reset below cannot race it.
-			let mut ack = session.open_uni().await.expect("open_uni");
+			let mut ack = session.open_uni(Default::default()).await.expect("open_uni");
 			ack.write_all(b"ack").await.expect("write");
 			ack.finish().expect("finish");
 
@@ -509,7 +511,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 
 			// And the other direction: the server drops the read half of this
 			// one, which must arrive as a WebTransport cancellation too.
-			let mut send = session.open_uni().await.expect("open_uni");
+			let mut send = session.open_uni(Default::default()).await.expect("open_uni");
 			let err = loop {
 				match send.write_all(PAYLOAD).await {
 					Ok(()) => tokio::task::yield_now().await,
@@ -606,7 +608,12 @@ fn a_reset_stream_keeps_its_header() {
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
 			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
 
-			session.open_uni().await.expect("open_uni").reset(8).expect("reset");
+			session
+				.open_uni(Default::default())
+				.await
+				.expect("open_uni")
+				.reset(8)
+				.expect("reset");
 			session.closed().await;
 		})
 	});
@@ -697,6 +704,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
+			#[allow(clippy::disallowed_methods)] // A watchdog on the tokio peer, not the worker.
 			let accept = tokio::time::timeout(std::time::Duration::from_secs(5), session.accept_uni());
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");

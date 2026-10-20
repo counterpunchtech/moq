@@ -19,6 +19,7 @@ mod play;
 mod publish;
 mod rtc;
 mod rtmp;
+mod rtsp;
 mod srt;
 mod subscribe;
 #[cfg(test)]
@@ -216,7 +217,7 @@ impl Serving {
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
-		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.root);
+		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.label);
 		let lease = lease.with_stats(stats.clone());
 		let mut request = request.with_stats(stats);
 		if let Some(publish) = publish {
@@ -576,8 +577,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdin = None;
 		let mut stdout = None;
 
-		// One publisher instance per run, unless redundant publishers named a shared one.
-		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		// Each run publishes its own content and therefore mints its own instance.
+		let epoch = moq_net::Epoch::mint();
 		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
@@ -749,6 +750,9 @@ fn spawn_import(
 				} else if let Some(url) = srt.connect {
 					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
+			}
+			ImportSource::Rtsp(rtsp) => {
+				tasks.spawn(rtsp::connect_import(target(name), rtsp.connect));
 			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {

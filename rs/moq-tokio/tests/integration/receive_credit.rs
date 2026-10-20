@@ -372,8 +372,11 @@ impl Reversed {
 			let (conn, tx) = (self.conn.clone(), tx.clone());
 			tokio::spawn(async move {
 				let (mut send, _recv) = match bi {
-					true => conn.open_bi().await.map(|(send, recv)| (send, Some(recv))),
-					false => conn.open_uni().await.map(|send| (send, None)),
+					true => conn
+						.open_bi(Default::default())
+						.await
+						.map(|(send, recv)| (send, Some(recv))),
+					false => conn.open_uni(Default::default()).await.map(|send| (send, None)),
 				}
 				.expect("open");
 				if send.write_all(&bytes).await.is_ok() {

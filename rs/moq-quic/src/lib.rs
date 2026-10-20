@@ -30,11 +30,11 @@ mod cid_queue;
 pub mod coding;
 mod constant_time;
 mod entropy;
-// Not part of the public API: compiled only for the crate's own tests and for the
-// `fuzz/` harness. The connection target needs a TLS provider.
+// Not part of the public API: compiled only for the crate's own tests, the benches, and
+// the `fuzz/` harness. The connection target needs ring or aws-lc-rs for the endpoint's keys.
 #[cfg(all(
     any(test, feature = "fuzz"),
-    any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")
+    any(feature = "aws-lc-rs", feature = "ring")
 ))]
 #[doc(hidden)]
 pub mod fuzz;
@@ -53,10 +53,10 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats,
-    CreditStats, Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats,
-    ReadError, ReadableError, RecvStream, RttEstimator, SendDatagramError, SendDomain, SendGroup,
-    SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
+    ReadableError, RecvStream, RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions,
+    SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;

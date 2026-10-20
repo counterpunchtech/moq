@@ -6,7 +6,7 @@ use super::*;
 
 /// How many more uni streams the client can open right now, opening them all
 fn openable(pair: &mut Pair, ch: ConnectionHandle) -> Vec<StreamId> {
-    iter::from_fn(|| pair.client_streams(ch).open(Dir::Uni)).collect()
+    iter::from_fn(|| pair.client_streams(ch).open(Dir::Uni, Default::default())).collect()
 }
 
 /// Finishes each client stream and has the server read it to the end
@@ -77,7 +77,10 @@ fn max_concurrent_streams_lowered() {
 
 /// How many bytes a fresh client stream can write, up to `limit`
 fn writable(pair: &mut Pair, ch: ConnectionHandle, limit: usize) -> usize {
-    let s = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(ch, s).write(&vec![0; limit]).unwrap_or(0)
 }
 
@@ -169,9 +172,8 @@ fn send_window_lowered_and_raised() {
 /// A server whose stream windows grew since the ticket the client resumes with
 ///
 /// The client opens 0-RTT streams with the remembered, smaller windows, and the larger ones
-/// arrive with the handshake. Today `set_params` raises only peer-initiated bidi streams, which
-/// cannot exist yet, so the client's own streams stay at the old window. The server, believing
-/// it granted the new one, never sends MAX_STREAM_DATA, and the stream stalls for good.
+/// arrive with the handshake. The server believes it granted the new window and never sends
+/// MAX_STREAM_DATA for it, so the client's streams must adopt it or stall for good.
 fn zero_rtt_window_raise(dir: Dir) {
     let _guard = subscribe();
     const OLD: u32 = 1000;
@@ -200,7 +202,10 @@ fn zero_rtt_window_raise(dir: Dir) {
     pair.server.set_server_config(Some(Arc::new(server(NEW))));
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(dir).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(dir, Default::default())
+        .unwrap();
     let mut written = pair.client_send(client_ch, s).write(&[0; LEN]).unwrap();
     assert_eq!(written, OLD as usize);
 
@@ -231,13 +236,11 @@ fn zero_rtt_window_raise(dir: Dir) {
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/zero-rtt-window-raise.md"]
 fn zero_rtt_bidi_window_raise() {
     zero_rtt_window_raise(Dir::Bi);
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/zero-rtt-window-raise.md"]
 fn zero_rtt_uni_window_raise() {
     zero_rtt_window_raise(Dir::Uni);
 }

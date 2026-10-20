@@ -1,10 +1,10 @@
 //! The connection: shared state, the driver task, and the session handle.
 
+use moq_clock::Instant;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
@@ -233,7 +233,7 @@ impl Inner {
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
 		self.conn.borrow_mut().close(
-			moq_clock::Instant::now(),
+			self.owner.now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
 			Bytes::copy_from_slice(reason.as_bytes()),
 		);
@@ -295,17 +295,21 @@ impl Connection {
 	}
 
 	/// Open a send group at `priority`, for streams to join with
-	/// [`SendStream::set_group`](super::SendStream::set_group).
+	/// [`SendStream::set_group`](super::SendStream::set_group) and datagrams with
+	/// [`SendOptions`](super::SendOptions).
 	pub fn send_group(&self, priority: i64) -> super::SendGroup {
 		super::SendGroup::new(self.shared.clone(), priority)
 	}
 
-	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams at
-	/// priority `order`, or among the ungrouped streams without a group.
+	/// Send a datagram scheduled by `options`, like one of its group's streams at its priority,
+	/// or among the ungrouped streams without a group.
 	///
 	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
 	/// see [`moq_quic::Datagrams::send`].
-	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
 		if let Some(err) = self.shared.closed() {
 			return Err(err);
 		}
@@ -313,7 +317,7 @@ impl Connection {
 			.conn
 			.borrow_mut()
 			.datagrams()
-			.send(payload, group.map(super::SendGroup::id), order)
+			.send(payload, super::group::to_quic(options))
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		self.shared.kick();
 		Ok(())
@@ -551,7 +555,12 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
 		// nothing while it is spent.
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Uni);
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Uni, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
 			None => {
@@ -570,7 +579,12 @@ impl web_transport_trait::poll::Session for Connection {
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Bi);
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok((
 				super::SendStream::new(self.shared.clone(), id),
@@ -585,7 +599,11 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -761,12 +779,11 @@ impl Driver {
 			// polling before the set would leave the firing to wake nobody
 			// (fatal on a dial nobody answers, where no ingress ever re-polls
 			// us).
-			self.deadline
-				.set(self.shared.conn.borrow_mut().poll_timeout().map(super::to_std));
+			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
 			if self.deadline.poll(waiter).is_pending() {
 				return Poll::Pending;
 			}
-			self.shared.conn.borrow_mut().handle_timeout(moq_clock::Instant::now());
+			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
 		}
 	}
 
@@ -871,7 +888,7 @@ impl Driver {
 			let mut conn = self.shared.conn.borrow_mut();
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
+			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
 			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
@@ -943,6 +960,8 @@ fn sweep_stream(state: &mut State, event: moq_quic::StreamEvent) {
 				waiters.wake();
 			}
 		}
+		// Nothing waits on a send stream's acknowledgment yet.
+		moq_quic::StreamEvent::Acked { .. } => {}
 	}
 }
 

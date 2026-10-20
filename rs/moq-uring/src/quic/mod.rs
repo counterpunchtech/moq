@@ -30,7 +30,7 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Lease, RecvStream, SendGroup, SendStream};
+pub use driver::{Connection, Lease, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
 /// The flow-control limits a live connection can change; see [`Connection::set_limits`].
 pub use moq_quic::{Limits, LimitsError};
@@ -183,6 +183,8 @@ pub enum Congestion {
 	/// waiting for loss, which keeps queues short and the send rate steady
 	/// enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 /// Why a connection could not be set up or has ended.
