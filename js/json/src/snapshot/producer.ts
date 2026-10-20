@@ -1,7 +1,7 @@
 import type { Time, Timed } from "@moq/net";
 import * as Moq from "@moq/net";
 
-import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * Publishes a JSON value over a track, choosing snapshots and deltas automatically.
@@ -9,6 +9,11 @@ import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder 
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
  * the encoder emits a snapshot. When something else already owns the track, use the {@link Encoder}
  * directly.
+ *
+ * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
+ * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
+ * restates the value there at the timestamp of the last update. Set the ratio when creating the
+ * track, or joins never ask.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
@@ -21,11 +26,35 @@ export class Producer<T> {
 	// is closed the moment it's written and never held open.
 	#deltas: boolean;
 
+	// The sequence of the newest group written, which a joiner's wanted group has to pass.
+	#largest?: number;
+	// The timestamp of the last committed update, which a refresh restates the value at.
+	#at?: Time.Timestamp;
+	// Stops watching the track's demand.
+	#unwatch?: () => void;
+
 	constructor(config: Producer.Config<T>) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 		this.#initial = config.initial;
-		this.#deltas = (config.deltaRatio ?? DEFAULT_DELTA_RATIO) !== 0;
+		this.#deltas = config.deltas !== false;
+
+		// With deltas off every group holds one frame, so no join ever asks for a fresh one.
+		if (this.#deltas) this.#unwatch = this.#track.demand().wanted.subscribe((wanted) => this.#refresh(wanted));
+	}
+
+	// Restate the value in a new group once a joiner wants one past the largest written.
+	#refresh(wanted: number | undefined): void {
+		if (wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
+		const frame = this.#encoder.snapshot();
+		if (!frame) return;
+
+		// Nobody awaits a refresh, so a failed write has no caller to report to. It leaves the frame
+		// uncommitted, so the next update resynchronizes and reports the error itself.
+		try {
+			this.#write(frame, this.#at);
+			frame.commit();
+		} catch {}
 	}
 
 	/**
@@ -65,6 +94,7 @@ export class Producer<T> {
 		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
 		this.#write(frame, at);
 		frame.commit();
+		this.#at = at;
 	}
 
 	#write(encoded: Encoded, at: Time.Timestamp | undefined): void {
@@ -81,6 +111,7 @@ export class Producer<T> {
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
+			this.#largest = group.sequence;
 			try {
 				group.writeFrame({ payload: encoded.payload, timestamp: at });
 			} catch (err) {
@@ -146,6 +177,8 @@ export class Producer<T> {
 
 	/** Finish the track, closing any open group. */
 	finish(): void {
+		this.#unwatch?.();
+		this.#unwatch = undefined;
 		this.#group?.close();
 		this.#group = undefined;
 

@@ -13,6 +13,11 @@ export type ProducerConfig = Config & { track: Moq.Track.Producer };
  * the encoder emits a header. When something else already owns the track, use the {@link Encoder}
  * directly.
  *
+ * A group of ops runs until a joiner wants a fresh one: once the ops outweigh the track's `refresh`
+ * ratio times the header, a join asks for a group past the largest, and the producer restates the
+ * window there at the timestamp of the last edit. Set the ratio when creating the track, or joins
+ * never ask.
+ *
  * @public
  */
 export class Producer<T> {
@@ -23,10 +28,33 @@ export class Producer<T> {
 	// The group an op would be appended to, open after a header.
 	#group?: Moq.Group.Producer;
 
+	// The sequence of the newest group written, which a joiner's wanted group has to pass.
+	#largest?: number;
+	// The timestamp of the last committed edit, which a refresh restates the window at.
+	#at?: Time.Timestamp;
+	// Stops watching the track's demand.
+	#unwatch?: () => void;
+
 	/** Wrap a track to publish a window into it. */
 	constructor(config: ProducerConfig) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
+
+		// With ops off every group holds one frame, so no join ever asks for a fresh one.
+		if (config.ops !== false) {
+			this.#unwatch = this.#track.demand().wanted.subscribe((wanted) => this.#refresh(wanted));
+		}
+	}
+
+	// Restate the window in a new group once a joiner wants one past the largest written.
+	#refresh(wanted: number | undefined): void {
+		if (this.#finished || wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
+
+		// Nobody awaits a refresh, so a failed write has no caller to report to. It leaves the frame
+		// uncommitted, so the next edit opens a new group and reports the error itself.
+		try {
+			this.#write(this.#encoder.snapshot(), this.#at);
+		} catch {}
 	}
 
 	/** The retained checkpoint suffix, oldest first. This is complete unless bounded in the config. */
@@ -48,6 +76,7 @@ export class Producer<T> {
 	push({ value, at }: Timed<T>): void {
 		this.#assertOpen();
 		this.#write(this.#encoder.push(value), at);
+		this.#at = at;
 	}
 
 	/**
@@ -62,7 +91,9 @@ export class Producer<T> {
 	pop(count: number, at?: Time.Timestamp): void {
 		this.#assertOpen();
 		const frame = this.#encoder.pop(count);
-		if (frame) this.#write(frame, at);
+		if (!frame) return;
+		this.#write(frame, at);
+		this.#at = at;
 	}
 
 	#assertOpen(): void {
@@ -79,6 +110,7 @@ export class Producer<T> {
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
+			this.#largest = group.sequence;
 			try {
 				group.writeFrame({ payload: encoded.payload, timestamp: at });
 			} catch (err) {
@@ -120,6 +152,8 @@ export class Producer<T> {
 	finish(): void {
 		if (this.#finished) return;
 		this.#finished = true;
+		this.#unwatch?.();
+		this.#unwatch = undefined;
 
 		this.#group?.close();
 		this.#group = undefined;

@@ -9,30 +9,20 @@ import { deepEqual, diff } from "../diff.ts";
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
 const MAX_DELTA_FRAMES = 256;
 
-// Delta ratio used when {@link Config.deltaRatio} is left unset. Not re-exported from the package
-// entrypoint: the Producer needs it to know whether to hold a group open, nothing else does.
-export const DEFAULT_DELTA_RATIO = 8;
-
 // Bytes a group may hold before it rolls when {@link Config.maxGroupBytes} is left unset: moq-net's
 // per-group cache limit. Not re-exported from the package entrypoint; a test pins it to that limit.
 export const DEFAULT_MAX_GROUP_BYTES = Group.MAX_GROUP_CACHE_BYTES;
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface Config<T> {
-	// Controls how aggressively the encoder emits deltas (merge patches) instead of full snapshots.
+	// Encode changes as deltas (merge patches) against the group's snapshot. `false` encodes every
+	// change as a new snapshot in its own group.
 	//
-	// `0` disables deltas: every change is encoded as a new snapshot.
+	// A group of deltas runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	// (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap.
 	//
-	// A positive number enables deltas: a new snapshot is emitted once the deltas already written
-	// to the current group (excluding the snapshot frame) exceed `deltaRatio` times the snapshot size.
-	// The pending delta is excluded from that check, so the one that first crosses the budget still
-	// lands before the group rolls. So `1` allows roughly one snapshot's worth of deltas before rolling.
-	//
-	// When {@link compression} is on, both sides of the comparison are measured on the compressed frame
-	// sizes (the real wire cost).
-	//
-	// Defaults to `8` when unset.
-	deltaRatio?: number;
+	// Defaults to `true`.
+	deltas?: boolean;
 
 	// Optional zod schema used to validate each value before publishing.
 	schema?: z.ZodMiniType<T>;
@@ -68,8 +58,8 @@ export interface Encoded {
 	 * merge patch that must be appended to the group the last snapshot opened.
 	 *
 	 * The encoder decides this, never the caller: a value that sets a field to JSON null, or whose
-	 * root isn't an object, cannot be expressed as a merge patch at all, and the delta budget and
-	 * frame cap force a snapshot independently of what the caller wanted.
+	 * root isn't an object, cannot be expressed as a merge patch at all, and the frame and byte caps
+	 * force a snapshot independently of what the caller wanted.
 	 */
 	keyframe: boolean;
 }
@@ -124,12 +114,9 @@ export class Encoder<T> {
 	// baseline every delta is diffed against, and `undefined` until the first snapshot.
 	#last?: unknown;
 
-	// Bytes of deltas already emitted into the current group, excluding the snapshot frame. Compressed
-	// frame sizes when compressing, raw otherwise, matching {@link #snapshotLen} so the budget check is
-	// like-for-like (and identical to the Rust encoder).
-	#deltaBytes = 0;
-	// Size of the current group's snapshot frame, the reference the delta budget is measured against.
-	#snapshotLen = 0;
+	// Bytes emitted into the current group, snapshot included: compressed frame sizes when
+	// compressing, raw otherwise, matching what the group holds on the wire.
+	#groupBytes = 0;
 	// Frames emitted into the current group, snapshot included.
 	#groupFrames = 0;
 
@@ -178,8 +165,7 @@ export class Encoder<T> {
 	 */
 	reset(): void {
 		this.#flate = undefined;
-		this.#deltaBytes = 0;
-		this.#snapshotLen = 0;
+		this.#groupBytes = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -232,9 +218,9 @@ export class Encoder<T> {
 			// can come out slightly larger than its input, so the plaintext is not an upper bound.
 			// Compressing first advances the window, but `#snapshot` opens a fresh one, so an
 			// over-budget delta costs only the wasted compression.
-			if (this.#snapshotLen + this.#deltaBytes + payload.length <= this.#maxGroupBytes) {
+			if (this.#groupBytes + payload.length <= this.#maxGroupBytes) {
 				this.#last = json;
-				this.#deltaBytes += payload.length;
+				this.#groupBytes += payload.length;
 				this.#groupFrames += 1;
 				return this.#pend({ payload, keyframe: false });
 			}
@@ -242,6 +228,20 @@ export class Encoder<T> {
 
 		const payload = this.#snapshot(new TextEncoder().encode(text));
 		this.#last = json;
+		return this.#pend({ payload, keyframe: true });
+	}
+
+	/**
+	 * Restate the last encoded value as a full snapshot, which must open a new group.
+	 *
+	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
+	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the value
+	 * without the deltas before it. Returns `undefined` before the first value, when there is nothing
+	 * to restate. The frame is a {@link Pending} like any other.
+	 */
+	snapshot(): Pending | undefined {
+		if (this.#last === undefined) return undefined;
+		const payload = this.#snapshot(new TextEncoder().encode(JSON.stringify(this.#last)));
 		return this.#pend({ payload, keyframe: true });
 	}
 
@@ -261,28 +261,15 @@ export class Encoder<T> {
 		};
 	}
 
-	// Resolved delta ratio: the configured value, or the default when unset. `0` disables deltas.
-	get #deltaRatio(): number {
-		return this.#config.deltaRatio ?? DEFAULT_DELTA_RATIO;
-	}
-
 	// Build a delta frame, or `undefined` to signal that a fresh snapshot should be emitted.
-	//
-	// The budget gate runs first, against the deltas already written, so rolling a new group costs no
-	// merge-patch work. Since the gate excludes the frame about to be written, the delta that tips the
-	// group past `ratio * snapshot` still lands: a group overshoots the budget by at most one delta.
 	#delta(json: unknown): Uint8Array | undefined {
 		// A lost frame, or a group the caller closed, leaves the consumer's state unknown, so the next
 		// frame has to be a full snapshot.
 		if (this.#resync) return undefined;
 
-		const ratio = this.#deltaRatio;
-		if (ratio === 0) return undefined;
+		if (this.#config.deltas === false) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (this.#groupFrames === 0 || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
-
-		// Gate on the deltas accumulated so far (snapshot frame excluded), before computing the patch.
-		if (this.#deltaBytes > ratio * this.#snapshotLen) return undefined;
 
 		const result = diff(this.#last, json);
 		if (result.forcedSnapshot) return undefined;
@@ -312,8 +299,7 @@ export class Encoder<T> {
 		const payload = flate ? flate.frame(frame) : frame;
 
 		this.#flate = flate;
-		this.#snapshotLen = payload.length;
-		this.#deltaBytes = 0;
+		this.#groupBytes = payload.length;
 		this.#groupFrames = 1;
 		this.#resync = false;
 

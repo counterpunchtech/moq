@@ -102,7 +102,7 @@ describe("unsupported catalog", () => {
 			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({
 				track,
-				deltaRatio: 0,
+				deltas: false,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
 			const enabled = new Signal(true);

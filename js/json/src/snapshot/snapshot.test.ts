@@ -43,7 +43,7 @@ async function structure(track: Track.Ordered): Promise<number[]> {
 
 test("a cut makes the next update a snapshot group", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 	producer.cut();
@@ -58,7 +58,7 @@ test("a cut makes the next update a snapshot group", async () => {
 
 test("a cut republishes an unchanged value", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1 } });
 	producer.cut();
 
@@ -72,7 +72,7 @@ test("a cut republishes an unchanged value", async () => {
 
 test("a cut opens no replacement group", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1 } });
 	producer.cut();
 	producer.finish();
@@ -83,7 +83,7 @@ test("a cut opens no replacement group", async () => {
 
 test("a cut is idempotent", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 
 	// Nothing published yet, so there is no group to cut.
 	producer.cut();
@@ -101,7 +101,7 @@ test("a cut is idempotent", async () => {
 
 test("a cut is inert without deltas", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltas: false });
 	producer.update({ value: { a: 1 } });
 
 	// With deltas off every frame already closes its own group, so there is never one to cut.
@@ -114,7 +114,7 @@ test("a cut is inert without deltas", async () => {
 
 test("deltas off: a snapshot group per change", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltas: false });
 	producer.update({ value: { a: 1 } });
 	producer.update({ value: { a: 2 } });
 	producer.finish();
@@ -126,33 +126,21 @@ test("deltas off: a snapshot group per change", async () => {
 	expect(await drainLatest(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
 });
 
-test("deltaRatio 0 disables deltas, like off", async () => {
-	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
-	producer.update({ value: { a: 1 } });
-	producer.update({ value: { a: 2 } });
-	producer.finish();
-
-	// `0` is treated as off, not a degenerate "enabled" value that keeps the group open: each change
-	// is its own single-frame snapshot group.
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
-});
-
 // `latest()` holding a group must jump when a newer snapshot group rolls: the
 // buffered deltas in the held group only reconstruct superseded state, and every
 // group restarts from a full snapshot (mirrors the Rust consumer, which drains to
 // the newest group on every poll).
 test("latest abandons a held group when a newer snapshot group rolls", async () => {
 	const track = new Track.Producer("test");
-	// A tiny ratio forces the update after any delta to roll a fresh snapshot group.
-	const producer = new Producer<Value>({ track, deltaRatio: 0.001 });
+	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
 
 	producer.update({ value: { a: 1 } });
 	expect((await consumer.latest())?.value).toEqual({ a: 1 });
 
-	// A delta lands in the held group, then the ratio rolls a new snapshot group.
+	// A delta lands in the held group, then a cut rolls a new snapshot group.
 	producer.update({ value: { a: 2 } });
+	producer.cut();
 	producer.update({ value: { a: 3 } });
 	producer.finish();
 
@@ -163,13 +151,14 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 // `next()` finishes the held group before the newer one, so a playhead sees every state.
 test("next reads a held group out before a newer snapshot group", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0.001 });
+	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
 
 	producer.update({ value: { a: 1 } });
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 
 	producer.update({ value: { a: 2 } });
+	producer.cut();
 	producer.update({ value: { a: 3 } });
 	producer.finish();
 
@@ -182,7 +171,7 @@ test("next reads a held group out before a newer snapshot group", async () => {
 // as on any ordered track, so a reader that falls behind jumps ahead instead of replaying it.
 test("next skips the groups the max delay abandons", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltas: false });
 	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	producer.finish();
 
@@ -215,7 +204,7 @@ test("unchanged value writes nothing", async () => {
 
 test("deltas share one group", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 	producer.update({ value: { a: 1, b: 3 } });
@@ -227,7 +216,7 @@ test("deltas share one group", async () => {
 
 test("deltas reconstruct to the final value", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
 	producer.update({ value: { a: 5, b: 2 } });
@@ -276,7 +265,7 @@ test("mutate without a prior value or initial throws", () => {
 // Exercised with deltas on to cover the merge-patch null-deletion path.
 test("mutate removes a section", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100, initial: {} });
+	const producer = new Producer<Value>({ track, deltas: true, initial: {} });
 	const consumer = new Consumer<Value>({ track: track.subscribe() });
 
 	producer.mutate((v) => {
@@ -291,38 +280,103 @@ test("mutate removes a section", async () => {
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 });
 
-test("tight ratio rolls snapshots", async () => {
-	const track = new Track.Producer("test");
-	// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate checks
-	// the deltas already written, so the delta that tips the group over budget still lands (a one-frame
-	// overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls group 1.
-	const producer = new Producer<Value>({ track, deltaRatio: 1 });
-	producer.update({ value: { a: 1 } }); // snapshot, group 0
-	producer.update({ value: { a: 2 } }); // delta, group 0 (deltas = 7)
-	producer.update({ value: { a: 3 } }); // delta, group 0 (deltas = 14, now over budget)
-	producer.update({ value: { a: 4 } }); // budget already exceeded, rolls group 1
-	producer.finish();
+// Let the producer see a demand change, which the signal delivers in a microtask.
+async function settle(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([3, 1]);
-});
+// Publish `{"n":0}` through `{"n":3}`: a 7-byte snapshot and 21 bytes of deltas.
+function fill(producer: Producer<Value>): void {
+	for (let n = 0; n <= 3; n++) producer.update({ value: { n } });
+}
 
-test("deltas stay within ratio times snapshot", async () => {
-	const track = new Track.Producer("test");
-	// The budget covers only the deltas, not the snapshot frame, measured against the group's snapshot
-	// size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a ratio of 8
-	// budgets 56 bytes of deltas. The gate checks the deltas already written, so the group keeps filling
-	// until they first exceed 56 (nine deltas = 63 bytes) and the next update rolls (a one-frame
-	// overshoot past the 56-byte budget).
-	const producer = new Producer<Value>({ track, deltaRatio: 8 });
+test("deltas never roll without a joiner", async () => {
+	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 10; n++) producer.update({ value: { n } });
 	producer.finish();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([10, 1]);
+	// The deltas outweigh the snapshot ten times over, but nobody joined to ask for a fresh group.
+	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([11]);
+});
+
+test("a joiner over the ratio gets a fresh snapshot", async () => {
+	for (const [refresh, layout] of [
+		[8, [4]],
+		[1, [4, 1]],
+	] as const) {
+		const track = new Track.Producer("test").accept({ refresh });
+		const producer = new Producer<Value>({ track });
+		fill(producer);
+
+		// The joiner still reads the open group; the restatement serves whoever joins next.
+		const joiner = track.subscribe();
+		await settle();
+		producer.finish();
+		joiner.close();
+
+		expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([...layout]);
+		expect(await drainLatest(track.subscribe())).toEqual([{ n: 3 }]);
+	}
+});
+
+test("a refresh reuses the last timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const producer = new Producer<Value>({ track });
+	for (let n = 0; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 10) });
+
+	const joiner = track.subscribe();
+	await settle();
+	producer.finish();
+	joiner.close();
+
+	const ordered = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
+	const timestamps: (number | undefined)[] = [];
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+		const frame = await group.readFrame();
+		timestamps.push(frame?.timestamp?.asMillis());
+		while ((await group.readFrame()) !== undefined) {}
+	}
+	// The restated group opens at the last update's timestamp, not a new one.
+	expect(timestamps).toEqual([0, 30]);
+});
+
+test("no ratio never refreshes", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+	fill(producer);
+
+	const joiner = track.subscribe();
+	await settle();
+	producer.finish();
+	joiner.close();
+
+	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([4]);
+});
+
+test("a compressed refresh opens a fresh window", async () => {
+	const track = new Track.Producer("test").accept({ refresh: 0 });
+	const producer = new Producer<Value>({ track, compression: "deflate" });
+	producer.update({ value: { a: 1, b: 1 } });
+	producer.update({ value: { a: 1, b: 2 } });
+
+	const joiner = track.subscribe();
+	await settle();
+	// The change after the restatement rides as a delta in the new group's window.
+	producer.update({ value: { a: 1, b: 3 } });
+	producer.finish();
+	joiner.close();
+
+	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([2, 2]);
+	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: "deflate" });
+	const values: Value[] = [];
+	for await (const { value } of consumer) values.push(value);
+	expect(values).toEqual([{ a: 1, b: 2 }, { a: 1, b: 3 }]);
 });
 
 test("array change is a wholesale delta", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { list: [1, 2] } });
 	producer.update({ value: { list: [1, 2, 3] } });
 	producer.finish();
@@ -333,7 +387,7 @@ test("array change is a wholesale delta", async () => {
 
 test("a late joiner reads a buffered backlog state by state, or collapses it to the latest", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	const subscriber = track.subscribe();
 	const collapsed = track.subscribe();
 	for (let n = 0; n <= 20; n++) {
@@ -349,7 +403,7 @@ test("a late joiner reads a buffered backlog state by state, or collapses it to 
 
 test("frame cap rolls snapshot", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 1_000_000 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	// First update is the snapshot; deltas fill the group until the frame cap forces a roll.
 	for (let i = 0; i <= 256; i++) {
 		producer.update({ value: { n: i } });
@@ -364,7 +418,7 @@ test("a rejected update leaves the previous value readable", async () => {
 	// rejecting the frame inside writeFrame would supersede the last good value with an empty group.
 	// A snapshot consumer jumps to the newest, so that value would vanish on a failed update.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltas: false });
 	producer.update({ value: { keep: true } });
 
 	// Serializes past the group cache limit, so the frame cannot be published.
@@ -456,7 +510,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 
 test("an update without a timestamp goes out untimed", async () => {
 	const track = new Track.Producer("test").accept({});
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: "x".repeat(64) } });
 	producer.mutate((value) => {
 		value.a = 2;
@@ -470,7 +524,7 @@ test("an update without a timestamp goes out untimed", async () => {
 
 test("a capture timestamp is written on snapshots and deltas alike", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(1_000) });
 	producer.update({ value: { a: 2, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(2_000) });
 	producer.finish();
@@ -482,7 +536,7 @@ test("a capture timestamp is written on snapshots and deltas alike", async () =>
 
 test("an untimed state reads back untimed", async () => {
 	const track = new Track.Producer("test").accept({});
-	const producer = new Producer<Value>({ track, deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ value: { a: 1, b: "x".repeat(64) } });
 	producer.update({ value: { a: 2, b: "x".repeat(64) } });
 	producer.finish();
@@ -496,7 +550,7 @@ test("an untimed state reads back untimed", async () => {
 // hold it back until a playhead reaches it. `latest()` reports the head's own frame.
 test("each state reads back with its frame's timestamp", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
-	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
+	const producer = new Producer<Value>({ track, deltas: true, compression: "deflate" });
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	}

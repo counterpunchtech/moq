@@ -4,7 +4,7 @@ import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-type Step = { value: Json; reset: boolean };
+type Step = { value: Json; reset: boolean; restate: boolean };
 
 // Mirror the Rust generator: bounded JSON trees plus edits to a persistent
 // object, so sequences exercise deltas as well as unrelated snapshot roots.
@@ -27,17 +27,19 @@ const value: fc.Arbitrary<Json> = fc.letrec<{ value: Json }>((tie) => ({
 	),
 })).value;
 const reset = fc.integer({ min: 0, max: 15 }).map((n) => n === 0);
-const roots = fc.array(fc.record({ value, reset }), { minLength: 1, maxLength: 32 });
+// Restate the value before the step with `Encoder.snapshot`, as a refresh does.
+const restate = fc.integer({ min: 0, max: 15 }).map((n) => n === 0);
+const roots = fc.array(fc.record({ value, reset, restate }), { minLength: 1, maxLength: 32 });
 const edits = fc
-	.array(fc.record({ key, value, remove: fc.boolean(), reset }), { minLength: 1, maxLength: 32 })
+	.array(fc.record({ key, value, remove: fc.boolean(), reset, restate }), { minLength: 1, maxLength: 32 })
 	.map((edits): Step[] => {
 		let current: Record<string, Json> = {};
-		return edits.map(({ key, value, remove, reset }) => {
+		return edits.map(({ key, value, remove, reset, restate }) => {
 			const next = { ...current };
 			if (remove) delete next[key];
 			else Object.defineProperty(next, key, { value, enumerable: true, configurable: true, writable: true });
 			current = next;
-			return { value: next, reset };
+			return { value: next, reset, restate };
 		});
 	});
 
@@ -56,15 +58,26 @@ test("snapshot codec property reconstructs each JSON value", () => {
 	const numRuns = setting("MOQ_JSON_CASES", 256, 1);
 	fc.assert(
 		fc.property(
-			fc.constantFrom(0, 1, 2, 8, 100),
+			fc.boolean(),
 			fc.boolean(),
 			fc.oneof(roots, edits),
-			(deltaRatio, deflate, steps) => {
-				const config = { deltaRatio, compression: deflate ? ("deflate" as const) : ("none" as const) };
+			(deltas, deflate, steps) => {
+				const config = { deltas, compression: deflate ? ("deflate" as const) : ("none" as const) };
 				const encoder = new Encoder<Json>(config);
 				const decoder = new Decoder<Json>(config);
-				for (const { value, reset } of steps) {
+				for (const { value, reset, restate } of steps) {
 					if (reset) encoder.reset();
+					if (restate) {
+						const before = decoder.decode();
+						const frame = encoder.snapshot();
+						expect(frame === undefined).toBe(before === undefined);
+						if (frame) {
+							expect(frame.keyframe).toBe(true);
+							decoder.snapshot(frame.payload);
+							frame.commit();
+							expect(decoder.decode()).toEqual(before);
+						}
+					}
 					const frame = encoder.update(value);
 					if (frame) {
 						if (frame.keyframe) decoder.snapshot(frame.payload);
