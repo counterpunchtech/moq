@@ -6,6 +6,9 @@
 //! frame never arrives: the window is spent on a low-priority frame that can never
 //! complete. The Rust arm dials a stock server. The JavaScript arm serves WebTransport
 //! to a Bun publisher; it needs Bun and runs in the interop workflow.
+//!
+//! Some runs go through a bufferbloated path instead of loopback, so a sender held back by
+//! a slow link and a deep queue is shown not to look like a stuck window.
 
 #![cfg(feature = "quic")]
 
@@ -32,6 +35,21 @@ fn transport(window: u64) -> driver::TransportConfig {
 	transport
 }
 
+/// A bottleneck below what the sender can push, behind a deep but finite queue that drops
+/// what overflows it, both ways. No random loss: this judges throughput and latency.
+fn bufferbloat(bits_per_second: u64) -> moq_shaper::Profile {
+	moq_shaper::Profile {
+		delay: Duration::from_millis(10),
+		rate: Some(moq_shaper::Rate {
+			bits_per_second,
+			// One datagram, so a flight is paced rather than let through whole.
+			burst: 1500,
+			queue: Duration::from_millis(250),
+		}),
+		..Default::default()
+	}
+}
+
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
 /// connection with the given transport settings.
 struct Setup {
@@ -39,11 +57,23 @@ struct Setup {
 	remote: moq_net::broadcast::Consumer,
 	/// The client's connection, for its credit stats.
 	conn: driver::Connection,
+	/// The impairment between them, if any.
+	shaper: Option<moq_shaper::Shaper>,
 	_client: moq_net::Session,
 	_endpoint: driver::Endpoint,
 }
 
 async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
+	setup_through(version, transport, None).await
+}
+
+/// [`setup`], with the client reaching the server through a shaper treating both ways to
+/// `profile`.
+async fn setup_through(
+	version: &str,
+	transport: driver::TransportConfig,
+	profile: Option<moq_shaper::Profile>,
+) -> Setup {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
@@ -61,7 +91,22 @@ async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
 		.listen()
 		.await
 		.expect("listen");
-	let port = server.local_addr().expect("addr").port();
+	let server_addr: std::net::SocketAddr = ([127, 0, 0, 1], server.local_addr().expect("addr").port()).into();
+	let shaper = match profile {
+		Some(profile) => Some(
+			moq_shaper::Shaper::bind(moq_shaper::Config {
+				bind: "127.0.0.1:0".parse().unwrap(),
+				target: server_addr,
+				seed: rand_seed(),
+				up: profile.clone(),
+				down: profile,
+			})
+			.await
+			.expect("start the shaper"),
+		),
+		None => None,
+	};
+	let dial = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
 	tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
 		let (session, _driver) = request.with_publisher(&publisher).ok().await.expect("session");
@@ -79,7 +124,7 @@ async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
 
 	let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
 	let conn = endpoint
-		.connect_with(client, ([127, 0, 0, 1], port).into(), "localhost")
+		.connect_with(client, dial, "localhost")
 		.expect("connect")
 		.await
 		.expect("handshake");
@@ -99,9 +144,23 @@ async fn setup(version: &str, transport: driver::TransportConfig) -> Setup {
 		broadcast,
 		remote: room(&subscriber).await,
 		conn,
+		shaper,
 		_client: client,
 		_endpoint: endpoint,
 	}
+}
+
+/// The shaper's seed: `MOQ_SHAPER_SEED` to replay a run, or a fresh one, printed.
+fn rand_seed() -> u64 {
+	let seed = match std::env::var("MOQ_SHAPER_SEED") {
+		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
+		Err(_) => std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos() as u64,
+	};
+	println!("MOQ_SHAPER_SEED={seed}");
+	seed
 }
 
 /// Broadcast `room`, once the peer announces it into `origin`.
@@ -136,6 +195,12 @@ impl Setup {
 	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
 		let track = self.broadcast.create_track(name, timed()).unwrap();
 		(track, subscribe(&self.remote, name, priority).await)
+	}
+
+	/// What the shaper did, failing if the impairment it was given never acted.
+	fn verify(&self) -> Option<moq_shaper::Stats> {
+		let shaper = self.shaper.as_ref()?;
+		Some(shaper.verify().unwrap_or_else(|err| panic!("shaper: {err:#}")))
 	}
 }
 
@@ -184,8 +249,8 @@ async fn read_partial(frame: &mut moq_net::frame::Consumer, bytes: usize) {
 
 /// Two partial frames that together exceed the window: the lower-priority one is
 /// stopped, and the higher-priority one completes on the credit it returns.
-async fn the_less_urgent_partial_frame_gives_way(version: &str) {
-	let setup = setup(version, transport(WINDOW as u64)).await;
+async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<moq_shaper::Profile>) {
+	let setup = setup_through(version, transport(WINDOW as u64), profile).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
 	let (high, mut high_sub) = setup.subscribe("high", 200).await;
 
@@ -216,16 +281,53 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str) {
 	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
+	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
+	setup.verify();
 }
 
 #[tokio::test]
 async fn lite_partial_frame_gives_way() {
-	the_less_urgent_partial_frame_gives_way("moq-lite-06").await;
+	the_less_urgent_partial_frame_gives_way("moq-lite-06", None).await;
 }
 
 #[tokio::test]
 async fn ietf_partial_frame_gives_way() {
-	the_less_urgent_partial_frame_gives_way("moq-transport-16").await;
+	the_less_urgent_partial_frame_gives_way("moq-transport-16", None).await;
+}
+
+/// The same recovery when a slow link with a deep queue sits between them.
+#[tokio::test]
+async fn lite_partial_frame_gives_way_behind_bufferbloat() {
+	the_less_urgent_partial_frame_gives_way("moq-lite-06", Some(bufferbloat(20_000_000))).await;
+}
+
+/// A sender held back by a bottleneck and its queue is pacing, not a stuck window: frames
+/// that fit the window together all complete, and nothing is evicted.
+#[tokio::test]
+async fn bufferbloat_is_not_a_stuck_window() {
+	const STREAMS: usize = 8;
+	const ROUNDS: usize = 16;
+	let setup = setup_through("moq-lite-06", transport(WINDOW as u64), Some(bufferbloat(20_000_000))).await;
+	let payload = Bytes::from(vec![3u8; WINDOW / (2 * STREAMS)]);
+	let mut tasks = Vec::with_capacity(STREAMS);
+	for index in 0..STREAMS {
+		let (track, mut sub) = setup.subscribe(&index.to_string(), index as u8).await;
+		let payload = payload.clone();
+		tasks.push(tokio::spawn(async move {
+			for _ in 0..ROUNDS {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+				group.finish().unwrap();
+				assert_eq!(next_frame(&mut sub).await, payload);
+			}
+		}));
+	}
+	for task in tasks {
+		task.await.unwrap();
+	}
+	assert_eq!(setup.conn.stats().credit.evicted, 0);
+	let stats = setup.verify().expect("shaped");
+	assert!(stats.down.throttled > 0, "the bottleneck held the sender back: {stats}");
 }
 
 /// A frame larger than the whole window, which can never complete: the stuck window
@@ -511,7 +613,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	let mut child = tokio::process::Command::new("bun")
 		.arg(script)
 		.arg(format!("https://127.0.0.1:{port}/"))
-		.arg(version.alpn())
+		.arg(version.to_string())
 		.arg(&pem)
 		.arg(WINDOW.to_string())
 		.stdin(Stdio::piped())
@@ -587,8 +689,10 @@ async fn javascript_partial_frame_gives_way_tokio() {
 
 /// moq-tokio's default connection receive window.
 const STOCK_WINDOW: u64 = 128 << 20;
-/// Bytes each benchmark run delivers.
+/// Bytes each loopback benchmark run delivers.
 const BENCH_BYTES: usize = 256 << 20;
+/// The benchmark's bottleneck, and the bytes a run delivers through it.
+const BENCH_BLOAT: (u64, usize) = (200_000_000, 16 << 20);
 
 /// What one benchmark run measured.
 struct Measured {
@@ -598,13 +702,22 @@ struct Measured {
 	throughput: f64,
 	/// How long frames took from the write to the receiver completing them, sorted.
 	latency: Vec<Duration>,
+	/// Datagrams the bottleneck's full queue dropped.
+	overflowed: u64,
 }
 
-/// Deliver [`BENCH_BYTES`] over `streams` tracks of one-frame groups of `frame` bytes,
-/// each track writing its next group once the last arrived, so `streams` streams are
-/// open at once. `follow` gives each stream the whole connection window; otherwise it
-/// keeps the driver's finite default.
-async fn measure(streams: usize, frame: usize, follow: bool) -> Measured {
+/// Deliver `bytes` over `streams` tracks of one-frame groups of `frame` bytes, each track
+/// writing its next group once the last arrived, so `streams` streams are open at once.
+/// `follow` gives each stream the whole connection window; otherwise it keeps the
+/// driver's finite default. Every frame fits the window alongside the others, so nothing
+/// may be evicted, through `profile` or not.
+async fn measure(
+	streams: usize,
+	frame: usize,
+	follow: bool,
+	profile: Option<moq_shaper::Profile>,
+	bytes: usize,
+) -> Measured {
 	let mut transport = transport(STOCK_WINDOW);
 	let max = driver::VarInt::from_u64(moq_tokio::quic::DEFAULT_MAX_STREAMS).unwrap();
 	transport.max_concurrent_uni_streams(max);
@@ -612,7 +725,7 @@ async fn measure(streams: usize, frame: usize, follow: bool) -> Measured {
 	if follow {
 		transport.stream_receive_window(driver::VarInt::from_u64(STOCK_WINDOW).unwrap());
 	}
-	let setup = setup("moq-lite-06", transport).await;
+	let setup = setup_through("moq-lite-06", transport, profile).await;
 	let mut tracks = Vec::with_capacity(streams);
 	for index in 0..streams {
 		tracks.push(setup.subscribe(&index.to_string(), 0).await);
@@ -633,7 +746,7 @@ async fn measure(streams: usize, frame: usize, follow: bool) -> Measured {
 		}
 	});
 
-	let rounds = (BENCH_BYTES / frame / streams).max(1);
+	let rounds = (bytes / frame / streams).max(1);
 	let payload = Bytes::from(vec![7u8; frame]);
 	let start = std::time::Instant::now();
 	let tasks: Vec<_> = tracks
@@ -661,19 +774,24 @@ async fn measure(streams: usize, frame: usize, follow: bool) -> Measured {
 	let elapsed = start.elapsed();
 	done.store(true, std::sync::atomic::Ordering::Relaxed);
 	latency.sort();
+	assert_eq!(setup.conn.stats().credit.evicted, 0, "pacing evicted a stream");
 	Measured {
 		retained: sampler.await.unwrap(),
 		throughput: (rounds * streams * frame) as f64 / elapsed.as_secs_f64(),
 		latency,
+		overflowed: setup
+			.verify()
+			.map_or(0, |stats| stats.down.overflowed + stats.up.overflowed),
 	}
 }
 
 /// What bounded receive memory costs: a finite stream window against one that follows the
 /// connection window, swept over concurrent streams and frame sizes on separate axes so
-/// a cost that grows with either shows up as a slope. Reports the peak retained bytes
-/// (leased plus unread), throughput, and frame completion latency, each the median
-/// of the runs. The publisher is a stock server, so its send window bounds what is in
-/// flight as it would in production. Run by nightly.
+/// a cost that grows with either shows up as a slope, on loopback and through a
+/// bufferbloated bottleneck. Reports the peak retained bytes (leased plus unread),
+/// throughput, frame completion latency, and the bottleneck's queue drops, each the median
+/// of the runs, and fails if any run evicted a stream. The publisher is a stock server, so
+/// its send window bounds what is in flight as it would in production. Run by nightly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {
@@ -684,13 +802,19 @@ async fn benchmark_receive_windows() {
 		.map(|streams| ("streams", streams, FRAME))
 		.into_iter()
 		.chain([16 * 1024, 256 * 1024, 4 << 20].map(|frame| ("frame", STREAMS, frame)));
-	println!("axis,streams,frame,stream_window,retained_mib,mib_per_s,p50_ms,p99_ms");
-	for (axis, streams, frame) in cells {
+	let paths = [
+		("loopback", None, BENCH_BYTES),
+		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
+	];
+	println!("path,axis,streams,frame,stream_window,retained_mib,mib_per_s,p50_ms,p99_ms,overflowed");
+	for ((axis, streams, frame), (path, profile, bytes)) in
+		cells.flat_map(|cell| paths.clone().map(|path| (cell, path)))
+	{
 		let mut runs: [Vec<Measured>; 2] = Default::default();
 		// Alternate the modes so drift in the host hits both alike.
 		for _ in 0..RUNS {
 			for (mode, follow) in [false, true].into_iter().enumerate() {
-				runs[mode].push(measure(streams, frame, follow).await);
+				runs[mode].push(measure(streams, frame, follow, profile.clone(), bytes).await);
 			}
 		}
 		for (runs, mode) in runs.iter().zip(["finite", "follow"]) {
@@ -707,8 +831,9 @@ async fn benchmark_receive_windows() {
 			};
 			let retained = median(runs.iter().map(|run| run.retained as f64).collect());
 			let throughput = median(runs.iter().map(|run| run.throughput).collect());
+			let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
 			println!(
-				"{axis},{streams},{frame},{mode},{:.1},{:.0},{:.2},{:.2}",
+				"{path},{axis},{streams},{frame},{mode},{:.1},{:.0},{:.2},{:.2},{overflowed}",
 				retained / (1 << 20) as f64,
 				throughput / (1 << 20) as f64,
 				percentile(50),
