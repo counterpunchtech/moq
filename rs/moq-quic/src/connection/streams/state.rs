@@ -3509,6 +3509,39 @@ mod tests {
         assert_eq!(lease(&mut client, waiting), WINDOW as usize);
     }
 
+    /// Evicting a stream whose final size is already known frees it, so its stream ID credit goes
+    /// out with the eviction, as on a stop, instead of waiting for the next packet.
+    #[test]
+    fn eviction_issues_stream_credit() {
+        const WINDOW: usize = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            2u32.into(),
+            2u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(2 * WINDOW as u64).unwrap(),
+            VarInt::from_u64(2 * WINDOW as u64).unwrap(),
+        );
+        let [parked, waiting] = [0, 1].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        let mut pending = Retransmits::default();
+        recv(&mut client, &mut pending, parked).set_priority(-1);
+        data(&mut client, parked, 0, WINDOW / 2, false);
+        assert_eq!(lease(&mut client, parked), WINDOW / 2);
+        // The rest and the FIN arrive after its reader parked.
+        data(&mut client, parked, WINDOW as u64 / 2, WINDOW / 2, true);
+        data(&mut client, waiting, 0, WINDOW, false);
+        assert_eq!(lease(&mut client, waiting), WINDOW);
+
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, waiting).lease(2 * WINDOW),
+            Err(LeaseError::Blocked(ShouldTransmit(true)))
+        );
+        assert!(client.leased(parked).unwrap().evicted);
+        assert!(!client.recv.contains_key(&parked), "freed");
+        assert!(pending.max_stream_id[Dir::Uni as usize]);
+    }
+
     /// Credit left unadvertised is still credit: the peer is not stuck, it just has not heard.
     #[test]
     fn window_with_credit_is_not_stuck() {

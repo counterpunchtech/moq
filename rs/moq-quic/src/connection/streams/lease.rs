@@ -158,6 +158,10 @@ impl RecvStream<'_> {
                     let evicted = self.state.evict_if_stuck().inspect(|max_data| {
                         self.pending.max_data |= max_data.should_transmit();
                     });
+                    // It may have freed a stream whose final size was known, as a stop does.
+                    if evicted.is_some() {
+                        self.state.queue_max_stream_id(self.pending);
+                    }
                     return Err(LeaseError::Blocked(ShouldTransmit(
                         transmit.should_transmit() || evicted.is_some(),
                     )));
