@@ -9,7 +9,7 @@
  * - `high`: half a window on `high`, which only fits once the receiver stops `low`.
  * - `after`: a small group on `low`, which has to arrive after that stream is stopped.
  *
- *     bun sender.ts https://127.0.0.1:PORT/ ALPN CERT.pem WINDOW
+ *     bun sender.ts https://127.0.0.1:PORT/ VERSION CERT.pem WINDOW
  *
  * Exits 0 once stdin closes.
  *
@@ -24,10 +24,10 @@ console.debug = console.error;
 // Bun has no native WebTransport; @moq/net reads the global at connect time.
 install();
 
-const [address, protocol, certificate, windowArg] = process.argv.slice(2);
+const [address, version, certificate, windowArg] = process.argv.slice(2);
 const window = Number(windowArg);
-if (!address || !protocol || !certificate || !Number.isInteger(window) || window <= 0) {
-	console.error("usage: sender.ts URL ALPN CERT.pem WINDOW");
+if (!address || !version || !certificate || !Number.isInteger(window) || window <= 0) {
+	console.error("usage: sender.ts URL VERSION CERT.pem WINDOW");
 	process.exit(2);
 }
 
@@ -40,7 +40,8 @@ broadcast.announce();
 const session = await Moq.Connection.connect({
 	url: new URL(address),
 	publish: origin.consume(),
-	webtransport: { protocols: [protocol], serverCertificate: await Bun.file(certificate).text() },
+	versions: [version],
+	webtransport: { serverCertificate: await Bun.file(certificate).text() },
 	// The point is the native QUIC receiver; a WebSocket fallback would skip it.
 	websocket: { enabled: false },
 });
