@@ -86,8 +86,9 @@ Raise the receive windows when a fat, long path idles below the link rate. The
 how much unread data and incomplete messages one peer can make the relay
 buffer. It has to fit the largest message, just over 64 MiB, so a smaller
 value, here or in `[peer.quic]`, is refused at startup. When incomplete
-messages fill the window, the relay cancels the least urgent stream, the
-oldest group's before a newer one's. Over iroh the window bounds only
+messages fill the window, the relay cancels the least urgent stream: the
+lowest subscription priority, then the group its subscription would deliver
+last. Over iroh the window bounds only
 unread data, and over WebSocket or TCP nothing bounds incomplete messages.
 `stream_receive_window` only paces one stream: its credit returns as bytes are
 read, whether or not their message is complete.
