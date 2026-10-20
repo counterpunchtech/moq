@@ -517,7 +517,12 @@ impl<F: Container> Consumer<F> {
 				// Late since a group past it arrived, not since the cursor got here: once the edge
 				// stops moving, a backlog with every other group missing would otherwise drain one
 				// budget per hole, which reads downstream as a source far slower than real time.
-				let since = self.pending.iter().map(|group| group.arrived).min().expect("a front group");
+				let since = self
+					.pending
+					.iter()
+					.map(|group| group.arrived)
+					.min()
+					.expect("a front group");
 				let elapsed = since.elapsed() >= self.max_delay;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
 				let excluded = self

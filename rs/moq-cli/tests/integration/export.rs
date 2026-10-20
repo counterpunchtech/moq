@@ -838,7 +838,14 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 /// importer sends no close, so the relay keeps its route until the QUIC idle timeout: a short
 /// one, as a redundant ingest would run, keeps that outage to seconds.
 fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
-	let global = ["--connect-version", LITE_07, "--quic-idle-timeout", "2s", "--quic-keep-alive", "500ms"];
+	let global = [
+		"--connect-version",
+		LITE_07,
+		"--quic-idle-timeout",
+		"2s",
+		"--quic-keep-alive",
+		"500ms",
+	];
 	let mut child = moq(relay, &global)
 		.args(["import", "--max-age", "10s", "ts"])
 		.args(flags)
