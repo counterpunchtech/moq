@@ -75,12 +75,22 @@ if(MOQ_FFI_DIR)
             message(FATAL_ERROR "Missing prebuilt FFI input: ${_input}")
         endif()
     endforeach()
-    set(_build_ffi "")
+    set(_cargo_ffi "")
 else()
     # The OpenH264 software fallback is opt-in in Rust; the C++ package ships it, like the
     # prebuilt input does.
-    set(_build_ffi COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags})
-    set(_ffi_byproducts "${MOQ_FFI_LIB}" "${_metadata}")
+    # One cargo target per build tree, so a project adding both c/moq and cpp/moq (which build
+    # the same moq-ffi) has one rule for its outputs, as Ninja requires.
+    if(NOT TARGET moq_ffi_cargo)
+        add_custom_target(moq_ffi_cargo
+            COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags}
+            WORKING_DIRECTORY "${_workspace}"
+            BYPRODUCTS "${MOQ_FFI_LIB}" "${_metadata}"
+            COMMENT "Building moq-ffi"
+            VERBATIM
+        )
+    endif()
+    set(_cargo_ffi moq_ffi_cargo)
 endif()
 
 find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
@@ -96,17 +106,19 @@ list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _genera
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
 list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_paths)
 add_custom_target(moq_ffi ALL
-    ${_build_ffi}
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
     COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_render_paths} "${_generated}"
     WORKING_DIRECTORY "${_workspace}"
-    BYPRODUCTS ${_ffi_byproducts} ${_generated_paths}
-    COMMENT "Preparing moq-ffi and rendering its C++ bindings"
+    BYPRODUCTS ${_generated_paths}
+    COMMENT "Rendering the moq-ffi C++ bindings"
     VERBATIM
 )
+if(_cargo_ffi)
+    add_dependencies(moq_ffi ${_cargo_ffi})
+endif()
 # System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
 # dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
 if(APPLE)
