@@ -32,10 +32,11 @@ class SnapshotProducer:
     """Publish a JSON value that consumers see as a single latest state (lossy).
 
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
-    snapshots and merge-patch deltas automatically. ``delta_ratio`` controls how aggressively
-    deltas replace full snapshots (0 disables them); ``None`` uses the binding's default. Set
-    ``compression`` to DEFLATE-compress each group; the consumer must pass the same flag. A name
-    the catalog already carries is refused.
+    snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
+    as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
+    joiner that would download more than that many snapshots' worth of deltas gets the value
+    restated in a fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
+    must pass the same flag. A name the catalog already carries is refused.
     """
 
     def __init__(
@@ -43,15 +44,10 @@ class SnapshotProducer:
         broadcast: BroadcastProducer,
         track: TrackProducer,
         *,
-        delta_ratio: int | None = None,
+        deltas: bool = True,
         compression: bool = False,
     ) -> None:
-        # Let the record supply delta_ratio's default rather than restating it here.
-        config = (
-            MoqJsonSnapshotConfig(compression=compression)
-            if delta_ratio is None
-            else MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
-        )
+        config = MoqJsonSnapshotConfig(deltas=deltas, compression=compression)
         self._inner = MoqJsonSnapshotProducer(broadcast._inner, track._inner, config)
 
     def demand(self) -> TrackDemand:
@@ -101,7 +97,7 @@ class SnapshotConsumer:
     """
 
     def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
-        # delta_ratio is producer-only, so leave it at its default here.
+        # deltas is producer-only, so leave it at its default here.
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
 

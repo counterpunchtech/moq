@@ -175,7 +175,7 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: SnapshotConfig = SnapshotConfig(deltaRatio = 8u, compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true, compression = false)
         val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
@@ -195,7 +195,7 @@ class SmokeTest {
         assertEquals(listOf("localhost"), server.tls.generate)
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
-        assertEquals(8u, snapshot.deltaRatio)
+        assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
@@ -409,7 +409,7 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update(Status(state = "live"))
 
@@ -421,7 +421,7 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
@@ -442,7 +442,7 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 

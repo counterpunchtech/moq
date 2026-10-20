@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `delta_ratio` is `deltas`
+
+`moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
+Set `deltas = false` where you set `delta_ratio = 0`, and `deltas = true` for any positive ratio.
+With deltas on, the track carries a refresh ratio of 8 and the producer restates the value in a new group when a joiner asks.
+
 ### Demand reports the wanted group (#5930)
 
 `moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.

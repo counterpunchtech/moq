@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Groups roll on joiner demand
+
+`snapshot::Config::delta_ratio` and `window::ProducerConfig::op_ratio`, with `with_delta_ratio` and `with_op_ratio`, are replaced by `deltas: bool` and `ops: bool` (both default `true`).
+Set `deltas: false` where you set `delta_ratio = 0`, and `ops: false` where you set `op_ratio = 0`.
+A group no longer rolls on a byte budget: create the track with `Info::refresh` (`Some(8)` matches the old default) and drive `Producer::refresh` (or `poll_refresh`) beside your edits, so a joiner past the ratio gets the value or window restated in a new group.
+Without a ratio a group rolls only at its frame and byte caps.
+An `Encoder` user restates with `Encoder::snapshot()` once `Demand::wanted` passes the largest group it wrote.
+
 ### Duplicate keys are refused
 
 Every decoder refuses a frame in which a JSON object repeats a key with `Error::DuplicateKey`, where stream and window decoders used to keep the last copy and snapshots returned `Error::Json`.
