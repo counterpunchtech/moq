@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Set `Deltas` to a pointer to `false` where you set `DeltaRatio` to a pointer to `0`, and leave it nil otherwise.
 Publish the track with a `Refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `Ranges` cover.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.

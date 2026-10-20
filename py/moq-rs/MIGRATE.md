@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Pass `deltas=False` where you passed `delta_ratio=0`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `ranges` cover.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.
