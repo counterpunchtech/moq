@@ -44,6 +44,11 @@ else()
         set(_profile release)
         set(_cargo_flags --release)
     endif()
+    # A build target, even the host's, moves the library under <triple>/, which cargo metadata
+    # does not report. A `[build] target` in a cargo config fails later, at the missing library.
+    if(DEFINED ENV{CARGO_BUILD_TARGET})
+        message(FATAL_ERROR "Unsupported CARGO_BUILD_TARGET: moq-ffi builds for the host here; unset it")
+    endif()
     # Ask cargo, so CARGO_TARGET_DIR (even relative) and a configured build.target-dir both land
     # where the build below puts the library.
     execute_process(
