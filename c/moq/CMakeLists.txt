@@ -47,11 +47,15 @@ else()
         set(_profile release)
         set(_cargo_flags --release)
     endif()
-    if(DEFINED ENV{CARGO_TARGET_DIR})
-        set(_cargo_target "$ENV{CARGO_TARGET_DIR}")
-    else()
-        set(_cargo_target "${_workspace}/target")
-    endif()
+    # Ask cargo, so CARGO_TARGET_DIR (even relative) and a configured build.target-dir both land
+    # where the build below puts the library.
+    execute_process(
+        COMMAND cargo metadata --locked --no-deps --format-version 1
+        WORKING_DIRECTORY "${_workspace}"
+        OUTPUT_VARIABLE _cargo_metadata
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    string(JSON _cargo_target GET "${_cargo_metadata}" target_directory)
 endif()
 
 if(WIN32)

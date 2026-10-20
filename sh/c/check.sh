@@ -61,7 +61,11 @@ fi
 run() {
     if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi
 }
-cmake -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$prefix"
+# Debian-family CMake never searches lib64/ under a prefix, so a lib64 install is found by its
+# config directory, as a Debian user of one would have to.
+find=(-DCMAKE_PREFIX_PATH="$prefix")
+[[ "$libdir" == lib ]] || find=(-Dmoq-c_DIR="$prefix/$libdir/cmake/moq-c")
+cmake -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug "${find[@]}"
 cmake --build "$build/test" --config Release
 run "$build/test"
 
