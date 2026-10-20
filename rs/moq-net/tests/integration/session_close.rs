@@ -64,8 +64,10 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 		.expect("broadcast resolves");
 
 	// The publisher only learns of a subscription once the subscriber polls it.
+	let (ready, active) = futures::channel::oneshot::channel();
 	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
+		let _ = ready.send(());
 		let mut got = Vec::new();
 		loop {
 			let mut group = match sub.recv_group().await {
@@ -86,6 +88,12 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
+	// Both ends hold the subscription, so a close tests only the group tail and not a
+	// control response still in flight.
+	moq_clock::timeout(TIMEOUT, active)
+		.await
+		.expect("the subscription never became active")
+		.expect("reader alive");
 
 	Setup {
 		pair,

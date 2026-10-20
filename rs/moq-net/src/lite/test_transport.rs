@@ -18,8 +18,12 @@ use std::{
 
 use crate::transport::poll;
 
+/// A failed transport call. After a session close, it carries that close's code, as a
+/// real transport reports the code the session ended with.
 #[derive(Debug, Clone, Default)]
-pub struct SinkError;
+pub struct SinkError {
+	code: u32,
+}
 
 impl std::fmt::Display for SinkError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,7 +35,7 @@ impl std::error::Error for SinkError {}
 
 impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
-		Some((0, "closed".to_string()))
+		Some((self.code, "closed".to_string()))
 	}
 }
 
@@ -53,7 +57,8 @@ pub struct Log {
 	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
-	closed: kio::Shared<bool>,
+	/// The first session close's code, once one happened.
+	closed: kio::Shared<Option<u32>>,
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
@@ -84,10 +89,12 @@ impl Log {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<SinkError> {
 		self.closed
 			.poll(waiter, |closed| match **closed {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
 			})
-			.map(|_| SinkError)
+			.map(|closed| SinkError {
+				code: closed.expect("closed"),
+			})
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -176,7 +183,7 @@ impl Log {
 			.unwrap()
 			.get_or_insert_with(|| (self.trail.lock().unwrap().len(), self.stops.lock().unwrap().len()));
 		self.closes.lock().unwrap().push((code, reason.to_owned()));
-		*self.closed.lock() = true;
+		self.closed.lock().get_or_insert(code);
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -854,7 +861,7 @@ impl poll::RecvStream for ScriptedRecv {
 		match take {
 			0 => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
-				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
+				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
 				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
 			take => Poll::Ready(Ok(Some(take))),
