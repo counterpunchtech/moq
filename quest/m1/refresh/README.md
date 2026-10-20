@@ -1,4 +1,4 @@
-# Refresh: new groups on demand
+# [M] Refresh: new groups on demand
 
 ## Goal
 
@@ -59,10 +59,6 @@ Work owned by this README, after the children land:
 - A short "Refresh" section on the `doc/concept` page that covers groups:
   what the ratio means, what a publisher does on `wanted`, and how relays
   forward it. No new guide.
-
-## Required
-
-- [Lite wire](/quest/m1/refresh/lite.md) - lite-07 TRACK_INFO advertises the ratio and SUBSCRIBE_UPDATE carries the wanted group, so a join at any relay reaches the origin
 
 ## Related
 

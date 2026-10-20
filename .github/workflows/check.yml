@@ -33,7 +33,8 @@ jobs:
     # A close/merge run exists only to cancel the superseded in-flight build via
     # the concurrency group above.
     if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    runs-on: ubuntu-24.04-arm
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
@@ -57,19 +58,8 @@ jobs:
         env:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
@@ -99,7 +89,8 @@ jobs:
   test:
     name: Test
     if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    runs-on: ubuntu-24.04-arm
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
@@ -122,19 +113,8 @@ jobs:
         env:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
 
       # Reads and writes like the `check` job above.
       - name: Rust cache
