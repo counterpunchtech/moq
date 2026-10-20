@@ -54,7 +54,6 @@ It embeds the same Rust runtime as the C++ package, `moq-cpp`, so a program link
 
 ## moq-c 0.7, the hand-written ABI
 
-
 ### Demand reports the wanted group (#5930)
 
 `moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.
