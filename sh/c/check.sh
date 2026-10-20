@@ -64,6 +64,19 @@ if [[ -z "$archive" && -z "$ffi_dir" ]] && command -v ninja >/dev/null 2>&1; the
     ninja -C "$build/superbuild" -n >/dev/null
 fi
 
+# Naming the system makes CMake cross-compile, which a source build of moq-ffi refuses at
+# configure, pointing at a prebuilt input. Windows' generator is left alone.
+if [[ -z "$archive" && -z "$ffi_dir" && "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
+    if cmake -S moq -B "$build/cross" -DCMAKE_SYSTEM_NAME="$(uname -s)" >"$build/cross.log" 2>&1; then
+        echo "A cross-compiling source build configured instead of refusing" >&2
+        exit 1
+    fi
+    grep -q MOQ_FFI_DIR "$build/cross.log" || {
+        cat "$build/cross.log" >&2
+        exit 1
+    }
+fi
+
 run() {
     if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/${2:-Release}/probe.exe"; fi
 }

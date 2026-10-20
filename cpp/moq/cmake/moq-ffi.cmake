@@ -24,6 +24,23 @@ if(CMAKE_SCRIPT_MODE_FILE)
         message(FATAL_ERROR "cargo reported no moq_ffi library")
     endif()
     string(JSON _count LENGTH "${_artifact}" filenames)
+    # The wrappers compile for the host, so moq-ffi must too. A build target (CARGO_BUILD_TARGET
+    # or a cargo config's build.target) puts the library under <target-dir>/<triple>/<profile>/.
+    string(JSON _file GET "${_artifact}" filenames 0)
+    get_filename_component(_dir "${_file}" DIRECTORY)
+    get_filename_component(_dir "${_dir}" DIRECTORY)
+    get_filename_component(_triple "${_dir}" NAME)
+    execute_process(COMMAND rustc -vV OUTPUT_VARIABLE _rustc COMMAND_ERROR_IS_FATAL ANY)
+    string(REGEX MATCH "host: ([^\r\n]+)" _ "${_rustc}")
+    set(_host "${CMAKE_MATCH_1}")
+    execute_process(COMMAND rustc --print target-list OUTPUT_VARIABLE _targets
+        COMMAND_ERROR_IS_FATAL ANY)
+    string(REPLACE "\r" "" _targets "${_targets}")
+    string(REPLACE "\n" ";" _targets "${_targets}")
+    if(NOT _triple STREQUAL _host AND _triple IN_LIST _targets)
+        message(FATAL_ERROR "cargo built moq-ffi for ${_triple}, not the host (${_host}); a "
+            "source build targets the host, so unset the cargo build target or use MOQ_FFI_DIR")
+    endif()
     foreach(_name IN ITEMS ${STATIC} ${DYNAMIC})
         set(_found "")
         math(EXPR _last "${_count} - 1")
@@ -102,6 +119,11 @@ if(MOQ_FFI_DIR)
     endforeach()
     set(MOQ_FFI_CARGO "")
 else()
+    # Cargo builds for the host, so a cross-compiling project stages a prebuilt input instead.
+    if(CMAKE_CROSSCOMPILING)
+        message(FATAL_ERROR "A source build of moq-ffi targets the host; when cross-compiling, "
+            "set MOQ_FFI_DIR to a native package for the target")
+    endif()
     # The top-level build tree, so a project adding both packages shares one cargo build and
     # one rule for its outputs, as Ninja requires.
     set(_out "${CMAKE_BINARY_DIR}/moq-ffi")
