@@ -371,7 +371,10 @@ test("a compressed refresh opens a fresh window", async () => {
 	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: "deflate" });
 	const values: Value[] = [];
 	for await (const { value } of consumer) values.push(value);
-	expect(values).toEqual([{ a: 1, b: 2 }, { a: 1, b: 3 }]);
+	expect(values).toEqual([
+		{ a: 1, b: 2 },
+		{ a: 1, b: 3 },
+	]);
 });
 
 test("array change is a wholesale delta", async () => {

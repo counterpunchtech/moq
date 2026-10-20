@@ -909,7 +909,9 @@ impl Publish {
 	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
 	/// The catalog entry (`json.tracks.<name>`, `mode: stream`) lives as long as the track.
 	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, None, |catalog, track| catalog.json_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.json_stream(track, config)
+		})?;
 		self.json_stream.insert(producer)
 	}
 
@@ -932,7 +934,9 @@ impl Publish {
 	/// Create a binary snapshot track (lossy latest-value) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: snapshot`.
 	pub fn binary_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, None, |catalog, track| catalog.binary_snapshot(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_snapshot(track, config)
+		})?;
 		self.binary_snapshot.insert(producer)
 	}
 
@@ -955,7 +959,9 @@ impl Publish {
 	/// Create a binary stream track (lossless append-log) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: stream`.
 	pub fn binary_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, None, |catalog, track| catalog.binary_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_stream(track, config)
+		})?;
 		self.binary_stream.insert(producer)
 	}
 

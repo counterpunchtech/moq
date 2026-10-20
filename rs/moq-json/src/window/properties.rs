@@ -259,16 +259,13 @@ fn window_codec_property_matches_every_readers_logical_window() {
 		1..65,
 	);
 	let sequence = (
-		(
-			any::<bool>(),
-			any::<bool>(),
-			proptest::option::of(1usize..=8),
-		)
-			.prop_map(|(ops, compression, checkpoint_records)| ProducerConfig {
+		(any::<bool>(), any::<bool>(), proptest::option::of(1usize..=8)).prop_map(
+			|(ops, compression, checkpoint_records)| ProducerConfig {
 				ops,
 				compression,
 				checkpoint_records,
-			}),
+			},
+		),
 		steps,
 		0usize..64,
 	);

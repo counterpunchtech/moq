@@ -137,9 +137,7 @@ impl Recording {
 				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
-			let config = window::ProducerConfig::default()
-				.with_compression(true)
-				.with_ops(false);
+			let config = window::ProducerConfig::default().with_compression(true).with_ops(false);
 			let encoder = Encoder {
 				encoder: window::Encoder::new(config),
 				group: 0,

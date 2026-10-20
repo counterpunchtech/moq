@@ -224,10 +224,7 @@ test("frames apply without materializing", () => {
 
 test("compressed deltas reuse the group window", () => {
 	const phrase = "Media over QUIC delivers real-time latency at massive scale";
-	const frames = encode({ deltas: true, compression: "deflate" }, [
-		{ note: phrase },
-		{ note: phrase, echo: phrase },
-	]);
+	const frames = encode({ deltas: true, compression: "deflate" }, [{ note: phrase }, { note: phrase, echo: phrase }]);
 
 	// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
 	const raw = new TextEncoder().encode(JSON.stringify({ echo: phrase })).length;

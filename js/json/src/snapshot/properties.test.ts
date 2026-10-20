@@ -57,38 +57,33 @@ test("snapshot codec property reconstructs each JSON value", () => {
 	const seed = setting("MOQ_JSON_SEED", 0x6d6f71, 0);
 	const numRuns = setting("MOQ_JSON_CASES", 256, 1);
 	fc.assert(
-		fc.property(
-			fc.boolean(),
-			fc.boolean(),
-			fc.oneof(roots, edits),
-			(deltas, deflate, steps) => {
-				const config = { deltas, compression: deflate ? ("deflate" as const) : ("none" as const) };
-				const encoder = new Encoder<Json>(config);
-				const decoder = new Decoder<Json>(config);
-				for (const { value, reset, restate } of steps) {
-					if (reset) encoder.reset();
-					if (restate) {
-						const before = decoder.decode();
-						const frame = encoder.snapshot();
-						expect(frame === undefined).toBe(before === undefined);
-						if (frame) {
-							expect(frame.keyframe).toBe(true);
-							decoder.snapshot(frame.payload);
-							frame.commit();
-							expect(decoder.decode()).toEqual(before);
-						}
-					}
-					const frame = encoder.update(value);
+		fc.property(fc.boolean(), fc.boolean(), fc.oneof(roots, edits), (deltas, deflate, steps) => {
+			const config = { deltas, compression: deflate ? ("deflate" as const) : ("none" as const) };
+			const encoder = new Encoder<Json>(config);
+			const decoder = new Decoder<Json>(config);
+			for (const { value, reset, restate } of steps) {
+				if (reset) encoder.reset();
+				if (restate) {
+					const before = decoder.decode();
+					const frame = encoder.snapshot();
+					expect(frame === undefined).toBe(before === undefined);
 					if (frame) {
-						if (frame.keyframe) decoder.snapshot(frame.payload);
-						else decoder.delta(frame.payload);
+						expect(frame.keyframe).toBe(true);
+						decoder.snapshot(frame.payload);
 						frame.commit();
+						expect(decoder.decode()).toEqual(before);
 					}
-					// JSON serialization defines the domain, including its normalization.
-					expect(decoder.decode()).toEqual(JSON.parse(JSON.stringify(value)));
 				}
-			},
-		),
+				const frame = encoder.update(value);
+				if (frame) {
+					if (frame.keyframe) decoder.snapshot(frame.payload);
+					else decoder.delta(frame.payload);
+					frame.commit();
+				}
+				// JSON serialization defines the domain, including its normalization.
+				expect(decoder.decode()).toEqual(JSON.parse(JSON.stringify(value)));
+			}
+		}),
 		{ seed, numRuns },
 	);
 });

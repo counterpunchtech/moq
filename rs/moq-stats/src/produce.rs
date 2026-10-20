@@ -1629,7 +1629,10 @@ mod tests {
 		let _late = track.subscribe(None);
 		assert_eq!(wanted(&track), Some(1), "the join asks for a fresh group");
 
-		assert!(snapshot.update(&frame(9)).unwrap().is_some(), "restated though unchanged");
+		assert!(
+			snapshot.update(&frame(9)).unwrap().is_some(),
+			"restated though unchanged"
+		);
 		assert_eq!(snapshot.largest, Some(1));
 		assert!(snapshot.update(&frame(10)).unwrap().is_some());
 		assert_eq!(snapshot.largest, Some(1), "the next change is a delta");

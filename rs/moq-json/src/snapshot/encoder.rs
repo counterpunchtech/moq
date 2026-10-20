@@ -572,11 +572,7 @@ mod test {
 			failure_persistence: None,
 			..Default::default()
 		});
-		let sequence = (
-			any::<bool>(),
-			any::<bool>(),
-			property_sequence(),
-		);
+		let sequence = (any::<bool>(), any::<bool>(), property_sequence());
 		runner
 			.run(&sequence, |(deltas, deflate, steps)| {
 				let compression = if deflate {
@@ -584,10 +580,7 @@ mod test {
 				} else {
 					Compression::None
 				};
-				let mut encoder = Encoder::<Value>::new(Config {
-					deltas,
-					compression,
-				});
+				let mut encoder = Encoder::<Value>::new(Config { deltas, compression });
 				let mut decoder = super::super::Decoder::<Value>::new(super::super::consumer::Config {
 					compression,
 					..Default::default()
