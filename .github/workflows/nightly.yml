@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the merge queue's Check and Test, so every
-# path-filtered gate (Android, C++, WASM, X11, the audio replays, platform.yml
+# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, platform.yml
 # and the release dry-runs) runs here on main too, and on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
@@ -53,6 +53,9 @@ jobs:
 
   android:
     uses: ./.github/workflows/android.yml
+
+  c:
+    uses: ./.github/workflows/c.yml
 
   cpp:
     uses: ./.github/workflows/cpp.yml
