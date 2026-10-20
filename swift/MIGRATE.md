@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### JSON consumers yield `Json.Timed` (#5677)
+
+`Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.
