@@ -15,7 +15,7 @@ export type ProducerConfig = Config & { track: Moq.Track.Producer };
  *
  * A group of ops runs until a joiner wants a fresh one: once the ops outweigh the track's `refresh`
  * ratio times the header, a join asks for a group past the largest, and the producer restates the
- * window there at the timestamp of the last edit. Set the ratio when creating the track, or joins
+ * window there at the newest timestamp written. Set the ratio when creating the track, or joins
  * never ask.
  *
  * @public
@@ -30,7 +30,8 @@ export class Producer<T> {
 
 	// The sequence of the newest group written, which a joiner's wanted group has to pass.
 	#largest?: number;
-	// The timestamp of the last committed edit, which a refresh restates the window at.
+	// The newest timestamp written, which a refresh restates the window at. An edit may carry an
+	// older timestamp than its group's first frame, and a new group may not start before that one.
 	#at?: Time.Timestamp;
 	// Stops watching the track's demand.
 	#unwatch?: () => void;
@@ -50,11 +51,13 @@ export class Producer<T> {
 	#refresh(wanted: number | undefined): void {
 		if (this.#finished || wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
 
-		// Nobody awaits a refresh, so a failed write has no caller to report to. It leaves the frame
-		// uncommitted, so the next edit opens a new group and reports the error itself.
+		// Nobody awaits a refresh, so a failed write has no caller to report to. Abort the track rather
+		// than leave its newest group without the window, where a joiner would wait.
 		try {
 			this.#write(this.#encoder.snapshot(), this.#at);
-		} catch {}
+		} catch (err) {
+			this.#close(err instanceof Error ? err : new Error(String(err)));
+		}
 	}
 
 	/** The retained checkpoint suffix, oldest first. This is complete unless bounded in the config. */
@@ -76,7 +79,7 @@ export class Producer<T> {
 	push({ value, at }: Timed<T>): void {
 		this.#assertOpen();
 		this.#write(this.#encoder.push(value), at);
-		this.#at = at;
+		this.#advance(at);
 	}
 
 	/**
@@ -93,7 +96,12 @@ export class Producer<T> {
 		const frame = this.#encoder.pop(count);
 		if (!frame) return;
 		this.#write(frame, at);
-		this.#at = at;
+		this.#advance(at);
+	}
+
+	// Remember `at` if it is the newest timestamp written.
+	#advance(at: Time.Timestamp | undefined): void {
+		if (at && !at.isBefore(this.#at ?? at)) this.#at = at;
 	}
 
 	#assertOpen(): void {
@@ -150,14 +158,18 @@ export class Producer<T> {
 
 	/** Finish the track, closing any open group. */
 	finish(): void {
+		this.#close();
+	}
+
+	#close(abort?: Error): void {
 		if (this.#finished) return;
 		this.#finished = true;
 		this.#unwatch?.();
 		this.#unwatch = undefined;
 
-		this.#group?.close();
+		this.#group?.close(abort);
 		this.#group = undefined;
 
-		this.#track.close();
+		this.#track.close(abort);
 	}
 }

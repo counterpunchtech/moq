@@ -568,10 +568,9 @@ mod test {
 		assert_eq!(frames(&mut fresh), vec![(None, json!({ "n": 3 }))]);
 	}
 
-	/// A refresh restates the value at the last committed update's timestamp, the value's own time,
-	/// rather than inventing one.
+	/// A refresh restates the value at the newest timestamp written rather than inventing one.
 	#[test]
-	fn a_refresh_reuses_the_last_timestamp() {
+	fn a_refresh_reuses_the_newest_timestamp() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		producer
@@ -591,6 +590,28 @@ mod test {
 		let mut fresh = groups(&mut late).pop().expect("the fresh group");
 		assert_eq!(fresh.sequence, 1);
 		assert_eq!(frames(&mut fresh), vec![(Some(ms(103)), json!({ "n": 3 }))]);
+	}
+
+	/// A delta may carry a timestamp older than its group's first frame, but a new group may not
+	/// start before that frame, so the restatement takes the newest timestamp written.
+	#[test]
+	fn a_refresh_after_an_older_update_starts_at_the_newest_timestamp() {
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
+		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": n })).at(ms(at)))
+				.unwrap();
+		}
+
+		let mut late = producer.consume();
+		assert!(matches!(
+			producer.poll_refresh(&kio::Waiter::noop()),
+			Poll::Ready(Ok(()))
+		));
+		let mut fresh = groups(&mut late).pop().expect("the fresh group");
+		assert_eq!(fresh.sequence, 1);
+		assert_eq!(frames(&mut fresh), vec![(Some(ms(130)), json!({ "n": 3 }))]);
 	}
 
 	/// Without a ratio on the track, no join asks for a group, however large the deltas grow.

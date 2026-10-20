@@ -249,7 +249,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 	}
 });
 
-test("a window refresh reuses the last timestamp", async () => {
+test("a window refresh reuses the newest timestamp", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(10) });
@@ -261,13 +261,32 @@ test("a window refresh reuses the last timestamp", async () => {
 	producer.finish();
 	joiner.close();
 
-	// The restated header opens at the last edit's timestamp, and carries the window as it stands.
+	// The restated header opens at the newest timestamp written, and carries the window as it stands.
 	expect(await groups(track)).toEqual([
 		[3, 10],
 		[1, 30],
 	]);
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	expect(await consumer.next()).toEqual({ push: { index: 1, value: { n: 1 } } });
+});
+
+test("a window refresh after an older edit starts at the newest timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
+	const producer = new Producer<Rec>({ track });
+	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(30) });
+	// Ops may carry timestamps older than their group's first frame.
+	producer.push({ value: { n: 1 }, at: Time.Timestamp.fromMillis(10) });
+
+	const joiner = track.subscribe();
+	await settle();
+	producer.finish();
+	joiner.close();
+
+	// Restating at the last edit's 10 would rewind past group 0's start and be refused.
+	expect(await groups(track)).toEqual([
+		[2, 30],
+		[1, 30],
+	]);
 });
 
 test("a window refresh needs a ratio", async () => {

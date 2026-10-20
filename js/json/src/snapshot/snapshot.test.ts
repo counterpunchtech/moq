@@ -320,7 +320,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 	}
 });
 
-test("a refresh reuses the last timestamp", async () => {
+test("a refresh reuses the newest timestamp", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 10) });
@@ -337,8 +337,34 @@ test("a refresh reuses the last timestamp", async () => {
 		timestamps.push(frame?.timestamp?.asMillis());
 		while ((await group.readFrame()) !== undefined) {}
 	}
-	// The restated group opens at the last update's timestamp, not a new one.
+	// The restated group opens at the newest timestamp written, not a new one.
 	expect(timestamps).toEqual([0, 30]);
+});
+
+test("a refresh after an older update starts at the newest timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const producer = new Producer<Value>({ track });
+	// Deltas may carry timestamps older than their group's first frame.
+	for (const [n, ms] of [30, 10, 20, 15].entries())
+		producer.update({ value: { n }, at: Time.Timestamp.fromMillis(ms) });
+
+	const joiner = track.subscribe();
+	await settle();
+	producer.finish();
+	joiner.close();
+
+	const ordered = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
+	const restated: [number | undefined, unknown][] = [];
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+		const frame = await group.readFrame();
+		restated.push([frame?.timestamp?.asMillis(), frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
+		while ((await group.readFrame()) !== undefined) {}
+	}
+	// Restating at the last update's 15 would rewind past group 0's start and be refused.
+	expect(restated).toEqual([
+		[30, { n: 0 }],
+		[30, { n: 3 }],
+	]);
 });
 
 test("no ratio never refreshes", async () => {

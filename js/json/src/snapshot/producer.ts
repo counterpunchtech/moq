@@ -12,7 +12,7 @@ import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts"
  *
  * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
  * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
- * restates the value there at the timestamp of the last update. Set the ratio when creating the
+ * restates the value there at the newest timestamp written. Set the ratio when creating the
  * track, or joins never ask.
  */
 export class Producer<T> {
@@ -28,7 +28,8 @@ export class Producer<T> {
 
 	// The sequence of the newest group written, which a joiner's wanted group has to pass.
 	#largest?: number;
-	// The timestamp of the last committed update, which a refresh restates the value at.
+	// The newest timestamp written, which a refresh restates the value at. An update may carry an
+	// older timestamp than its group's first frame, and a new group may not start before that one.
 	#at?: Time.Timestamp;
 	// Stops watching the track's demand.
 	#unwatch?: () => void;
@@ -49,12 +50,14 @@ export class Producer<T> {
 		const frame = this.#encoder.snapshot();
 		if (!frame) return;
 
-		// Nobody awaits a refresh, so a failed write has no caller to report to. It leaves the frame
-		// uncommitted, so the next update resynchronizes and reports the error itself.
+		// Nobody awaits a refresh, so a failed write has no caller to report to. Abort the track rather
+		// than leave its newest group without the value, where a latest-value subscriber would wait.
 		try {
 			this.#write(frame, this.#at);
 			frame.commit();
-		} catch {}
+		} catch (err) {
+			this.#close(err instanceof Error ? err : new Error(String(err)));
+		}
 	}
 
 	/**
@@ -94,7 +97,7 @@ export class Producer<T> {
 		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
 		this.#write(frame, at);
 		frame.commit();
-		this.#at = at;
+		if (at && !at.isBefore(this.#at ?? at)) this.#at = at;
 	}
 
 	#write(encoded: Encoded, at: Time.Timestamp | undefined): void {
@@ -177,16 +180,20 @@ export class Producer<T> {
 
 	/** Finish the track, closing any open group. */
 	finish(): void {
+		this.#close();
+	}
+
+	#close(abort?: Error): void {
 		this.#unwatch?.();
 		this.#unwatch = undefined;
-		this.#group?.close();
+		this.#group?.close(abort);
 		this.#group = undefined;
 
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as a track error rather
 		// than as a delta with nowhere to put it.
 		this.#encoder.reset();
-		this.#track.close();
+		this.#track.close(abort);
 	}
 }
 

@@ -89,7 +89,7 @@ impl<T: Serialize> Producer<T> {
 	/// A join wants one once the open group's deltas outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the value without
-	/// downloading them. The snapshot carries the timestamp of the last update, the value's own time.
+	/// downloading them. The snapshot carries the newest timestamp written, so the new group never starts before the last.
 	/// Nothing happens before the first update, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
@@ -300,7 +300,8 @@ struct Inner<T> {
 	/// Watches for a joiner wanting a group past the largest written.
 	refresh: Refresh,
 
-	/// The timestamp of the last committed update, which a refresh restates the value at.
+	/// The newest timestamp written, which a refresh restates the value at. An update may carry an
+	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
 	/// Why this producer aborted the track, so [`Producer::modify`] can report the cause rather than
@@ -377,7 +378,7 @@ impl<T: Serialize> Inner<T> {
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();
-		self.at = timestamp;
+		self.at = self.at.max(timestamp);
 
 		Ok(Some(size))
 	}

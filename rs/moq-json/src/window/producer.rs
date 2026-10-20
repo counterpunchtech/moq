@@ -96,7 +96,7 @@ impl<T> Producer<T> {
 	/// A join wants one once the open group's ops outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its header (see
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the window without
-	/// downloading them. The header carries the timestamp of the last edit. Nothing happens before
+	/// downloading them. The header carries the newest timestamp written. Nothing happens before
 	/// the first edit, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
@@ -150,7 +150,8 @@ struct Inner<T> {
 	/// Watches for a joiner wanting a group past the largest written.
 	refresh: Refresh,
 
-	/// The timestamp of the last committed edit, which a refresh restates the window at.
+	/// The newest timestamp written, which a refresh restates the window at. An edit may carry an
+	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
 	finished: bool,
@@ -169,7 +170,7 @@ impl<T> Inner<T> {
 		// new group because the attempted frame advanced the group-local compression state.
 		track.write(count.at, &frame)?;
 		frame.commit();
-		self.at = count.at;
+		self.at = self.at.max(count.at);
 
 		Ok(())
 	}
@@ -221,7 +222,7 @@ impl<T: Serialize> Inner<T> {
 		let frame = encoder.push(value.value)?;
 		track.write(value.at, &frame)?;
 		frame.commit();
-		self.at = value.at;
+		self.at = self.at.max(value.at);
 
 		Ok(())
 	}

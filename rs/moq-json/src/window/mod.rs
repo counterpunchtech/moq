@@ -647,9 +647,9 @@ mod test {
 		);
 	}
 
-	/// A refresh restates the window at the last committed edit's timestamp.
+	/// A refresh restates the window at the newest timestamp written.
 	#[test]
-	fn a_refresh_reuses_the_last_timestamp() {
+	fn a_refresh_reuses_the_newest_timestamp() {
 		let waiter = kio::Waiter::noop();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
@@ -670,6 +670,31 @@ mod test {
 			panic!("expected the restating header");
 		};
 		assert_eq!(header.timestamp, Some(ms(200)));
+	}
+
+	/// An op may carry a timestamp older than its group's first frame, but a new group may not start
+	/// before that frame, so the restating header takes the newest timestamp written.
+	#[test]
+	fn a_refresh_after_an_older_edit_starts_at_the_newest_timestamp() {
+		let waiter = kio::Waiter::noop();
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
+		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
+			producer.push(moq_net::Timed::from(&rec(n as u64)).at(ms(at))).unwrap();
+		}
+
+		let mut late = producer.consume();
+		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
+		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group),
+			_ => None,
+		})
+		.last()
+		.expect("the fresh group");
+		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
+			panic!("expected the restating header");
+		};
+		assert_eq!(header.timestamp, Some(ms(130)));
 	}
 
 	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.
