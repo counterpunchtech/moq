@@ -509,14 +509,20 @@ impl PriorityHandle {
 pub const RECV_CONTROL: i64 = i64::MAX;
 
 /// The receive priority of a group stream: always below a control stream or an
-/// unidentified one, ranked by its subscription's `priority` like the sender ranks it,
-/// then the older group first to go, since a live track that falls behind skips to its
-/// newest group anyway.
-pub fn recv_group(priority: u8, sequence: u64) -> i64 {
+/// unidentified one, ranked by its subscription's `priority` and then its `order`, like the
+/// sender ranks it. A [`Order::Descending`] subscription gives up its oldest group first,
+/// since a live track that falls behind skips to its newest anyway; an [`Order::Ascending`]
+/// one drains a backlog in sequence, so its newest group goes first.
+pub fn recv_group(priority: u8, sequence: u64, order: Order) -> i64 {
 	// Saturating the sequence at 2^48 keeps the band negative; no track gets that far.
 	const SEQUENCE: u32 = 48;
-	let sequence = sequence.min((1 << SEQUENCE) - 1) as i64;
-	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + sequence
+	const MAX: i64 = (1 << SEQUENCE) - 1;
+	let sequence = (sequence.min(MAX as u64)) as i64;
+	let kept = match order {
+		Order::Descending => sequence,
+		Order::Ascending => MAX - sequence,
+	};
+	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + kept
 }
 
 #[cfg(test)]
@@ -589,10 +595,17 @@ mod tests {
 	/// more urgent subscriptions and then newer groups kept longer.
 	#[test]
 	fn recv_group_stays_below_unidentified_streams() {
-		assert!(recv_group(0, 0) < recv_group(0, 1));
-		assert!(recv_group(0, u64::MAX) < recv_group(1, 0));
-		assert!(recv_group(u8::MAX, u64::MAX) < 0);
-		assert!(recv_group(0, 0) > i64::MIN);
+		for order in [Order::Descending, Order::Ascending] {
+			assert!(recv_group(0, u64::MAX, order) < recv_group(1, 0, order));
+			assert!(recv_group(0, 0, order) < recv_group(1, u64::MAX, order));
+			assert!(recv_group(u8::MAX, 0, order) < 0);
+			assert!(recv_group(u8::MAX, u64::MAX, order) < 0);
+			assert!(recv_group(0, 0, order) > i64::MIN);
+			assert!(recv_group(0, u64::MAX, order) > i64::MIN);
+		}
+		// The group the subscription would deliver last is the first to go.
+		assert!(recv_group(0, 0, Order::Descending) < recv_group(0, 1, Order::Descending));
+		assert!(recv_group(0, 1, Order::Ascending) < recv_group(0, 0, Order::Ascending));
 	}
 
 	/// A group whose rank didn't move must not be re-polled. Every queued group parks on
