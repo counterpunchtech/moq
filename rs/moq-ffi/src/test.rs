@@ -1164,21 +1164,19 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 		producer.update(format!(r#"{{"n":{n}}}"#), None).unwrap();
 	}
 
-	// The joiner still reads the open group, which carries the snapshot and every delta.
+	// The join crosses the ratio, so the producer restates the value without another update. The
+	// joiner may read the open group first or skip straight to the restatement.
 	let joiner = subscribe(&broadcast, "meta").await;
-	let first = tokio::time::timeout(TIMEOUT, joiner.recv_group())
-		.await
-		.expect("timed out waiting for the open group")
-		.unwrap()
-		.expect("expected a group");
-	assert_eq!(first.sequence(), 0);
-
-	// Its join crossed the ratio, so the producer restates the value without another update.
-	let refreshed = tokio::time::timeout(TIMEOUT, joiner.recv_group())
-		.await
-		.expect("timed out waiting for the refresh")
-		.unwrap()
-		.expect("expected a refreshed group");
+	let refreshed = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = joiner.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the refresh");
 	assert_eq!(refreshed.sequence(), 1);
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
 	let value = tokio::time::timeout(TIMEOUT, consumer.next())
