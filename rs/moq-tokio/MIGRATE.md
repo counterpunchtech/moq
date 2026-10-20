@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The connection receive window is 128 MiB, and has a floor (#5878)
+
+`quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
+A `quic.receive_window` (`--quic-receive-window`, `[quic] receive_window`) below `moq_net::transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement cap plus 16 bytes, fails with `Error::ReceiveWindowTooSmall`.
+Raise an explicit window to at least that, or unset it.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.

@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `receive_window` has a floor (#5878)
+
+The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
+Raise an explicit value below that, or remove it.
+
 ### Usage types come from usage-rs 7 (#6060)
 
 The relay's `Args` and `Config` derives now implement usage-rs 7 traits.

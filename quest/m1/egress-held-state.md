@@ -11,7 +11,7 @@ on both moq-lite and moq-transport. A healthy viewer behind a congested link
 still gets the freshest groups.
 
 Non-goals: capping sessions or connections (see Plan), ingress memory
-([Bound incomplete messages](/quest/m1/quic/receive-memory.md) owns it), and
+(receive leases bound it, [#5878](https://github.com/moq-dev/moq/pull/5878)), and
 new limit constants that only refuse input.
 
 ## Plan
@@ -98,8 +98,8 @@ sweep tracks by groups per track, and subscribers by tracks, timing each
 stream grant too, so a cost that grows with the table (such as scanning every
 subscription when one stream frees up) shows up as a slope. Cover lite and
 moq-transport, and scenario 5 still receives the latest group.
-Include a benign withholder: a peer bounded by
-[Bound incomplete messages](/quest/m1/quic/receive-memory.md) withholds credit
+Include a benign withholder: a peer bounded by receive leases
+([#5878](https://github.com/moq-dev/moq/pull/5878)) withholds credit
 by design under memory pressure, so two relays running both quests must still
 plateau and keep the live edge.
 
@@ -111,7 +111,7 @@ none on the wire; possibly a relay default).
 
 ## Related
 
-- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the ingress counterpart: a receiver withholds QUIC credit to bound what it holds, and this quest bounds what the sender holds while it does
+- [Receive leases](https://github.com/moq-dev/moq/pull/5878) - the ingress counterpart: a receiver withholds QUIC credit to bound what it holds, and this quest bounds what the sender holds while it does
 - [Rust request credit](/quest/m1/rs-request-credit.md) - requests fail fast without stream credit; publisher group streams are left to this quest
 - [Scope track priority](/quest/m1/track-priority-scope.md) - who gets the next stream across subscriptions and tenants
 - [Public serving](/quest/m1/public-model/serve.md) - makes group expiry while serving public; coordinate the publisher serve loops with it

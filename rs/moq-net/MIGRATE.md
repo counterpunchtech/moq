@@ -4,6 +4,26 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive streams are read through leases (#5878)
+
+`transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
+`poll_read`, `poll_read_buf`, `poll_closed`, `read`, `read_buf`, `closed`, `Read`, and `ReadBuf` are gone.
+A lease borrows the stream's unconsumed bytes and keeps their flow-control credit until `Lease::consume(n)`; dropping it consumes nothing, and `is_fin` replaces `closed`.
+A transport that can only hand out chunks implements `transport::poll::Chunks` (`poll_read_chunk` and `stop`) and wraps each stream in `transport::poll::Buffered`.
+
+```rust
+// Before
+let n = stream.read(&mut buf).await?;
+
+// After: copy what arrived, then return its credit
+let lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
+let n = lease.len().min(buf.len()); // 0 with `lease.is_fin()` is the end
+lease.buf().copy_to_slice(&mut buf[..n]);
+lease.consume(n);
+```
+
+`transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.
