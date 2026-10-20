@@ -1875,7 +1875,10 @@ async fn a_shared_handle_presents_its_token_on_every_session(version: &'static s
 		first.server.abort(Error::Cancel);
 		first.client.closed().await;
 		assert_eq!(token.grant().peek(), None, "no session is live");
-		assert!(futures::FutureExt::now_or_never(token.closed()).is_none(), "a session ending is no verdict");
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a session ending is no verdict"
+		);
 
 		let mut second = connect(options()).await;
 		let mut tokens = serve(second.requests.take().unwrap(), |token| match token {
@@ -1904,16 +1907,38 @@ async fn presented(
 	both
 }
 
-/// A handle backs one active session: another fails loudly until the first drains.
+/// A handle backs one active session: another fails loudly until the first drains. The
+/// draining session keeps presenting the handle's tokens beside its successor, even one
+/// its peer has not answered yet, since its requests may still rely on them. A token added
+/// after the drain rides only the successor: a draining session opens no new streams.
 async fn a_handle_backs_one_active_session(version: &'static str) {
 	within(async {
+		use futures::FutureExt;
+
 		let handle = auth::Handle::new();
-		let first = connect(Options {
+		let options = || Options {
 			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
 			client_auth: Some(handle.clone()),
 			..Default::default()
-		})
-		.await;
+		};
+		let mut first = connect(options()).await;
+		let mut first_requests = first.requests.take().unwrap();
+		let added = moq_clock::sim::spawn({
+			let handle = handle.clone();
+			async move { handle.add("token").await }
+		});
+		let mut first_issued = Vec::new();
+		let unanswered = loop {
+			let request = first_requests.next().await.expect("a token");
+			if request.token().is_empty() {
+				first_issued.push(request.accept(Grant::default()));
+				continue;
+			}
+			assert_eq!(request.token().as_ref(), b"token");
+			break request;
+		};
 
 		let parsed: Version = version.parse().unwrap();
 		let mut mock = moq_net::transport::memory::Config::default();
@@ -1928,12 +1953,31 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 
 		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
 		first.client.draining().recv().await.expect("the GOAWAY");
-		let _second = connect(Options {
-			version: Some(version),
-			client_auth: Some(handle),
-			..Default::default()
-		})
-		.await;
+		let mut second = connect(options()).await;
+		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
+		let _second_issued = presented(&mut second_tokens).await;
+		let _token = added.await.expect("joined").expect("granted on the second session");
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			unanswered.closed().now_or_never().is_none(),
+			"the draining session withdrew its unanswered token"
+		);
+		let first_grant = unanswered.accept(Grant::all());
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			first_grant.closed().now_or_never().is_none(),
+			"the draining session dropped its late grant"
+		);
+
+		let later = handle.add("later").await.expect("granted on the second session");
+		let (token, _later) = second_tokens.next().await.expect("the active session presents it");
+		assert_eq!(token, b"later");
+		assert!(
+			first_requests.next().now_or_never().is_none(),
+			"the draining session opened a new stream"
+		);
+		drop(later);
 	})
 	.await
 	.expect("timed out");

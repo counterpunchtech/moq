@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Connection::auth()` returns the `moq_net` handle (#6109)
+
+`Connection::auth()` returns a `moq_net::auth::Handle` that every session of the connection is built on, and the `connection::auth` module (`Handle`, `Auth`, `Watch`) is removed.
+Replace `moq_tokio::connection::auth::{Handle, Auth, Watch}` with `moq_net::auth::{Handle, Auth, Watch}`.
+A token it returns can now be named by a `Route`, and keeps riding that route's announcements on every reconnect.
+Its grant reads `None` while disconnected. A transiently refused token retries on a fixed backoff of 1s doubling to 30s rather than the reconnect `backoff`.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.

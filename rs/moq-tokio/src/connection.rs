@@ -2420,38 +2420,43 @@ mod tests {
 		config.version = vec![version];
 		config.backoff.initial = Some(MIN_BACKOFF);
 		config.backoff.max = Some(MIN_BACKOFF);
-		let connection = config.init(Default::default()).unwrap().connect(url(&format!("tcp://{addr}/")));
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{addr}/")));
 		let auth = connection.auth();
 		let added = tokio::spawn({
 			let auth = auth.clone();
 			async move { auth.add("token").await }
 		});
 
+		// Held past each session's abort: dropping a grant closes its stream cleanly, which
+		// is the peer's verdict ending the token.
+		let mut issued = Vec::new();
+		let mut added = Some(added);
 		let mut token = None;
 		for round in 0..2 {
 			let request = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
 			let mut requests = request.auth().requests().unwrap();
 			let (session, _task) = request.ok().await.unwrap();
-			let _issued = loop {
+			loop {
 				let request = tokio::time::timeout(WAIT, requests.next()).await.unwrap().unwrap();
-				match request.token().as_ref() {
-					b"" => std::mem::forget(request.accept(moq_net::auth::Grant::default())),
-					token => {
-						assert_eq!(token, b"token", "round {round}");
-						break request.accept(moq_net::auth::Grant::all());
-					}
+				if request.token().is_empty() {
+					issued.push(request.accept(moq_net::auth::Grant::default()));
+					continue;
 				}
-			};
-			let token = match token.take() {
-				Some(token) => token,
-				None => added.await.unwrap().expect("granted"),
-			};
-			let mut grant = token.grant();
+				assert_eq!(request.token().as_ref(), b"token", "round {round}");
+				issued.push(request.accept(moq_net::auth::Grant::all()));
+				break;
+			}
+			if let Some(added) = added.take() {
+				token = Some(added.await.unwrap().expect("granted"));
+			}
+			let mut grant = token.as_ref().unwrap().grant();
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
 				tokio::time::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
 			}
 			session.abort(moq_net::Error::Cancel);
-			token = Some(token);
 		}
 		drop(connection);
 		let token = token.unwrap();

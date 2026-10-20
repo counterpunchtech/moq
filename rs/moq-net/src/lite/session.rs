@@ -527,10 +527,17 @@ struct PresentToken<S: crate::transport::poll::Session> {
 }
 
 enum PresentState<S: crate::transport::poll::Session> {
-	Open { token: bytes::Bytes },
-	Run { stream: Stream<S, Version>, answered: bool },
+	Open {
+		token: bytes::Bytes,
+	},
+	Run {
+		stream: Stream<S, Version>,
+		answered: bool,
+	},
 	/// Refused for a reason that may pass: present it again once the deadline fires.
-	Retry { deadline: crate::time::Deadline },
+	Retry {
+		deadline: crate::time::Deadline,
+	},
 	Done,
 }
 

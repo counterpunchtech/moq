@@ -816,7 +816,10 @@ impl Link {
 	/// Read this session's side of the handle, and the handle's state.
 	fn read<R>(&self, f: impl FnOnce(&Attached, &State) -> R) -> R {
 		let state = self.state().read();
-		let link = state.links.get(&self.id()).expect("a link outlives its session's state");
+		let link = state
+			.links
+			.get(&self.id())
+			.expect("a link outlives its session's state");
 		f(link, &state)
 	}
 
@@ -2676,7 +2679,10 @@ mod tests {
 		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 		assert_eq!(auth.grant().peek(), None);
 		assert_eq!(ietf.token(&auth).as_deref(), Some(b"jwt".as_slice()));
-		assert!(ietf.read(|link, _| link.opening.is_empty()), "nothing to open a stream for");
+		assert!(
+			ietf.read(|link, _| link.opening.is_empty()),
+			"nothing to open a stream for"
+		);
 
 		let lite = Link::new(false);
 		let auth = lite.present(Bytes::from_static(b"jwt"), false).unwrap();
@@ -2769,7 +2775,10 @@ mod tests {
 
 		second.close(Error::Cancel);
 		let third = Link::attach(&handle, true, false).unwrap();
-		assert!(third.poll_opening(&kio::Waiter::noop()).is_pending(), "a refused token stays ended");
+		assert!(
+			third.poll_opening(&kio::Waiter::noop()).is_pending(),
+			"a refused token stays ended"
+		);
 	}
 
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.
@@ -2792,7 +2801,6 @@ mod tests {
 		link.granted(id, Grant::all());
 		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 	}
-
 }
 
 #[cfg(all(test, feature = "async"))]
@@ -2960,7 +2968,11 @@ mod request_token_tests {
 		verdict.grant().await.expect("granted");
 		// The union only reflects tokens presented on this side (none here), never a
 		// request token the acceptor answered.
-		assert_eq!(handle.handle().grant().peek(), None, "a request token must not widen the union");
+		assert_eq!(
+			handle.handle().grant().peek(),
+			None,
+			"a request token must not widen the union"
+		);
 	}
 
 	fn subscribe_only(prefix: &str) -> Grant {

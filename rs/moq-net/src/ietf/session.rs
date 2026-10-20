@@ -2232,10 +2232,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_server_offers_auth_only_to_a_client_that_did() {
 		let all = crate::setup::Extensions::default();
-		assert_eq!(
-			our_setup(false, crate::auth::Link::new(true), all).await,
-			(true, true)
-		);
+		assert_eq!(our_setup(false, crate::auth::Link::new(true), all).await, (true, true));
 		assert_eq!(
 			our_setup(false, crate::auth::Link::new(false), all).await,
 			(false, true)
