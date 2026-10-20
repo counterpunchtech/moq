@@ -6033,7 +6033,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
 				timestamp: Some(crate::Timestamp::ZERO),
@@ -6067,8 +6067,7 @@ mod group_priority_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap();
-		old.finish().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		assert!(
 			futures::poll!(serving.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -6871,7 +6870,7 @@ mod serve_tests {
 	/// inside it and the group stream waits for object 1.
 	async fn fail_update_mid_flight(version: Version) -> Wire {
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut frame = group
 			.create_frame(frame::Info {
 				timestamp: Some(timestamp()),
@@ -6902,7 +6901,6 @@ mod serve_tests {
 			.expect("the failed update ends the subscription")
 			.ok();
 		drop(frame);
-		drop(group);
 
 		let wire = Wire::read(&h.log, version);
 		let error = wire

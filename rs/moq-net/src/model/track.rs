@@ -1505,7 +1505,7 @@ impl TrackState {
 			broadcast: broadcast.clone(),
 			..Default::default()
 		});
-		let cache = cache::Track::new(broadcast.pool.clone(), state.downgrade());
+		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
 		state.write().ok().expect("a new track is open").cache = cache;
 		state
 	}
@@ -7477,13 +7477,10 @@ mod test {
 			.unwrap();
 		let handle = group.handle();
 		let _partial = group
-			.create_frame_owned(
-				frame::Info {
+			.create_frame(frame::Info {
 					size: 2,
 					timestamp: Some(Timestamp::ZERO),
-				},
-				&frame::Budget::default(),
-			)
+				})
 			.unwrap();
 		assert_eq!(handle.frame_count(), 2);
 		drop(_partial);
@@ -8003,7 +8000,7 @@ mod test {
 	#[test]
 	fn streaming_frame_writes_keep_the_group_alive() {
 		let producer = track_producer("test", Info::timed());
-		let mut straggler = producer.create_group(0u64.into()).unwrap();
+		let straggler = producer.create_group(0u64.into()).unwrap();
 		// The live edge moves on, so the straggler is demoted and expirable.
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
@@ -8020,7 +8017,7 @@ mod test {
 			frame.write(bytes::Bytes::from_static(b"x")).unwrap();
 			producer.create_group(seq.into()).unwrap().finish().unwrap();
 		}
-		frame.finish().unwrap();
+		let mut straggler = frame.finish().unwrap();
 		straggler.finish().unwrap();
 
 		let state = producer.state.read();
@@ -8042,20 +8039,17 @@ mod test {
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
 		let mut frame = straggler
-			.create_frame_owned(
-				frame::Info {
+			.create_frame(frame::Info {
 					size: 3,
 					timestamp: Some(Timestamp::ZERO),
-				},
-				&Default::default(),
-			)
+				})
 			.unwrap();
 
 		// The sender stalls past the retention window, then the whole payload lands in
 		// one poll turn: the loop never returns `Pending`, so `notify` is never reached
 		// and `finish` is the only write the charge sees.
 		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
-		frame.write(bytes::Bytes::from_static(b"abc")).unwrap();
+		frame.write_deferred(bytes::Bytes::from_static(b"abc")).unwrap();
 		let mut straggler = frame.finish().unwrap();
 		straggler.finish().unwrap();
 
@@ -8323,7 +8317,7 @@ mod test {
 	fn streaming_frame_write_expires_idle_siblings() {
 		let producer = track_producer_expiring("test", Duration::from_secs(1));
 		producer.append_group().unwrap().finish().unwrap(); // seq 0
-		let mut live = producer.append_group().unwrap(); // seq 1
+		let live = producer.append_group().unwrap(); // seq 1
 		let mut frame = live
 			.create_frame(frame::Info {
 				size: 1,
@@ -9637,7 +9631,7 @@ mod test {
 	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
 		let mut producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(None);
-		let mut source = producer.append_group().unwrap();
+		let source = producer.append_group().unwrap();
 		let mut writing = source
 			.create_frame(frame::Info {
 				size: 6,
@@ -10905,6 +10899,8 @@ mod test {
 					.is_ok()
 			);
 			assert!(matches!(group.write_frames(&mut frames), Err(Error::Closed)));
+			assert_eq!(group.frame_count(), 2);
+			// A refused frame aborts its group, since a write past the end is a bug.
 			assert!(matches!(
 				group.create_frame(frame::Info {
 					size: 1,
@@ -10912,7 +10908,6 @@ mod test {
 				}),
 				Err(Error::Closed)
 			));
-			assert_eq!(group.frame_count(), 2);
 			assert!(producer.create_group(group::Info { sequence: 6 }).is_err());
 		}
 	}
@@ -14876,7 +14871,8 @@ mod test {
 		assert_eq!(frames.len(), 1, "the batch is left to retry");
 		assert_eq!(batched.frame_count(), 0);
 
-		let mut streamed = producer.append_group().unwrap();
+		let streamed = producer.append_group().unwrap();
+		let handle = streamed.handle();
 		let refused = streamed
 			.create_frame(frame::Info {
 				size: 1,
@@ -14884,7 +14880,8 @@ mod test {
 			})
 			.err();
 		assert!(matches!(refused, Some(Error::TimestampMismatch)), "{refused:?}");
-		assert_eq!(streamed.frame_count(), 0);
+		assert_eq!(handle.frame_count(), 0);
+		assert!(handle.is_aborted(), "a refused frame aborts its group");
 	}
 
 	/// Eviction is not a sequence prefix: a group stamped after its predecessor was evicted

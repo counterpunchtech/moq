@@ -1773,6 +1773,10 @@ pub struct Producer {
 
 	// The clock advanced by the origin driver.
 	timers: Deadlines,
+
+	// What the frames written through this handle may allocate up front, shared by every
+	// broadcast it creates.
+	frames: super::frame::Budget,
 }
 
 impl Producer {
@@ -1800,6 +1804,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: timers.clone(),
+			frames: Default::default(),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -1811,6 +1816,15 @@ impl Producer {
 			pool,
 		};
 		(producer, driver)
+	}
+
+	/// Give this handle a frame budget of its own, so what one session allocates up front
+	/// never crowds out another's.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
+	pub(crate) fn with_own_frames(mut self) -> Self {
+		self.frames = Default::default();
+		self
 	}
 
 	/// The ingress stats context this handle was tagged with.
@@ -1909,6 +1923,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
+			frames: Default::default(),
 		}
 	}
 
@@ -1982,6 +1997,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		};
 		let source = info.produce().with_stats(ingress.clone());
 		let entry = announcing.announce(
@@ -2022,6 +2038,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		}
 		.produce()
 		.with_stats(ingress)
@@ -2143,6 +2160,7 @@ impl Producer {
 			preference: self.preference,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
+			frames: self.frames.clone(),
 		})
 	}
 
@@ -5673,6 +5691,8 @@ impl Consumer {
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
 			epoch: None,
+			// A front reads its routes' copies, so it writes no frames of its own.
+			frames: Default::default(),
 		});
 		let request = kio::Producer::<PendingFront>::default();
 		let consumer = request.consume();

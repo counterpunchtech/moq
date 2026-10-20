@@ -1737,7 +1737,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let open = a.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
@@ -3087,7 +3087,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			let open = a.create_group(group::Info { sequence: 0 }).unwrap();
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -3137,7 +3137,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(2));
-			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			let open = a.create_group(group::Info { sequence: 0 }).unwrap();
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -3150,7 +3150,7 @@ mod test {
 			assert!(chunks.read_chunk().now_or_never().unwrap().is_ok());
 
 			let b = copy();
-			let mut replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
+			let replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
 			let mut replacement_frame = replacement
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -3241,8 +3241,7 @@ mod test {
 			})
 			.unwrap();
 		let mut frame = group
-			.create_frame_owned(
-				crate::frame::Header {
+			.create_object(crate::frame::Header {
 					info: crate::frame::Info {
 						size: 1,
 						timestamp: Some(ts(0)),
@@ -3251,9 +3250,7 @@ mod test {
 						id: 6,
 						properties: Default::default(),
 					})),
-				},
-				&crate::frame::Budget::default(),
-			)
+				})
 			.unwrap();
 		frame.write(bytes::Bytes::from_static(b"a")).unwrap();
 		let group = frame.finish().unwrap();
@@ -3263,8 +3260,7 @@ mod test {
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 		assert_eq!(a.consume().resume_position(), Some(Position::group(1)));
 		let mut partial = group
-			.create_frame_owned(
-				crate::frame::Header {
+			.create_object(crate::frame::Header {
 					info: crate::frame::Info {
 						size: 2,
 						timestamp: Some(ts(1)),
@@ -3273,9 +3269,7 @@ mod test {
 						id: 8,
 						properties: Default::default(),
 					})),
-				},
-				&crate::frame::Budget::default(),
-			)
+				})
 			.unwrap();
 		partial.write(bytes::Bytes::from_static(b"b")).unwrap();
 		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -3310,8 +3304,7 @@ mod test {
 			.unwrap();
 		for &(id, payload) in objects {
 			let mut frame = group
-				.create_frame_owned(
-					crate::frame::Header {
+				.create_object(crate::frame::Header {
 						info: crate::frame::Info {
 							size: payload.len() as u64,
 							timestamp: Some(ts(id)),
@@ -3320,9 +3313,7 @@ mod test {
 							id,
 							properties: Default::default(),
 						})),
-					},
-					&crate::frame::Budget::default(),
-				)
+					})
 				.unwrap();
 			frame.write(bytes::Bytes::from_static(payload)).unwrap();
 			group = frame.finish().unwrap();
@@ -3340,7 +3331,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, Duration::from_secs(10));
-		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let open = a.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
@@ -3904,21 +3895,25 @@ mod test {
 					let mut sub = subscribe(&logical, Duration::from_secs(if widen { 2 } else { 10 }));
 					let b = copy();
 					// Both routes carry the same content, including the unfinished payload.
-					let mut writers = [&a, &b].map(|source| source.create_group(group::Info { sequence: 0 }).unwrap());
-					let _frames: Vec<_> = writers
-						.iter_mut()
-						.map(|group| {
+					let writers = [&a, &b].map(|source| source.create_group(group::Info { sequence: 0 }).unwrap());
+					// Each group's writer, held open by its unfinished frame when chunked.
+					let _writers: Vec<_> = writers
+						.into_iter()
+						.map(|mut group| {
 							group.write_frame(ts(0), b"first".as_ref()).unwrap();
-							chunked.then(|| {
-								let mut frame = group
-									.create_frame(crate::frame::Info {
-										size: 4,
-										timestamp: Some(ts(1)),
-									})
-									.unwrap();
-								frame.write(b"ab".as_ref()).unwrap();
-								frame
-							})
+							match chunked {
+								false => (Some(group), None),
+								true => {
+									let mut frame = group
+										.create_frame(crate::frame::Info {
+											size: 4,
+											timestamp: Some(ts(1)),
+										})
+										.unwrap();
+									frame.write(b"ab".as_ref()).unwrap();
+									(None, Some(frame))
+								}
+							}
 						})
 						.collect();
 					let mut group = recv(&mut sub);

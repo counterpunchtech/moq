@@ -56,6 +56,11 @@ pub struct Info {
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
 	/// route without an epoch and for a handle not resolved through an origin.
 	pub epoch: Option<crate::Epoch>,
+
+	// What the frames this broadcast's groups are still receiving may allocate up front,
+	// inherited from the origin handle that created it.
+	// private: tuning
+	pub(crate) frames: super::frame::Budget,
 }
 
 impl Default for Info {
@@ -65,6 +70,7 @@ impl Default for Info {
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
 			epoch: None,
+			frames: Default::default(),
 		}
 	}
 }

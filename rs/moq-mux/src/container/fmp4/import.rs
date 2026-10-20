@@ -1044,12 +1044,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track.estimator.cut(Some(timestamp));
 			}
 			let fragment_len = fragment_bytes.len();
-			let mut frame = g.create_frame(moq_net::frame::Info {
-				size: fragment_bytes.len() as u64,
-				timestamp: Some(timestamp),
-			})?;
-			frame.write(fragment_bytes)?;
-			frame.finish()?;
+			g.write_frame(timestamp, fragment_bytes)?;
 
 			// Only once published, so a rejected fragment is never indexed. Audio is always
 			// independently decodable; video says whether this fragment really begins on an IDR,

@@ -754,8 +754,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
 	auth: crate::auth::Handle,
-	// What this session may allocate up front for objects still arriving.
-	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 }
@@ -836,7 +834,8 @@ where
 		Self {
 			runtime,
 			session,
-			origin,
+			// Its own frame budget, so a peer's declared sizes crowd out no other session.
+			origin: origin.with_own_frames(),
 			control,
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
@@ -848,7 +847,6 @@ where
 			version,
 			going_away,
 			auth: crate::auth::Handle::new(false),
-			frames: Default::default(),
 			announces: Default::default(),
 			validity: Default::default(),
 			epoch: None,
@@ -4422,7 +4420,6 @@ struct GroupIngest {
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
 	phase: IngestPhase,
-	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -4437,7 +4434,7 @@ enum IngestPhase {
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: frame::Producer },
 	/// Discarding a dropped object's payload: the bytes of it still to read.
 	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
@@ -4462,7 +4459,6 @@ impl GroupIngest {
 			gap: None,
 			dropping: false,
 			phase: IngestPhase::Delta,
-			budget: subscriber.frames.clone(),
 		}
 	}
 }
@@ -4843,7 +4839,7 @@ where
 			info: frame::Info { size, timestamp },
 			fields,
 		};
-		let mut frame = producer.create_frame_owned(header, &self.frames)?;
+		let mut frame = producer.create_object(header)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
@@ -5629,12 +5625,12 @@ impl GroupIngest {
 						self.phase = IngestPhase::Skip { size };
 						continue;
 					}
-					// `create_frame_owned` is the allocation chokepoint: it rejects an
-					// oversized `size` and allocates up front only within the budget, so
-					// no pre-check is needed.
+					// `create_object` is the allocation chokepoint: it rejects an oversized
+					// `size` and allocates up front only within the origin's budget, so no
+					// pre-check is needed.
 					let timestamp = object_time(self.timescale, *timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
-					let frame = group.create_frame_owned(header, &self.budget)?;
+					let frame = group.create_object(header)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
@@ -5643,7 +5639,7 @@ impl GroupIngest {
 						if !self.dropping {
 							let timestamp = object_time(self.timescale, *timestamp)?;
 							let header = self.header(group, frame::Info { size: 0, timestamp })?;
-							let frame = group.create_frame_owned(header, &self.budget)?;
+							let frame = group.create_object(header)?;
 							group.restore(frame.finish()?);
 						}
 						self.phase = IngestPhase::Delta;

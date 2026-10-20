@@ -84,8 +84,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	sources: kio::Queue<MintedSource>,
 	going_away: crate::goaway::GoingAway,
 	auth: crate::auth::Handle,
-	/// What this session may allocate up front for frames still arriving.
-	frames: frame::Budget,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 }
@@ -110,7 +108,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		Self {
 			session: config.session,
 			runtime: config.runtime,
-			origin: config.origin,
+			// Its own frame budget, so a peer's declared sizes crowd out no other session.
+			origin: config.origin.with_own_frames(),
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
@@ -123,7 +122,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
 			auth: config.auth,
-			frames: Default::default(),
 			announces: Default::default(),
 		}
 	}
@@ -1003,7 +1001,6 @@ struct FrameIngest {
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
 	phase: IngestPhase,
-	budget: frame::Budget,
 	version: Version,
 	/// Where the stream's frames start, the first Object ID until a record names it.
 	frame_start: u64,
@@ -1044,7 +1041,7 @@ enum IngestPhase {
 	/// where there is no timing prefix to act as the sentinel).
 	Size { timestamp: Option<Timestamp> },
 	/// Streaming the frame payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: frame::Producer },
 }
 
 impl FrameIngest {
@@ -1062,7 +1059,6 @@ impl FrameIngest {
 				true => IngestPhase::State,
 				false => IngestPhase::Timing,
 			},
-			budget: subscriber.frames.clone(),
 			version: subscriber.version,
 			frame_start,
 			records: None,
@@ -1207,17 +1203,14 @@ impl FrameIngest {
 						}
 						None => None,
 					};
-					// `create_frame_owned` is the allocation chokepoint: it rejects an
-					// oversized `size` and allocates up front only within the budget, so
-					// no pre-check is needed. No wire timestamp (pre-lite-05) means an
-					// untimed frame.
-					let frame = group.create_frame_owned(
-						frame::Header {
-							info: frame::Info { size, timestamp },
-							fields,
-						},
-						&self.budget,
-					)?;
+					// `create_object` is the allocation chokepoint: it rejects an oversized
+					// `size` and allocates up front only within the origin's budget, so no
+					// pre-check is needed. No wire timestamp (pre-lite-05) means an untimed
+					// frame.
+					let frame = group.create_object(frame::Header {
+						info: frame::Info { size, timestamp },
+						fields,
+					})?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
