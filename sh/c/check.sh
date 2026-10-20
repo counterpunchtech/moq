@@ -25,8 +25,8 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../c"
 
-# Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and gets
-# --config Release, since the Rust staticlib links the release CRT (/MD) either way.
+# Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and builds the
+# package with --config Release, since the Rust staticlib links the release CRT (/MD) either way.
 build=moq/build
 libdir=lib64
 if [[ -n "$ffi_dir" ]]; then build=moq/build/prebuilt; fi
@@ -65,15 +65,23 @@ if [[ -z "$archive" && -z "$ffi_dir" ]] && command -v ninja >/dev/null 2>&1; the
 fi
 
 run() {
-    if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi
+    if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/${2:-Release}/probe.exe"; fi
 }
 # Debian-family CMake never searches lib64/ under a prefix, so a lib64 install is found by its
 # config directory, as a Debian user of one would have to.
 find=(-DCMAKE_PREFIX_PATH="$prefix")
 [[ "$libdir" == lib ]] || find=(-Dmoq-c_DIR="$prefix/$libdir/cmake/moq-c")
-cmake -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug "${find[@]}"
+# An MSVC consumer links the release runtime (/MD) in every configuration, as the docs say,
+# since the package's C++ and Rust objects do.
+cmake -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL "${find[@]}"
 cmake --build "$build/test" --config Release
 run "$build/test"
+# Visual Studio also builds Debug, the configuration whose default runtime (/MDd) mismatches.
+if [[ ! -x "$build/test/probe" ]]; then
+    cmake --build "$build/test" --config Debug
+    run "$build/test" Debug
+fi
 
 # The rest builds with `cc`, which on Windows is MinGW GCC and can't link the MSVC-built
 # package. MSVC consumers use the CMake package.

@@ -44,7 +44,10 @@ The next release, 0.8, replaces this ABI with a C API generated from
 with the same `moq::c` target and `moq-c.pc`, and its
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/c/moq/MIGRATE.md) maps
 each call. To try it from a checkout, `just c package` builds the archive from
-[`c/moq`](https://github.com/moq-dev/moq/tree/main/c/moq).
+[`c/moq`](https://github.com/moq-dev/moq/tree/main/c/moq). On MSVC, build your
+program with the release runtime (`/MD`, or
+`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL`) in every configuration, since
+the package's C++ and Rust objects use it.
 
 ## Connect
 
