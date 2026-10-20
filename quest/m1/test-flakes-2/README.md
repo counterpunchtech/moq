@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
@@ -29,23 +29,27 @@ merge batch, ranked by how likely each hides a product bug.
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+
+Added 2026-10-19 (maintainer): three more, the redial pair first since CI
+hit it.
 
 Public API: none. Wire: none.
 
-Audit on 2026-10-19: one `just check --all` run passed on the source tree at
-`48c8a66ddd`. The Rust default pass ran 8,943 tests, including the known
-publisher-disconnect exception above. The net-feature, capture, and playback
-passes ran another 1,025, 515, and 217 tests respectively; Python ran 102.
-JS workspace tests and the remaining checks passed. Swift skipped because
-this Linux host had no Swift toolchain.
+Baseline on 2026-10-19, before those three children were planned: one
+`just check --all` run passed on the source tree at `48c8a66ddd` (Rust
+default 8,943 tests, net-feature 1,025, capture 515, playback 217, Python
+102, JS workspace tests). Swift skipped on this Linux host; the media/browser
+harness was not run. It used the pinned Nix shell with CPU affinity 0-3 and
+Cargo and nextest concurrency two, at a sampled one-minute load of about 1.6
+to 6.1 on 16 cores. No new flake reproduced, but this single unsaturated run
+does not count toward the loaded-host runs, which still follow the children.
 
-The run used the pinned Nix shell on a 16-core host, with CPU affinity 0-3
-and Cargo and nextest concurrency limited to two. Sampled
-one-minute shared-host load ranged from about 1.6 to 6.1. No new flake was
-reproduced and no source fix was needed, but this single unsaturated run
-does not finish the repeated loaded-host validation. Keep this quest open
-until those runs complete. The separate media/browser harness was not run.
+## Required
+
+- [moq-tokio redial tests](/quest/m1/test-flakes-2/tokio-redial.md) - the two redial tests stop assuming a dropped port stays free and stop racing 10 s deadlines
+- [moq-ffi cancel during connect](/quest/m1/test-flakes-2/ffi-cancel-connect.md) - `client_cancel_aborts_a_pending_connect` orders its cancel deterministically, fixing the code if the race is real
+- [Flapping-peer reorder seed](/quest/m1/test-flakes-2/flapping-peer-reorder.md) - replay one drill seed on current main, and fix it or delete the quest
 
 ## Related
 
