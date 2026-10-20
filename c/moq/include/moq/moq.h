@@ -10,7 +10,9 @@ extern "C" {
 
 /**
  * Stops the moq runtime workers, then the dispatcher, before the process or module goes away.
- * Pending calls never call back. Call it once, from a thread that is not running a callback.
+ * Pending calls may still call back while it runs, typically with MOQ_ERROR_CANCELLED; none
+ * call back after it returns, so free their user_data then. Call it once, from a thread that
+ * is not running a callback.
  */
 void moq_shutdown(void);
 

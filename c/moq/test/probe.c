@@ -1,6 +1,6 @@
 /* Exercises the installed package end to end over a real QUIC session from plain C: a returned
- * error, a loopback connect, a frame read through a callback, a cancelled read, and every
- * callback run on this thread through a custom dispatcher. */
+ * error, a loopback connect, a frame read through a callback, a cancelled read, a callback
+ * in flight at shutdown, and every callback run on this thread through a custom dispatcher. */
 
 /* clock_gettime and the pthread timed wait under strict C11. */
 #define _POSIX_C_SOURCE 200809L
@@ -202,6 +202,14 @@ static void on_frame(void *user_data, moq_error *error, moq_frame *value) {
     on_value(user_data, error, value);
 }
 
+/* Set once moq_shutdown returns, after which no callback may run. */
+static bool shut_down = false;
+
+static void on_late(void *user_data, moq_error *error, moq_frame *value) {
+    CHECK(!shut_down);
+    on_value(user_data, error, value);
+}
+
 /* Waits for a result the probe expects to succeed and returns its value. */
 static void *await(result *pending, const char *what) {
     if (!pump(&pending->done, 5000)) {
@@ -357,8 +365,33 @@ int main(void) {
     moq_broadcast_producer_free(broadcast);
     moq_origin_producer_free(origin);
 
+    /* A read whose frame arrives just before shutdown has its callback in flight, so it may run
+     * while moq_shutdown drains the dispatcher; none may run once it returns, even as the
+     * handles are freed afterward. */
+    moq_origin_producer *late_origin = moq_origin_producer_new(&origin_config);
+    moq_broadcast_producer *late_broadcast = NULL;
+    ok(moq_origin_producer_create_broadcast(late_origin, "late", &late_broadcast), "late broadcast");
+    moq_track_producer *late_track = NULL;
+    ok(moq_broadcast_producer_publish_track(late_broadcast, "data", &info, &late_track), "late track");
+    moq_track_consumer *late = NULL;
+    ok(moq_track_producer_consume(late_track, NULL, &late), "late consume");
+    result in_flight = {0};
+    task = moq_track_consumer_read_frame(late, on_late, &in_flight);
+    ok(moq_track_producer_write_frame(late_track, &frame), "late write");
+
     /* Stop the runtime and the dispatcher before the process tears down. */
     moq_shutdown();
+    shut_down = true;
+
+    if (in_flight.done) {
+        CHECK(!in_flight.error);
+        moq_frame_free(in_flight.value);
+    }
+    moq_task_free(task);
+    moq_track_consumer_free(late);
+    moq_track_producer_free(late_track);
+    moq_broadcast_producer_free(late_broadcast);
+    moq_origin_producer_free(late_origin);
 
     printf("probe: ok\n");
     return 0;

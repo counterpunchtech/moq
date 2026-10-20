@@ -21,7 +21,7 @@ Every call changes shape once; the names are moq-ffi's in snake case, and `<moq/
 | a value plus a `*_present` flag | `{ has_value, value }`, or a pointer that is NULL when absent |
 | one `moq_status_callback` per stream of results | a callback per call that returns a `moq_task *`; call again for the next result, and `moq_task_free` cancels |
 | callbacks on moq's callback thread | callbacks on moq's dispatcher thread, or your own loop through `moq_set_dispatcher` and `moq_work_run` |
-| process teardown | `moq_shutdown()` before unloading |
+| process teardown | `moq_shutdown()` before unloading; pending callbacks may run during it, never after |
 
 A few common calls:
 
