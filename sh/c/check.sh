@@ -75,6 +75,11 @@ if [[ -z "$archive" && -z "$ffi_dir" && "$(uname -s)" != MINGW* && "$(uname -s)"
         cat "$build/cross.log" >&2
         exit 1
     }
+    # A target directory named like a triple is still a host build, and reuses cargo's output.
+    target_dir=$(cargo metadata --locked --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    mkdir -p "$build/odd"
+    ln -sfn "$target_dir" "$build/odd/aarch64-unknown-linux-gnu"
+    CARGO_TARGET_DIR="$PWD/$build/odd/aarch64-unknown-linux-gnu" cmake --build "$build/package" --target moq_ffi_cargo
 fi
 
 run() {

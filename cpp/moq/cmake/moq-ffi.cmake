@@ -25,21 +25,29 @@ if(CMAKE_SCRIPT_MODE_FILE)
     endif()
     string(JSON _count LENGTH "${_artifact}" filenames)
     # The wrappers compile for the host, so moq-ffi must too. A build target (CARGO_BUILD_TARGET
-    # or a cargo config's build.target) puts the library under <target-dir>/<triple>/<profile>/.
+    # or a cargo config's build.target) puts the library under <target-dir>/<triple>/<profile>/
+    # rather than <target-dir>/<profile>/.
+    execute_process(
+        COMMAND cargo metadata --locked --no-deps --format-version 1
+        WORKING_DIRECTORY "${WORKSPACE}"
+        OUTPUT_VARIABLE _metadata
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    string(JSON _target_dir GET "${_metadata}" target_directory)
     string(JSON _file GET "${_artifact}" filenames 0)
+    file(TO_CMAKE_PATH "${_target_dir}" _target_dir)
+    file(TO_CMAKE_PATH "${_file}" _file)
     get_filename_component(_dir "${_file}" DIRECTORY)
-    get_filename_component(_dir "${_dir}" DIRECTORY)
-    get_filename_component(_triple "${_dir}" NAME)
-    execute_process(COMMAND rustc -vV OUTPUT_VARIABLE _rustc COMMAND_ERROR_IS_FATAL ANY)
-    string(REGEX MATCH "host: ([^\r\n]+)" _ "${_rustc}")
-    set(_host "${CMAKE_MATCH_1}")
-    execute_process(COMMAND rustc --print target-list OUTPUT_VARIABLE _targets
-        COMMAND_ERROR_IS_FATAL ANY)
-    string(REPLACE "\r" "" _targets "${_targets}")
-    string(REPLACE "\n" ";" _targets "${_targets}")
-    if(NOT _triple STREQUAL _host AND _triple IN_LIST _targets)
-        message(FATAL_ERROR "cargo built moq-ffi for ${_triple}, not the host (${_host}); a "
-            "source build targets the host, so unset the cargo build target or use MOQ_FFI_DIR")
+    file(RELATIVE_PATH _within "${_target_dir}" "${_dir}")
+    if(_within MATCHES "^([^/]+)/[^/]+$")
+        set(_triple "${CMAKE_MATCH_1}")
+        execute_process(COMMAND rustc -vV OUTPUT_VARIABLE _rustc COMMAND_ERROR_IS_FATAL ANY)
+        string(REGEX MATCH "host: ([^\r\n]+)" _ "${_rustc}")
+        if(NOT _triple STREQUAL CMAKE_MATCH_1)
+            message(FATAL_ERROR "cargo built moq-ffi for ${_triple}, not the host "
+                "(${CMAKE_MATCH_1}); a source build targets the host, so unset the cargo build "
+                "target or use MOQ_FFI_DIR")
+        endif()
     endif()
     foreach(_name IN ITEMS ${STATIC} ${DYNAMIC})
         set(_found "")
