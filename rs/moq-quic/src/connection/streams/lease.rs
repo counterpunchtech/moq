@@ -1,7 +1,8 @@
 //! Receive leases: bytes a reader has seen but not consumed, which keep their connection credit,
 //! and the eviction that recovers a connection window nobody can make progress in.
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 
 use bytes::{Buf, Bytes};
 use thiserror::Error;
@@ -33,6 +34,9 @@ pub struct Leased {
     filled: bool,
     pub(super) evicted: bool,
 }
+
+/// An eviction candidate, ordered so a max-heap pops the lowest priority, then the newest.
+type Victim = Reverse<(i64, Reverse<StreamId>)>;
 
 #[derive(Debug, Clone, Copy)]
 enum End {
@@ -143,6 +147,10 @@ impl RecvStream<'_> {
     /// unread bytes of every stream together stay below the connection receive window. A receiver
     /// whose window exceeds the most its incomplete units can hold never sees an eviction;
     /// [`CreditStats::evicted`](crate::CreditStats::evicted) counts any that happen.
+    ///
+    /// Eviction also waits for every stream with data its reader has not leased yet, since that
+    /// reader may be about to free the window. A reader that gives up on a stream must stop it
+    /// rather than leave it unpolled.
     ///
     /// Do not mix with [`Self::read()`] on one stream: a read skips the leased bytes.
     pub fn lease(&mut self, want: usize) -> Result<ShouldTransmit, LeaseError> {
@@ -332,27 +340,27 @@ impl StreamsState {
     /// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
     /// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
     pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
+        // Ranked once per pass, so a pass that evicts many streams to pay debt stays linear.
+        let mut victims = self.stuck_victims()?;
         let mut transmit = None;
-        while let Some(id) = self.stuck_victim() {
+        while self.local_max_data <= self.data_recvd
+            && let Some(Reverse((_, Reverse(id)))) = victims.pop()
+        {
             transmit = Some(self.evict(id));
         }
         transmit
     }
 
-    /// The stream to evict if the window is stuck, per [`Self::evict_if_stuck()`].
-    fn stuck_victim(&self) -> Option<StreamId> {
+    /// The streams to evict, lowest rank on top, if the window is stuck; see
+    /// [`Self::evict_if_stuck()`].
+    fn stuck_victims(&self) -> Option<BinaryHeap<Victim>> {
         if self.local_max_data > self.data_recvd {
             return None;
         }
 
         // Newest first among equals: the stream with the higher index arrived later.
-        let rank = |priority: i64, id: StreamId| (priority, std::cmp::Reverse(id.index()));
-        let mut victim: Option<((i64, std::cmp::Reverse<u64>), StreamId)> = None;
-        let mut consider = |key, id| {
-            if victim.is_none_or(|(best, _)| key < best) {
-                victim = Some((key, id));
-            }
-        };
+        let rank = |priority: i64, id: StreamId| Reverse((priority, Reverse(id)));
+        let mut victims = Vec::new();
         for (&id, slot) in &self.recv {
             let Some(recv) = slot.as_ref().and_then(|slot| slot.as_open_recv()) else {
                 continue;
@@ -367,16 +375,16 @@ impl StreamsState {
             if fresh || lease.is_some_and(|lease| lease.ready) {
                 return None;
             }
-            consider(rank(lease.map_or(0, |lease| lease.priority), id), id);
+            victims.push(rank(lease.map_or(0, |lease| lease.priority), id));
         }
         // A lease outlives its stream state once the last byte is read.
         for (&id, lease) in &self.leases {
             if lease.held > 0 && !lease.evicted && !self.recv.contains_key(&id) {
-                consider(rank(lease.priority, id), id);
+                victims.push(rank(lease.priority, id));
             }
         }
 
-        victim.map(|(_, id)| id)
+        Some(BinaryHeap::from(victims))
     }
 
     /// Discard everything `id` holds, returning its credit, and fail its next lease.
