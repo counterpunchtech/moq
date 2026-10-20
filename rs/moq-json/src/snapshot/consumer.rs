@@ -175,8 +175,10 @@ mod timestamps {
 			let mut subscription = subscriber.subscription();
 			subscription.max_delay = std::time::Duration::MAX;
 			subscriber.update(subscription).unwrap();
-			let mut config = crate::snapshot::Config::default();
-			config.compression = compression;
+			let config = crate::snapshot::Config {
+				compression,
+				..Default::default()
+			};
 			let mut producer = crate::snapshot::Producer::new(track, config.clone());
 			let mut consumer = Consumer::<serde_json::Value>::new(
 				subscriber,
