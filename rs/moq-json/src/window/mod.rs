@@ -556,6 +556,10 @@ mod test {
 			moq_net::Error::Lagged,
 			moq_net::Error::Evicted,
 			moq_net::Error::GroupTooLarge,
+			moq_net::Error::Stream(moq_net::StreamError::Old),
+			moq_net::Error::Stream(moq_net::StreamError::TooFarBehind),
+			moq_net::Error::Stream(moq_net::StreamError::Evicted),
+			moq_net::Error::Stream(moq_net::StreamError::GroupTooLarge),
 		] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()

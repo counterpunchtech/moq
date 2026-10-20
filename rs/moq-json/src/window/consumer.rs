@@ -73,8 +73,15 @@ impl<T: DeserializeOwned> Consumer<T> {
 					moq_net::Error::Old
 					| moq_net::Error::Lagged
 					| moq_net::Error::Evicted
-					| moq_net::Error::GroupTooLarge,
+					| moq_net::Error::GroupTooLarge
+					| moq_net::Error::Stream(
+						moq_net::StreamError::Old
+						| moq_net::StreamError::TooFarBehind
+						| moq_net::StreamError::Evicted
+						| moq_net::StreamError::GroupTooLarge,
+					),
 				)) => {
+					// Lost here or by a relay, whose reset arrives as its stream code.
 					// This group is no longer complete, but the next one starts with a checkpoint
 					// that can account for everything this reader missed.
 					self.group = None;
