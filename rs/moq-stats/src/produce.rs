@@ -511,7 +511,7 @@ impl<V: Serialize> Snapshot<V> {
 			return Err(err.into());
 		}
 		if frame.keyframe {
-			if let Some(group) = self.group.take() {
+			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
 			let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -531,7 +531,7 @@ impl<V: Serialize> Snapshot<V> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(self.track.finish()?)

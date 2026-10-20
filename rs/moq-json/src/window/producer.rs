@@ -187,7 +187,7 @@ impl<T> Inner<T> {
 	}
 
 	fn cut(&mut self) -> Result<()> {
-		let Some(group) = self.track.group.take() else {
+		let Some(mut group) = self.track.group.take() else {
 			return Ok(());
 		};
 		// The group closes either way, so reset first: a `finish` error must not leave the encoder
@@ -256,7 +256,7 @@ impl Track {
 	/// Close the open group and write the header as the first frame of a new one.
 	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -284,7 +284,7 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		self.inner.finish()?;

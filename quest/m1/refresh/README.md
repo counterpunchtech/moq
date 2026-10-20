@@ -63,7 +63,6 @@ Work owned by this README, after the children land:
 ## Required
 
 - [Lite wire](/quest/m1/refresh/lite.md) - lite-07 TRACK_INFO advertises the ratio and SUBSCRIBE_UPDATE carries the wanted group, so a join at any relay reaches the origin
-- [Video](/quest/m1/refresh/video.md) - video publishers advertise refresh and force a keyframe on demand, keeping the encoder's max GOP
 
 ## Related
 
