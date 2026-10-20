@@ -383,8 +383,11 @@ int main(void) {
     moq_shutdown();
     shut_down = true;
 
-    if (in_flight.done) {
-        CHECK(!in_flight.error);
+    /* Shutdown may have cancelled the read before it saw the frame. */
+    if (in_flight.done && in_flight.error) {
+        CHECK(in_flight.error->tag == MOQ_ERROR_CANCELLED);
+        moq_error_free(in_flight.error);
+    } else if (in_flight.done) {
         moq_frame_free(in_flight.value);
     }
     moq_task_free(task);
