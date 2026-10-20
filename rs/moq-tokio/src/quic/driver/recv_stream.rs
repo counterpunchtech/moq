@@ -107,7 +107,8 @@ impl RecvStream {
     ///
     /// When the peer has spent the connection window and no reader can make progress, the
     /// stream ranked lowest by [`Self::set_priority`] is evicted: its bytes and credit are
-    /// discarded and its next lease fails with [`ReadError::Evicted`].
+    /// discarded and its next lease fails with [`ReadError::Evicted`]. Nothing is evicted while
+    /// the leased and unread bytes of every stream stay below the connection receive window.
     ///
     /// The lease holds the connection's lock: drop it before touching any other stream.
     /// Do not mix with the plain reads on one stream, which skip the leased bytes.
@@ -712,7 +713,8 @@ pub enum ReadError {
     ZeroRttRejected,
     /// The connection window was stuck and this stream was discarded to free it
     ///
-    /// See [`RecvStream::poll_lease`]. The peer hears of it once the stream is stopped.
+    /// See [`RecvStream::poll_lease`]. The peer hears of it once the stream is stopped, so call
+    /// [`RecvStream::stop`] with your own code: dropping the stream sends code 0.
     #[error("evicted")]
     Evicted,
     /// A lease wanted more than the connection receive window can hold

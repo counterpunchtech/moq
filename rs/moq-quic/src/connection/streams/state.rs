@@ -137,7 +137,9 @@ pub(crate) struct StreamsState {
     /// The unconsumed bytes of each receive stream read through a lease, outliving its `recv`
     /// state once the last byte is read
     pub(super) leases: FxHashMap<StreamId, Leased>,
-    /// Which connection [`Credit`]s handed out here belong to
+    /// Streams evicted to free a stuck receive window, ever
+    pub(super) evicted: u64,
+    /// Which connection the send groups handed out here belong to
     pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
@@ -202,6 +204,7 @@ impl StreamsState {
             data_sent: 0,
             data_recvd: 0,
             held: 0,
+            evicted: 0,
             leases: FxHashMap::default(),
             tag: ConnectionTag::next(),
             buffered_data: 0,
@@ -1120,6 +1123,7 @@ impl StreamsState {
         CreditStats {
             leased: self.held,
             available: self.local_max_data.saturating_sub(self.data_recvd),
+            evicted: self.evicted,
         }
     }
 
@@ -3410,6 +3414,7 @@ mod tests {
             client.leased(low).is_some_and(|lease| !lease.evicted),
             "a byte of credit left"
         );
+        assert_eq!(client.credit_stats().evicted, 0);
 
         data(&mut client, low, WINDOW - 1, 1, false);
         // The arrival woke the reader of `low`, which may yet consume.
@@ -3420,6 +3425,7 @@ mod tests {
         assert_eq!(readable(&mut client), [low], "the evicted reader wakes");
         assert_eq!(wait(&mut client, low, 1), Err(LeaseError::Evicted));
         assert_eq!(client.credit_stats().leased, WINDOW);
+        assert_eq!(client.credit_stats().evicted, 1);
         assert_eq!(
             client.local_max_data,
             3 * WINDOW,

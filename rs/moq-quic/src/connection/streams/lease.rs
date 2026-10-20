@@ -113,7 +113,9 @@ pub enum LeaseError {
     Reset(VarInt),
     /// The connection window was stuck and this stream was discarded to free it.
     ///
-    /// The peer has not been told: [`RecvStream::stop()`] sends the code of the caller's choosing.
+    /// The peer has not been told: stop the stream with [`RecvStream::stop()`] and a code of the
+    /// caller's choosing. Until then the peer may keep sending, which costs bandwidth but no
+    /// window, since it is credited on arrival.
     #[error("evicted")]
     Evicted,
     /// More bytes were wanted than the connection receive window can ever hold.
@@ -136,6 +138,11 @@ impl RecvStream<'_> {
     /// the next [`StreamEvent::Readable`] for this stream means it may be met, and so that a
     /// connection window every reader is waiting on can be recovered by evicting the stream ranked
     /// lowest by [`Self::set_priority()`].
+    ///
+    /// Nothing is evicted while the peer has connection credit left, so while the leased and
+    /// unread bytes of every stream together stay below the connection receive window. A receiver
+    /// whose window exceeds the most its incomplete units can hold never sees an eviction;
+    /// [`CreditStats::evicted`](crate::CreditStats::evicted) counts any that happen.
     ///
     /// Do not mix with [`Self::read()`] on one stream: a read skips the leased bytes.
     pub fn lease(&mut self, want: usize) -> Result<ShouldTransmit, LeaseError> {
@@ -372,6 +379,7 @@ impl StreamsState {
         lease.ready = false;
         lease.evicted = true;
         self.held -= held;
+        self.evicted += 1;
 
         let mut freed = held;
         if let Some(slot) = self.recv.get_mut(&id).filter(|slot| slot.is_some()) {

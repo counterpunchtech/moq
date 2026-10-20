@@ -221,7 +221,9 @@ pub enum Error {
 	#[error("stream stopped: {0}")]
 	Stop(u64),
 	/// The connection window was stuck and this stream was discarded to free
-	/// it. See [`RecvStream::poll_lease`].
+	/// it. See [`RecvStream::poll_lease`]. The peer hears of it once the
+	/// stream is stopped, so call `stop` with your own code: dropping the
+	/// stream sends code 0.
 	#[error("stream evicted")]
 	Evicted,
 	/// A lease wanted more than the connection receive window can hold.

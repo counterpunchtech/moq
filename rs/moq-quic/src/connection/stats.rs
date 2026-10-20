@@ -193,4 +193,7 @@ pub struct CreditStats {
     /// Bytes the peer may still send before it needs more credit, including credit not yet
     /// advertised
     pub available: u64,
+    /// Streams evicted so far because incomplete leases filled the window; see
+    /// [`RecvStream::lease()`](crate::RecvStream::lease)
+    pub evicted: u64,
 }
