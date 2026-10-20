@@ -5624,11 +5624,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						if subscription.start().is_none() {
 							subscription.set_bounds(producer.idle_newest().map(Position::group), subscription.end());
 						}
-						// The track's arrivals outlive a subscription, and this one asks for
-						// its groups only now.
-						if let Some(start) = subscription.start() {
-							producer.demand_arrivals(start.group..u64::MAX);
-						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(
 							producer,
@@ -5643,15 +5638,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = subscription.max_delay;
-						// A lowered floor owes groups nobody asked for until now, in the track's
-						// arrivals that held fetches read as well as in the session's tail.
+						// A lowered floor owes groups nobody asked for until now, in the session's
+						// tail as well as in the track's arrivals, which its start declaration
+						// restarts.
 						let lowered = subscription.start().map(|start| {
 							let floor = active.start.map(|start| start.group).or(active.served);
 							start.group..floor.unwrap_or(u64::MAX)
 						});
-						if let Some(groups) = &lowered {
-							producer.demand_arrivals(groups.clone());
-						}
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
 							if let Some(groups) = lowered {
@@ -6105,7 +6098,6 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							}
 						},
 						ServeEnd::Finished => {
-							serve_loop.serving.set_tail_pending(false);
 							let _ = serve_loop.serving.finish();
 						}
 						ServeEnd::GiveBack(err) => {
@@ -6705,14 +6697,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// then finds the track already finished.
 									lite::SubscribeResponse::End(end) => {
 										// Lower groups may still be on the wire, behind a higher
-										// one, so the end holds readers at a hole until the tail
-										// settles. finish_at rejects a boundary at or below a group
+										// one, so the end holds readers at a hole until it fills or
+										// its grace passes. finish_at rejects a boundary at or below a group
 										// already received. lite-05 specified an inclusive end,
 										// and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it
 										// only costs the early boundary: warn, and let the FIN
 										// finish the track. Later drafts made it exclusive, so
 										// the publisher contradicted its own end.
-										if let Err(err) = self.serving.finish_at_pending(Position::group(end.group)) {
+										if let Err(err) = self.serving.finish_at(Position::group(end.group)) {
 											match serve.subscriber.version {
 												Version::Lite05 => {
 													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")

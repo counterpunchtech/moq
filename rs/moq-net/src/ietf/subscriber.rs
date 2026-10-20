@@ -3255,9 +3255,8 @@ where
 										fill.end();
 									}
 								}
-								// The tail settled, so readers may end at an END_OF_TRACK's boundary.
-								track.set_tail_pending(false);
-								// A no-op once an END_OF_TRACK declared the end.
+								// A no-op once an END_OF_TRACK declared the end, whose readers wait
+								// for a missing group only as long as the grace.
 								let _ = track.finish();
 							}
 							Err(err) => {
@@ -4155,8 +4154,9 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 		let _ = track.clone().abort(Error::Unsupported);
 		return Err(Error::Unsupported);
 	}
-	// Lower groups may still be on the wire, behind the one that carried the end.
-	if let Err(err) = track.finish_at_pending(end) {
+	// Lower groups may still be on the wire, behind the one that carried the end: the
+	// received copy holds readers at a hole for the grace.
+	if let Err(err) = track.finish_at(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);

@@ -195,6 +195,7 @@ impl Budget {
 
 	/// A budget of `bytes`, for a benchmark sweeping it.
 	#[cfg(any(test, feature = "fuzz"))]
+	// private: tuning
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(Remaining(AtomicUsize::new(bytes))))
 	}
