@@ -834,6 +834,12 @@ impl Link {
 		self.with(|link| link.goaway = Some(goaway));
 	}
 
+	/// Whether the session still takes new work: open, with no GOAWAY sent or received.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn active(&self) -> bool {
+		self.read(|link, _| link.active())
+	}
+
 	/// Whether this side speaks AUTH: false on a version without it, on a side that does
 	/// not offer it, and once the peer turns out not to.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -1017,11 +1023,12 @@ impl Link {
 	}
 
 	/// The token to present again once a [`retry`](Self::retry) delay passes, or `None`
-	/// when it is no longer wanted here.
+	/// when it is no longer wanted here, or the session is draining and its successor
+	/// presents it instead.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn reopen(&self, id: u64) -> Option<Bytes> {
 		self.with(|link| {
-			if link.closed.is_some() {
+			if !link.active() {
 				return None;
 			}
 			let slot = link.slots.get_mut(&id)?;
@@ -2802,6 +2809,24 @@ mod tests {
 		let id = opened(&successor);
 		successor.granted(id, Grant::all());
 		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+	}
+
+	/// A retry that wakes after this side sent a GOAWAY opens nothing: the successor presents it.
+	#[test]
+	fn a_draining_session_presents_no_retry() {
+		let link = Link::new(true);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		let goaway = std::sync::Arc::new(goaway);
+		link.drain_with(goaway.clone());
+		let _auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&link);
+		link.refused(id);
+		let busy = Error::Session(SessionError::TooManyRequests);
+		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
+
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		assert!(!link.active());
+		assert_eq!(link.reopen(id), None);
 	}
 
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.
