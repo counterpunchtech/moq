@@ -4023,9 +4023,7 @@ mod test {
 		let before = pool.used();
 
 		let observing = producer.handle();
-		let mut frame = producer
-			.create_frame(sized(MAX_CACHE_BYTES))
-			.unwrap();
+		let mut frame = producer.create_frame(sized(MAX_CACHE_BYTES)).unwrap();
 		assert_eq!(pool.used(), before, "the declared size was charged");
 
 		frame.write_deferred(Bytes::from(vec![0u8; 100])).unwrap();
@@ -4040,6 +4038,38 @@ mod test {
 		frame.abort(Error::Cancel).unwrap();
 		assert_eq!(observing.state.read().cache, 0);
 		assert!(pool.used() <= before);
+	}
+
+	/// A writer names the group it fills.
+	#[test]
+	fn info_names_the_group() {
+		let producer = Info { sequence: 7 }.produce();
+		assert_eq!(producer.info(), Info { sequence: 7 });
+	}
+
+	/// An open frame still reads its group: which one it is, how many frames it holds,
+	/// and whether anyone reads it. Finishing the frame hands the same writer back.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_open_frame_reads_its_group() {
+		let mut producer = Info { sequence: 3 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		let mut consumer = producer.consume();
+
+		let mut frame = producer.create_frame(sized(1)).unwrap();
+		let group = frame.group();
+		assert_eq!(group.info().sequence, 3);
+		assert_eq!(group.frame_count(), 2, "the open frame counts");
+		assert!(group.demand().is_used());
+		assert!(group.poll_closed(&kio::Waiter::noop()).is_pending());
+
+		frame.write(Bytes::from_static(b"b")).unwrap();
+		let mut producer = frame.finish().unwrap();
+		producer.finish().unwrap();
+		let mut read = || consumer.read_frame().now_or_never().unwrap().unwrap();
+		assert_eq!(read().unwrap().payload, Bytes::from_static(b"a"));
+		assert_eq!(read().unwrap().payload, Bytes::from_static(b"b"));
+		assert!(read().is_none());
 	}
 
 	#[test]
@@ -4065,9 +4095,7 @@ mod test {
 		let before = pool.used();
 
 		let observing = producer.handle();
-		let mut frame = producer
-			.create_frame(sized(300))
-			.unwrap();
+		let mut frame = producer.create_frame(sized(300)).unwrap();
 		frame.write(Bytes::from(vec![0u8; 100])).unwrap();
 		frame.write_deferred(Bytes::from(vec![0u8; 200])).unwrap();
 		let _producer = frame.finish().unwrap();

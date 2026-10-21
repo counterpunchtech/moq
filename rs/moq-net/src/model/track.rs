@@ -17,8 +17,8 @@ use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
 use super::delivered::Delivered;
-use crate::ledger::{self, Ledger};
 use super::{Datagram, Requests};
+use crate::ledger::{self, Ledger};
 
 use super::Cap;
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
@@ -785,17 +785,17 @@ impl TrackState {
 		}
 	}
 
-	/// Find the next live group at or after `index` in arrival order.
-	///
-	/// Returns the group and its absolute index so the consumer can advance past it.
-	/// The cached producer rather than a consumer: `consume` reads the clock and can
-	/// take the group's own lock, which the caller does once the track guard is gone.
 	/// Whether readers may take from the cache: it reflects the live feed, or the track
 	/// ended, which makes the cache the whole of it.
 	fn readable(&self) -> bool {
 		self.feed == Feed::Live || self.sealed || self.end.is_some() || self.abort.is_some()
 	}
 
+	/// Find the next live group at or after `index` in arrival order.
+	///
+	/// Returns the group and its absolute index so the consumer can advance past it.
+	/// The cached producer rather than a consumer: `consume` reads the clock and can
+	/// take the group's own lock, which the caller does once the track guard is gone.
 	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Handle, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		let readable = self.readable();
@@ -7534,9 +7534,9 @@ mod test {
 		let handle = group.handle();
 		let _partial = group
 			.create_frame(frame::Info {
-					size: 2,
-					timestamp: Some(Timestamp::ZERO),
-				})
+				size: 2,
+				timestamp: Some(Timestamp::ZERO),
+			})
 			.unwrap();
 		assert_eq!(handle.frame_count(), 2);
 		drop(_partial);
@@ -8096,9 +8096,9 @@ mod test {
 
 		let mut frame = straggler
 			.create_frame(frame::Info {
-					size: 3,
-					timestamp: Some(Timestamp::ZERO),
-				})
+				size: 3,
+				timestamp: Some(Timestamp::ZERO),
+			})
 			.unwrap();
 
 		// The sender stalls past the retention window, then the whole payload lands in
@@ -9466,15 +9466,44 @@ mod test {
 		assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 
 		let waiter = kio::Waiter::noop();
-		assert!(producer.poll_past(0, &waiter).is_pending(), "a frameless group is not content");
+		assert!(
+			producer.poll_past(0, &waiter).is_pending(),
+			"a frameless group is not content"
+		);
 		for group in &mut received {
 			group
 				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 				.unwrap();
 		}
-		assert!(producer.poll_past(0, &waiter).is_ready(), "its first frame makes it content");
+		assert!(
+			producer.poll_past(0, &waiter).is_ready(),
+			"its first frame makes it content"
+		);
 		assert!(first.read_frame().now_or_never().unwrap().unwrap().is_some());
 		assert!(second.read_frame().now_or_never().unwrap().unwrap().is_some());
+	}
+
+	/// A parked `poll_past` wakes when a later group starts, not when its header lands.
+	#[test]
+	fn poll_past_wakes_when_a_later_group_starts() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let producer = track_producer("test", Info::timed());
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(producer.poll_past(0, &waiter).is_pending());
+
+		let mut group = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		woken.store(false, Ordering::SeqCst);
+		assert!(
+			producer.poll_past(0, &waiter).is_pending(),
+			"a frameless header is not content"
+		);
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(woken.load(Ordering::SeqCst), "its first frame wakes the parked poll");
+		assert!(producer.poll_past(0, &waiter).is_ready());
 	}
 
 	/// A frameless group whose stream ends with no frame, cleanly or reset, ends its readers
@@ -10159,10 +10188,17 @@ mod test {
 		let consumer = request.consume();
 		let mut producer = request.request_start(2).accept(None);
 		let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
-		assert!(subscriber.poll_start(&waiter).is_pending(), "the floor is not the start");
+		assert!(
+			subscriber.poll_start(&waiter).is_pending(),
+			"the floor is not the start"
+		);
 
 		// Nothing below the floor is waited for, and a group above it reads at once.
-		producer.create_group(group::Info { sequence: 3 }).unwrap().finish().unwrap();
+		producer
+			.create_group(group::Info { sequence: 3 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		assert_eq!(subscriber.assert_group().sequence, 3);
 		assert!(subscriber.poll_start(&waiter).is_pending());
 
@@ -10760,6 +10796,27 @@ mod test {
 		assert!(matches!(result, Err(Error::Dropped)));
 	}
 
+	/// Aborting a track aborts its open groups: a reader that already pulled one ends with
+	/// the error, and the group's writer fails.
+	#[test]
+	#[cfg(feature = "async")]
+	fn abort_ends_a_pulled_open_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut consumer = producer.subscribe(None);
+		let mut writer = producer.append_group().unwrap();
+		writer
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		let mut group = consumer.assert_group();
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		producer.clone().abort(Error::Cancel).unwrap();
+		let read = group.read_frame().now_or_never().expect("should not block");
+		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
+		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
+		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
+	}
+
 	#[test]
 	fn drop_after_abort_does_not_warn() {
 		// abort() closes the channel after recording `abort`. Drop must treat the
@@ -10936,10 +10993,7 @@ mod test {
 		producer.finish_at(Position { group: 5, frame: 5 }).unwrap();
 		assert_eq!(producer.end(), Some(Position { group: 5, frame: 5 }));
 		for moved in [Position { group: 5, frame: 4 }, Position::group(6), Position::group(5)] {
-			assert!(matches!(
-				producer.finish_at(moved),
-				Err(Error::ProtocolViolation)
-			));
+			assert!(matches!(producer.finish_at(moved), Err(Error::ProtocolViolation)));
 		}
 	}
 
@@ -11174,12 +11228,18 @@ mod test {
 
 			let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
 			let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
-			assert!(arrival.poll_recv_group(&waiter).is_pending(), "end {end}: held at the hole");
+			assert!(
+				arrival.poll_recv_group(&waiter).is_pending(),
+				"end {end}: held at the hole"
+			);
 			elapse(&producer, grace - Duration::from_millis(1));
 			assert!(!woken.load(Ordering::SeqCst), "end {end}: woken before the grace");
 			assert!(arrival.poll_recv_group(&waiter).is_pending());
 			elapse(&producer, Duration::from_millis(1));
-			assert!(woken.load(Ordering::SeqCst), "end {end}: the grace never woke the reader");
+			assert!(
+				woken.load(Ordering::SeqCst),
+				"end {end}: the grace never woke the reader"
+			);
 			assert!(matches!(arrival.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 		}
 	}
@@ -11410,10 +11470,7 @@ mod test {
 		producer.finish_at(Position::group(3)).unwrap();
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
 		assert!(
-			matches!(
-				producer.finish_at(Position::group(2)),
-				Err(Error::ProtocolViolation)
-			),
+			matches!(producer.finish_at(Position::group(2)), Err(Error::ProtocolViolation)),
 			"a second end is refused"
 		);
 		assert_eq!(producer.end(), Some(Position::group(3)), "the first end stands");
@@ -11468,6 +11525,26 @@ mod test {
 		producer.clone().abort(Error::Timeout).unwrap();
 		assert!(producer.close().is_err());
 		assert!(matches!(consumer.recv_group().await, Err(Error::Timeout)));
+	}
+
+	/// A close drops a group still open that no reader pulled: readers drain the finished
+	/// groups, then end without a declared end.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn local_close_drops_an_unpulled_open_group() {
+		let producer = track_producer("local", Info::timed());
+		let mut consumer = producer.consume().subscribe(None).await.unwrap();
+		producer.append_group().unwrap().finish().unwrap();
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.clone().close().unwrap();
+		assert_eq!(
+			consumer.recv_group().await.unwrap().map(|group| group.sequence),
+			Some(0)
+		);
+		assert!(consumer.recv_group().await.unwrap().is_none());
+		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
 	}
 
 	/// A local close is a dead route to the origin, not finished content, so a
@@ -15021,6 +15098,19 @@ mod test {
 		// An equal start is a keyframe at the previous group's start.
 		group
 			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+			.unwrap();
+	}
+
+	/// A received copy writes what its peer sent, so a group starting before the one ahead of
+	/// it is not refused as a rewind, as a local write is.
+	#[test]
+	fn a_received_copy_skips_the_rewind_check() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		append_at(&mut producer, 1000);
+		let mut group = producer.append_group().unwrap();
+		group
+			.write_frame(Timestamp::from_millis(500).unwrap(), &b"x"[..])
 			.unwrap();
 	}
 

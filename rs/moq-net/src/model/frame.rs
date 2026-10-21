@@ -185,7 +185,9 @@ impl Default for Remaining {
 
 impl std::fmt::Debug for Budget {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Budget").field(&self.0.0.load(Ordering::Relaxed)).finish()
+		f.debug_tuple("Budget")
+			.field(&self.0.0.load(Ordering::Relaxed))
+			.finish()
 	}
 }
 
