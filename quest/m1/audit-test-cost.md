@@ -34,7 +34,7 @@ slack, the Nightly JS benchmark stall, the CI selection test's feature count,
 and the stats producer benchmark lint. It planned
 redundant failover drift, fixed by
 [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113), and
-[macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md).
+[macOS QUIC connects](https://github.com/moq-dev/moq/pull/6110).
 
 Baselines from queue run
 [39371990135](https://github.com/moq-dev/moq/actions/runs/39371990135):
