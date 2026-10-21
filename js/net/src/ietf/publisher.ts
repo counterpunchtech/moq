@@ -943,7 +943,7 @@ export class Publisher {
 			// A group already past it never starts the write.
 			const write = async (op: () => Promise<unknown>) => {
 				const expired = group.expired.peek() ?? (await race([op().then(() => undefined), group.expired]));
-				if (expired) throw expired;
+				if (expired !== undefined) throw expired;
 			};
 
 			try {

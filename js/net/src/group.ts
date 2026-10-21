@@ -580,9 +580,7 @@ export class Consumer {
 			this.#verdict,
 			() => this.#state.closed,
 			(value) =>
-				value instanceof Error
-					? !this.#recovers(value)
-					: this.#released || this.#bufferedFrames().length === 0,
+				value instanceof Error ? !this.#recovers(value) : this.#released || this.#bufferedFrames().length === 0,
 		);
 		return this.#closed;
 	}
