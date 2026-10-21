@@ -39,7 +39,7 @@ deadlines, archive retention, and listener stall accounting, and added the
 per-crate ratchet to moq-auth, moq-rtmp, and moq-archive. The ratchet also
 covers moq-net, moq-mux, moq-ffi, moq-room, moq-stats, and moq-uring.
 
-The `quest/m1/time/crates` PR moved every other crate's production reads and
+[#6135](https://github.com/moq-dev/moq/pull/6135) moved every other crate's production reads and
 timers onto moq-clock (adding `timeout_at` and `interval_at`) and gave each a
 ratchet, except moq-ice and moq-rtc, which drive str0m on std instants. What
 remains:
