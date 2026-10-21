@@ -357,16 +357,19 @@ export class Broadcast {
 
 		effect.spawn(async () => {
 			let status: Status = "offline";
+			let received = false;
 			let finished = false;
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
 					// A finished catalog only means no more edits. A finished broadcast keeps serving
 					// its tail until it closes or is withdrawn, which reruns this, so keep playing it.
+					// One that ended empty has nothing to play.
 					if (!update) {
-						finished = true;
+						finished = received;
 						break;
 					}
+					received = true;
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
