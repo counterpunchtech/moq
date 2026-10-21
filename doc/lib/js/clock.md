@@ -21,7 +21,7 @@ const restore = clock.install();
 try {
     const start = now();
     const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advanceAsync(Nano.fromMilli(Milli(10)));
+    await clock.advance(Nano.fromMilli(Milli(10)));
     await pending;
     console.log(now() - start); // 10,000,000 nanoseconds
 } finally {
@@ -41,9 +41,11 @@ that boundary until the backend explicitly shares one.
 `Wall` is a separate branded number of milliseconds since the Unix epoch.
 Use it for dates, rather than measuring elapsed time. A Rust wall-time
 boundary must convert its units explicitly. A new `Manual` starts at instant
-zero and 2025-01-01 UTC. `advance()` moves both readings; `stepWall()` changes
-only wall time. `advanceAsync()` also drains due timers and the microtasks
-they schedule, so assertions observe their effects. `fire()` waits for a timer
+zero and 2025-01-01 UTC. `await advance()` moves both readings through each due
+timer deadline, draining tasks between deadlines, including timers those tasks
+re-arm before the target. `jump()` moves straight to the target and fires due
+timers late without draining, modeling a stalled event loop. `stepWall()` changes
+only wall time. `fire()` waits for a timer
 to be armed, even by a later host task such as I/O, then advances exactly to the
 earliest deadline the same way; it never resolves if nothing arms one.
 

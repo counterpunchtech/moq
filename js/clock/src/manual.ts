@@ -28,7 +28,7 @@ export class Manual {
 			this.#timers.push(timer);
 			this.#up(timer.index);
 			this.#revision++;
-			this.#fire();
+			if (at <= this.#now) this.#ready(timer);
 			this.#armed?.();
 			return () => {
 				this.#remove(timer);
@@ -51,26 +51,33 @@ export class Manual {
 		return Wall.add(this.#wallAnchor, Instant.durationSince(this.#now, this.#wallAnchorAt));
 	}
 
-	/** Move the instant and wall time forward by a duration. */
-	advance(duration: Nano): void {
+	/** Jump forward without draining tasks, firing due timers late as a stalled event loop would. */
+	jump(duration: Nano): void {
 		this.#now = Instant.add(this.#now, duration);
 		this.#fire();
 	}
 
-	/** Advance, then drain due timers and the microtasks they schedule. */
-	async advanceAsync(duration: Nano): Promise<void> {
-		this.advance(duration);
+	/** Advance through each due deadline, draining tasks before continuing to the target. */
+	async advance(duration: Nano): Promise<void> {
+		const target = Instant.add(this.#now, duration);
 		for (;;) {
 			const revision = this.#revision;
 			await drain();
-			this.#fire();
-			if (revision === this.#revision) return;
+			const first = this.#timers[0];
+			if (first !== undefined && first.at <= target) {
+				this.#now = Instant(first.at);
+				this.#ready(first);
+			} else if (this.#now < target) {
+				this.#now = target;
+			} else if (revision === this.#revision) {
+				return;
+			}
 		}
 	}
 
 	/**
 	 * Wait until a timer is armed, advance exactly to the earliest deadline, then drain like
-	 * `advanceAsync` and return the instant reached. Awaits forever if no timer is ever armed.
+	 * `advance` and return the instant reached. Awaits forever if no timer is ever armed.
 	 */
 	async fire(): Promise<Instant> {
 		if (this.#firing) throw new Error("fire already pending");
@@ -83,7 +90,7 @@ export class Manual {
 				// arm() runs an already-due timer at once, so it never waits in the heap.
 				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
 				if (at !== undefined) {
-					await this.advanceAsync(Instant.durationSince(Instant(at), this.#now));
+					await this.advance(Instant.durationSince(Instant(at), this.#now));
 					return this.#now;
 				}
 				// A host task, such as I/O, may arm the timer later than any drain can wait for.
@@ -148,14 +155,18 @@ export class Manual {
 		this.#down(last.index);
 	}
 
+	#ready(timer: Timer): void {
+		this.#remove(timer);
+		this.#revision++;
+		this.#fired++;
+		timer.ready();
+	}
+
 	#fire(): void {
 		for (;;) {
 			const first = this.#timers[0];
 			if (!first || first.at > this.#now) return;
-			this.#remove(first);
-			this.#revision++;
-			this.#fired++;
-			first.ready();
+			this.#ready(first);
 		}
 	}
 }

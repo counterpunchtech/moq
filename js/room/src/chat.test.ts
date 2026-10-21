@@ -12,11 +12,11 @@ test("chat expires ten-second history and late readers only see retained message
 	try {
 		publisher.send("first");
 		expect(await subscriber.recv()).toEqual({ push: { index: 0, value: "first" } });
-		await clock.advanceAsync(Nano(HISTORY - 1));
+		await clock.advance(Nano(HISTORY - 1));
 		publisher.expire();
 		// The publisher's own timer retires the message once its history elapses.
 		const popped = subscriber.recv();
-		await clock.advanceAsync(Nano(1));
+		await clock.advance(Nano(1));
 		expect(await popped).toEqual({ pop: { start: 0, end: 1 } });
 		publisher.send("second");
 		const late = Subscriber.subscribe(broadcast.consume());
