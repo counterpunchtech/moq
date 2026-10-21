@@ -1,3 +1,5 @@
+//! Read broadcasts, tracks, and groups.
+
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
@@ -65,12 +67,22 @@ pub struct MoqRange {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
 	/// This exact group and frame.
-	Absolute { group: u64, frame: u64 },
+	Absolute {
+		/// The absolute group sequence number.
+		group: u64,
+		/// The zero-based frame index within the group.
+		frame: u64,
+	},
 	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
-	Relative { groups: u64 },
-	/// The group containing this presentation time, in microseconds. An untimed track
-	/// refuses it.
-	Time { timestamp_us: u64 },
+	Relative {
+		/// The number of groups back from the live edge.
+		groups: u64,
+	},
+	/// The group containing this presentation time. An untimed track refuses it.
+	Time {
+		/// The presentation time in microseconds.
+		timestamp_us: u64,
+	},
 }
 
 /// Which of a subscription's pending groups the publisher sends first, mirroring
@@ -169,6 +181,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	}
 }
 
+/// A broadcast from which tracks and groups can be read.
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	pub(crate) inner: moq_net::broadcast::Consumer,
@@ -235,7 +248,9 @@ impl MoqBroadcastConsumer {
 				})?;
 
 				let source = moq_mux::Source::new(origin, self.inner.clone());
-				Ok(source.resolve(Some(&reference)).await?)
+				// The bindings do not expose a reference's epoch yet, so they read like an older
+				// reader: the first instance resolved, without the epoch's guarantee.
+				Ok(source.resolve(Some(&reference), None).await?)
 			})
 			.await
 	}
@@ -528,6 +543,7 @@ async fn with_lane<R>(_lane: Guard<ReadLane>, fut: impl Future<Output = Result<R
 	fut.await
 }
 
+/// A subscribed track whose groups, frames, or datagrams can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	shared: Arc<TrackShared>,
@@ -718,6 +734,7 @@ impl GroupInner {
 	}
 }
 
+/// A group whose frames can be read in order.
 #[derive(uniffi::Object)]
 pub struct MoqGroupConsumer {
 	sequence: u64,
