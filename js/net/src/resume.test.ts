@@ -1836,6 +1836,45 @@ test("a datagram below the group floor does not keep a finite track's copy", asy
 	a.close();
 });
 
+test("a clean end keeps the serving copy while a group read from a replaced one may continue from it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	try {
+		ta.write(0);
+		expect(drain(sub)).toEqual([0]);
+		front.serve(b.consume());
+		await settle();
+
+		// Group 1 is handed out from the old route, its first frame still unread.
+		const stalled = ta.write(1, 1, false);
+		const group = await sub.recvGroup();
+		if (group?.sequence !== 1) throw new Error("expected group 1");
+
+		// The new route has all of group 1 and ends there.
+		tb.write(1, 2);
+		tb.producer.close();
+		await settle();
+		expect(sub.closed.peek()).toBeNull();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+
+		// The old route fails: the group continues from the copy that ended.
+		stalled.close(new StreamError(StreamCode.SessionClosed));
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a retained copy declaring another end after a clean end fails the reads", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

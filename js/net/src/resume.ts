@@ -639,6 +639,8 @@ class Reader implements ResumeSource {
 				if (!this.#ended || copy.lease > 0) return true;
 				const start = Math.max(cursor.start, copy.floor ?? 0);
 				if (!hooks.spent(copy.sub, start, undefined, delivered)) return true;
+				// A group read from a copy it replaced may still continue from it.
+				if (this.#backs(copy, true, grace(this.#budget()))) return true;
 			} else {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
@@ -679,19 +681,25 @@ class Reader implements ResumeSource {
 			if (hooks.hasUnreadGroup(copy.sub, cursor.start, end, delivered)) return "keep";
 		}
 		if (copy.lease > 0) return "keep";
-		// A group still read that it holds or may yet get within the grace a late group is waited
-		// for: a failure of the copy that group is read from continues here.
 		const lands = copy.since !== undefined && !this.#expired(copy, wait);
+		return this.#backs(copy, lands, wait) ? "keep" : undefined;
+	}
+
+	/**
+	 * Whether `copy` holds a group still read, or may yet get it within `wait` when it `lands`: a
+	 * failure of the copy that group is read from continues here.
+	 */
+	#backs(copy: Copy, lands: boolean, wait: Milli): boolean {
 		for (const recover of this.out) {
 			const sequence = recover.sequence;
-			if (hooks.holdsGroup(copy.sub, sequence)) return "keep";
+			if (hooks.holdsGroup(copy.sub, sequence)) return true;
 			// A group at or past where it was asked to start may land even before its first
 			// arrival; without a floor, only what follows its first arrival can.
 			const asked = copy.floor !== undefined && copy.floor <= sequence;
 			const land = { start: sequence, end: sequence + 1, floor: asked, grace: wait };
-			if (lands && hooks.mayLand(copy.sub, land)) return "keep";
+			if (lands && hooks.mayLand(copy.sub, land)) return true;
 		}
-		return undefined;
+		return false;
 	}
 
 	/**
