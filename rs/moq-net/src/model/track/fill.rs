@@ -233,8 +233,13 @@ impl FillState {
 				if ask.order == Order::Descending {
 					pending.order = Order::Descending;
 				}
-				if groups.start == pending.start.group && ask.start.group == groups.start {
-					pending.start.frame = pending.start.frame.min(ask.start.frame);
+				// A reader starting in an earlier group wants this one whole.
+				if groups.start == pending.start.group {
+					let frame = match ask.start.group == groups.start {
+						true => ask.start.frame,
+						false => 0,
+					};
+					pending.start.frame = pending.start.frame.min(frame);
 				}
 			}
 			joins.push(Join {

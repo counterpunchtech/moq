@@ -15247,6 +15247,26 @@ mod test {
 		assert_eq!(fill.next(), Some(WIDE - REFUSED - 1));
 	}
 
+	/// A reader starting in an earlier group widens a queued fill to the whole of its first
+	/// group, not just one starting where it does.
+	#[test]
+	fn an_earlier_reader_widens_a_queued_fill_to_its_head() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let start = Anchor::Absolute(Position { group: 1, frame: 7 });
+		let mut mid = producer.subscribe(replay().with_ranges([Range { start, end: None }]));
+		let mut whole = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let _ = mid.poll_recv_group(&kio::Waiter::noop());
+		let _ = whole.poll_recv_group(&kio::Waiter::noop());
+
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!((fill.start(), fill.end()), (Position { group: 1, frame: 0 }, 4));
+	}
+
 	/// A descending reader joining a queued fill makes it newest first, as any descending
 	/// subscriber does a subscription.
 	#[test]
