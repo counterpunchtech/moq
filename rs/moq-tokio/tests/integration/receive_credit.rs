@@ -700,8 +700,10 @@ const STOCK_WINDOW: u64 = 128 << 20;
 const BENCH_BYTES: usize = 256 << 20;
 /// The benchmark's bottleneck, and the bytes a run delivers through it.
 const BENCH_BLOAT: (u64, usize) = (200_000_000, 16 << 20);
-/// Groups each track keeps in flight, so a track is not bound to its round trip.
-const INFLIGHT: usize = 4;
+/// Bytes each track keeps in flight, at least one group, so a track is not bound to its round
+/// trip. Deeper pipelines of large frames evict: newest-first delivery starves a track's older
+/// groups while newer ones arrive, until their remainders fill the window.
+const INFLIGHT: usize = 1 << 20;
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -731,7 +733,7 @@ struct Measured {
 }
 
 /// Deliver `bytes` over `cell.streams` tracks of one-frame groups, each track keeping
-/// [`INFLIGHT`] groups outstanding. Every incomplete frame fits the window alongside the
+/// [`INFLIGHT`] bytes outstanding. Every incomplete frame fits the window alongside the
 /// others, so nothing may be evicted, through `profile` or not.
 async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize) -> Measured {
 	let mut transport = transport(cell.window);
@@ -744,7 +746,15 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 	let setup = setup_through("moq-lite-06", transport, profile).await;
 	let mut tracks = Vec::with_capacity(cell.streams);
 	for index in 0..cell.streams {
-		tracks.push(setup.subscribe(&index.to_string(), 0).await);
+		let name = index.to_string();
+		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
+		// Groups in flight fall behind the live edge, so a zero budget would skip them.
+		let subscription = Subscription::default().with_max_delay(TIMEOUT);
+		let sub = tokio::time::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
+			.await
+			.expect("subscribe timeout")
+			.expect("subscribe");
+		tracks.push((track, sub));
 	}
 
 	let rounds = (bytes / cell.frame / cell.streams).max(1);
@@ -755,7 +765,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		.map(|(track, mut sub)| {
 			let payload = payload.clone();
 			tokio::spawn(async move {
-				let inflight = Arc::new(tokio::sync::Semaphore::new(INFLIGHT));
+				let inflight = Arc::new(tokio::sync::Semaphore::new((INFLIGHT / payload.len()).max(1)));
 				let sent = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 				let writer = tokio::spawn({
 					let (inflight, sent, payload) = (inflight.clone(), sent.clone(), payload.clone());
@@ -799,7 +809,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 	assert_eq!(credit.evicted, 0, "pacing evicted a stream");
 	Measured {
 		peak: credit.peak_spent,
-		throughput: (rounds * cell.streams * cell.frame) as f64 / elapsed.as_secs_f64(),
+		throughput: (latency.len() * cell.frame) as f64 / elapsed.as_secs_f64(),
 		latency,
 		overflowed: setup
 			.verify()
@@ -814,8 +824,8 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 /// size, so a cost that grows with either shows up as a slope; the connection window, which
 /// trades memory for throughput once it nears the path's bandwidth-delay product; and a
 /// stream window that follows the connection window. Reports the peak credit the peer had
-/// spent (leased plus unread), throughput, frame completion latency, and the bottleneck's
-/// queue drops, each the median of the runs, and fails if any run evicted a stream. The
+/// spent (leased plus unread), throughput of delivered frames, their completion latency, the
+/// bottleneck's queue drops, each the median of the runs, and fails if any run evicted a stream. The
 /// publisher is a stock server, so its send window bounds what is in flight as it would in
 /// production. Run by nightly.
 #[tokio::test(flavor = "multi_thread")]
