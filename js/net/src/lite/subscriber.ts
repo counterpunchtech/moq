@@ -721,6 +721,9 @@ export class Subscriber {
 				}
 				if (event.kind === "added") {
 					if (listed.has(event.name)) throw new ProtocolViolation(`track listed twice: ${event.name}`);
+					// Until js/net inflates, a compressed track is refused, as its subscription is,
+					// rather than listed as a plain one.
+					if (event.info.compress) throw new Error("compressed tracks are not supported");
 					if (!this.#announces.tryAcquire()) {
 						throw new SessionError(SessionCode.TooManyRequests, { reason: "too many listed tracks" });
 					}
