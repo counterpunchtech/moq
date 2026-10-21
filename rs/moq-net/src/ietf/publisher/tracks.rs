@@ -22,9 +22,9 @@ pub(super) struct Listings {
 	/// The prefix of every established SUBSCRIBE_TRACKS, by a key its guard removes.
 	prefixes: HashMap<u64, crate::PathOwned>,
 	next: u64,
-	/// How many PUBLISH subscriptions of ours each track has, and how many SUBSCRIBEs of
-	/// the peer's: draft-18 allows the peer one subscription per track (section 5.1), so
-	/// neither kind may join the other.
+	/// On draft-18, the tracks a PUBLISH of ours subscribes the peer to, and how many
+	/// SUBSCRIBEs of the peer's each track has: draft-18 allows the peer one subscription
+	/// per track (section 5.1), so a PUBLISH joins neither kind.
 	published: HashMap<(crate::PathOwned, Arc<str>), usize>,
 	subscribed: HashMap<(crate::PathOwned, Arc<str>), usize>,
 }
@@ -74,7 +74,8 @@ pub(super) struct Subscribed {
 }
 
 impl Subscribed {
-	/// Count a PUBLISH of ours to `namespace`'s `track`, unless the peer SUBSCRIBEd to it.
+	/// Claim `namespace`'s `track` for a PUBLISH of ours, unless the peer is subscribed to
+	/// it already, by its SUBSCRIBE or another PUBLISH.
 	fn publish(listings: &kio::Shared<Listings>, namespace: crate::PathOwned, track: Arc<str>) -> Option<Self> {
 		Self::claim(listings, (namespace, track), false)
 	}
@@ -95,7 +96,7 @@ impl Subscribed {
 		} else {
 			(published, subscribed)
 		};
-		if other.contains_key(&key) {
+		if other.contains_key(&key) || (!direct && mine.contains_key(&key)) {
 			return None;
 		}
 		*mine.entry(key.clone()).or_default() += 1;
@@ -172,8 +173,8 @@ struct Listed {
 	live: kio::Consumer<()>,
 	/// The subscription slot the PUBLISH holds for as long as it lives.
 	slot: crate::session::Slot,
-	/// Counts the PUBLISH against the peer's SUBSCRIBEs for as long as it lives.
-	subscribed: Subscribed,
+	/// On draft-18, claims the track's one subscription for as long as the PUBLISH lives.
+	subscribed: Option<Subscribed>,
 	params: Params,
 }
 
@@ -653,12 +654,21 @@ where
 						skip(name);
 						continue;
 					};
-					// Held while the subscription lives, from now so a SUBSCRIBE cannot slip in
-					// before the PUBLISH goes out: on draft-18 a track the peer SUBSCRIBEd to is
-					// skipped instead (section 5.1).
-					let Some(subscribed) = Subscribed::publish(&self.listings, namespace.clone(), name.clone()) else {
-						skip(name);
-						continue;
+					// Draft-18 allows one subscription per track (section 5.1), so a track the
+					// peer is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is
+					// skipped. Held from now, so a SUBSCRIBE cannot slip in before the PUBLISH
+					// goes out.
+					let subscribed = match self.version {
+						Version::Draft18 => {
+							match Subscribed::publish(&self.listings, namespace.clone(), name.clone()) {
+								Some(subscribed) => Some(subscribed),
+								None => {
+									skip(name);
+									continue;
+								}
+							}
+						}
+						_ => None,
 					};
 					let entry = kio::Producer::new(());
 					let task = Listed {
@@ -1532,6 +1542,40 @@ mod tests {
 			drop(h.broadcast);
 			for stream in [&mut first, &mut second] {
 				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
+			}
+		}
+	}
+
+	/// On draft-18 a replacement listing skips the tracks whose PUBLISHes outlive the one it
+	/// replaced, since each is still the peer's one subscription; later drafts PUBLISH them
+	/// again.
+	#[moq_clock::test]
+	async fn a_relisting_skips_tracks_still_published_on_draft_18() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (mut first, ..) = h.publish().await;
+			let (mut second, ..) = h.publish().await;
+			publish_ok(&mut first).await;
+			publish_ok(&mut second).await;
+			request.writer.abort(&Error::Cancel);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+
+			let relisting = ietf::SubscribeTracks {
+				request_id: RequestId(2),
+				..listing(false)
+			};
+			let mut relisting = h.request(&relisting).await;
+			assert_eq!(next(&mut relisting).await.0, ietf::RequestOk::ID, "{version}");
+			if version == Version::Draft18 {
+				for _ in 0..2 {
+					assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
+				}
+				let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+				assert!(opened.is_pending(), "PUBLISHed a track twice");
+			} else {
+				let _publishes = [h.publish().await, h.publish().await];
 			}
 		}
 	}
