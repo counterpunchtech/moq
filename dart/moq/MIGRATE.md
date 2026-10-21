@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a time variant, so exhaustive switches need a case for it.
+`TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.

@@ -13,6 +13,11 @@ The publisher's `Info::priority` now breaks ties between subscriptions at one su
 
 On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
 
+### Anchors can name a time (#6074)
+
+`track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
+Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.

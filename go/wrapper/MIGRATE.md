@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### Anchors can name a time (#6074)
+
+`AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
+`TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

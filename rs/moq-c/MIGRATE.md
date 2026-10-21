@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### Anchors can name a time (#6074)
+
+`moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
+`moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
+An update made before the subscription is established applies once it is, so a refusal then ends the consumer through its callback.
+
 ### JSON values carry their timestamp (#5677)
 
 `moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.

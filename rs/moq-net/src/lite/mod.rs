@@ -36,6 +36,7 @@ mod subscriber;
 #[cfg(all(test, feature = "async"))]
 pub(crate) mod test_transport;
 mod track;
+mod tracks;
 mod version;
 
 pub use announce::*;
@@ -59,4 +60,5 @@ pub use subscribe::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 pub use track::*;
+pub use tracks::*;
 pub use version::Version;
