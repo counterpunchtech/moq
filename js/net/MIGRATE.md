@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
+The track's default was 127 and the subscription's 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
+
 ### `largest()` reports within a reader's `setGroups` bounds
 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.

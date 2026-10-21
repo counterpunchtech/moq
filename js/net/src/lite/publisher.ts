@@ -855,6 +855,9 @@ export class Publisher {
 		try {
 			// Older drafts carry no timestamps.
 			let timescale: Timescale | undefined;
+			// Breaks ties between this session's subscriptions at one subscriber priority. Drafts
+			// before lite-05 serve before the track's info resolves, so they rank by the default.
+			let publisher = 0;
 
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -868,6 +871,7 @@ export class Publisher {
 				// stream.
 				const info = await untilAborted(track.info(), left.signal);
 				timescale = wireTimescale(this.version, info.timescale);
+				publisher = info.priority;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -914,6 +918,7 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
+				publisher,
 				served,
 				bounds: {
 					startGroup: msg.startGroup,
@@ -1082,11 +1087,13 @@ export class Publisher {
 			sub: bigint;
 			broadcast: Path.Valid;
 			timescale: Timescale | undefined;
+			/** The track's publisher priority, breaking ties between subscriptions. */
+			publisher: number;
 			served: Run[] | undefined;
 			bounds: FrameBounds;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, timescale, served, bounds } = serving;
+		const { sub, broadcast, timescale, publisher, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
@@ -1129,7 +1136,7 @@ export class Publisher {
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
-		const priority = new Priority(track);
+		const priority = new Priority(track, publisher);
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();

@@ -415,7 +415,8 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync + SendGroup<Domain: MaybeSend + MaybeSync>>,
+				SendStream: MaybeSend
+				                + SendStream<Group: MaybeSend + MaybeSync + SendGroup<Domain: MaybeSend + MaybeSync>>,
 				RecvStream: MaybeSend,
 				Error: MaybeSend,
 			> + MaybeSend

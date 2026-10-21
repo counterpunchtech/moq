@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` are `Byte`, higher first, and 0 is the unset midpoint; write `priority = 3` instead of `3u`.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.

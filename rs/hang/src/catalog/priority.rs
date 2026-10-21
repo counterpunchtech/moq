@@ -41,6 +41,10 @@ mod tests {
 	#[test]
 	fn media_outranks_the_unset_default() {
 		let unset = moq_net::track::Info::default().priority;
-		assert!([PRIORITY.catalog, PRIORITY.text, PRIORITY.audio, PRIORITY.video].iter().all(|&p| p > unset));
+		assert!(
+			[PRIORITY.catalog, PRIORITY.text, PRIORITY.audio, PRIORITY.video]
+				.iter()
+				.all(|&p| p > unset)
+		);
 	}
 }

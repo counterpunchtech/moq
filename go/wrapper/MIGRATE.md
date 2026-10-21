@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `GroupRequest.Priority()` returns one.
+Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

@@ -54,7 +54,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
@@ -1203,7 +1203,7 @@ export class Subscriber {
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? 128),
+			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {

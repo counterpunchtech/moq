@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.
+
 ### JSON and binary consumers return `Timed<T>` (#5677)
 
 The `json` and `binary` consumers' `next` / `poll_next` return `moq_net::Timed<T>`; read `.value` and the optional `.at`.

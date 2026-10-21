@@ -167,6 +167,22 @@ the maximum so new subscriptions go elsewhere while existing ones finish.
 A route's price is the publisher's production cost plus the link costs it
 crosses. A live publisher seeds 0, and caching never changes it.
 
+## Fair links
+
+A link between relays carries every tenant's broadcasts, and by default it
+sends the highest subscriber priority first, so one broadcast's viewers can
+starve another's when the link congests. `fair = true` gives each broadcast an
+equal share of the link instead, however many tracks or viewers it has, and
+orders a broadcast's tracks by the publisher's priority alone.
+
+```toml
+[cluster]
+fair = true
+```
+
+It applies to the links this relay serves over QUIC or WebTransport on
+moq-lite. Links over WebSocket, iroh, or moq-transport stay strict.
+
 ## LAN discovery
 
 On a LAN there may be no one to list. `[cluster.lan]` advertises this relay

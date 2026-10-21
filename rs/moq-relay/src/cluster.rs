@@ -2395,7 +2395,10 @@ mod tests {
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
 			let lease = auth::Lease::new("/.cluster/peer", consumer);
 			assert_eq!(cluster.schedule(&lease), expected, "fair {fair}, peer {peer}");
-			assert_eq!(cluster.peer_schedule(), if fair { Schedule::Broadcast } else { Schedule::Strict });
+			assert_eq!(
+				cluster.peer_schedule(),
+				if fair { Schedule::Broadcast } else { Schedule::Strict }
+			);
 		}
 	}
 

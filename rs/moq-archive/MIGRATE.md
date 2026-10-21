@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Info::priority` is signed
+
+`Info::priority`, `Info::new`, and `Error::Priority` use `i8`, higher first, with 0 unset.
+`.info` still stores the moq-lite byte, `priority + 128`, so existing recordings keep their meaning: a stored 127 reads as -1.
+
 ### Untimed tracks record untimed (#5720)
 
 `Info::new` and `Info::timescale` take and return `Option<u64>`, and `Error::TimescaleMismatch` carries `Option<u64>` fields.

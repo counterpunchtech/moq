@@ -2223,6 +2223,7 @@ impl Consumer {
 
 	/// The parent track's publisher priority, [`track::Info::priority`].
 	#[cfg(feature = "async")]
+	// private: passthrough
 	pub(crate) fn track_priority(&self) -> i8 {
 		self.track.priority
 	}

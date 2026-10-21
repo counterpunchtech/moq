@@ -216,7 +216,6 @@ where
 		schedule,
 	} = config;
 
-
 	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {

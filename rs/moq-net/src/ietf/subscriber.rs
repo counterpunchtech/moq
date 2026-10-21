@@ -471,7 +471,11 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 	let mut info = track::Info::default()
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
-		.with_priority(properties.priority.map_or(super::priority::ABSENT, super::priority::from_wire))
+		.with_priority(
+			properties
+				.priority
+				.map_or(super::priority::ABSENT, super::priority::from_wire),
+		)
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
 		.with_refresh(properties.dynamic_groups.then_some(0));

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`moq_track_info.priority` and `moq_subscription.priority` are `int8_t`, and `moq_group_request_priority` writes an `int8_t`, which changes the ABI.
+Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### JSON values carry their timestamp (#5677)
 
 `moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.

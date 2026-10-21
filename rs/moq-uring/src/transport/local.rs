@@ -72,7 +72,9 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		domain: Option<&poll::DomainOf<Self>>,
 		priority: i64,
 	) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
-		self.0.send_group(domain.map(|domain| &*domain.0), priority).map(Local::new)
+		self.0
+			.send_group(domain.map(|domain| &*domain.0), priority)
+			.map(Local::new)
 	}
 
 	fn send_datagram(

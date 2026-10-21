@@ -35,7 +35,11 @@ struct Inner {
 }
 
 impl SendGroup {
-    pub(crate) fn new(conn: Arc<ConnectionInner>, domain: Option<&SendDomain>, priority: i64) -> Self {
+    pub(crate) fn new(
+        conn: Arc<ConnectionInner>,
+        domain: Option<&SendDomain>,
+        priority: i64,
+    ) -> Self {
         let group = conn
             .state
             .lock("SendGroup::new")

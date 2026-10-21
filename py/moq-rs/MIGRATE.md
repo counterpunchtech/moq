@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` take `-128..=127`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.

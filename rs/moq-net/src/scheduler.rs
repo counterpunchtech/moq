@@ -89,7 +89,7 @@ impl<D> Scheduler<D> {
 		if let Some(held) = domains.get(broadcast.as_str()).and_then(Weak::upgrade) {
 			return Some(held);
 		}
-		// A session scheduled per broadcast refuses to start on a transport without domains.
+		// `None` only on a transport without domains, where the publisher schedules strictly.
 		let held = Arc::new(Held {
 			domain: open()?,
 			broadcast: broadcast.as_str().to_owned(),

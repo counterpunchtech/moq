@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed
+
+`catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
+`PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
+
 ### `M2ts::random_access` covers the whole track (#5967)
 
 `random_access` no longer describes the latest two-second window: it is true only while every group the track has published started at a random access point.

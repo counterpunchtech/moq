@@ -19,8 +19,8 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
-	track::Order,
 	scheduler::{Domain, Scheduler},
+	track::Order,
 	transport::poll::{DomainOf, GroupOf, SendGroup as _, SendOptions},
 };
 
@@ -4135,13 +4135,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			// subscription on the session, and only groups of the same one may be
 			// ranked against each other by sequence, in that subscription's order.
 			None => Rank::Queue(
-				self.ctx
-					.priority
-					.insert(
-						Priority::new(steer.priority, self.ctx.id, sequence)
-							.with_publisher(self.ctx.publisher)
-							.with_order(steer.order),
-					),
+				self.ctx.priority.insert(
+					Priority::new(steer.priority, self.ctx.id, sequence)
+						.with_publisher(self.ctx.publisher)
+						.with_order(steer.order),
+				),
 			),
 		};
 		self.children.push(GroupServe::new(
@@ -8104,10 +8102,7 @@ mod tests {
 	}
 
 	/// Two announced broadcasts, `a` and `b`, with their track requests.
-	fn two_broadcasts() -> (
-		origin::Producer,
-		[(broadcast::Producer, broadcast::Dynamic); 2],
-	) {
+	fn two_broadcasts() -> (origin::Producer, [(broadcast::Producer, broadcast::Dynamic); 2]) {
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
 		let broadcasts = ["a", "b"].map(|name| {
 			let broadcast = origin.create_broadcast(name).unwrap();
@@ -8154,7 +8149,9 @@ mod tests {
 		a_video.0.push(&update.encode_bytes(Version::Lite07).unwrap());
 		assert!(!drive(&mut a_video.1).await, "the update ended the subscription");
 		assert!(
-			log.groups().iter().all(|&(group, priority)| group != 0 || priority == 60),
+			log.groups()
+				.iter()
+				.all(|&(group, priority)| group != 0 || priority == 60),
 			"the update moved the group: {:?}",
 			log.groups()
 		);
@@ -8172,8 +8169,24 @@ mod tests {
 		let publisher = grouped_publisher(origin.consume(), crate::session::Schedule::Strict);
 		let log = publisher.shared.session.log.clone();
 
-		let _a = subscribe_at(&publisher, &mut a, "a", "video", i8::MAX, track::Info::timed().with_priority(60)).await;
-		let _b = subscribe_at(&publisher, &mut b, "b", "audio", i8::MIN, track::Info::timed().with_priority(80)).await;
+		let _a = subscribe_at(
+			&publisher,
+			&mut a,
+			"a",
+			"video",
+			i8::MAX,
+			track::Info::timed().with_priority(60),
+		)
+		.await;
+		let _b = subscribe_at(
+			&publisher,
+			&mut b,
+			"b",
+			"audio",
+			i8::MIN,
+			track::Info::timed().with_priority(80),
+		)
+		.await;
 		assert_eq!(
 			log.groups(),
 			[
@@ -8199,7 +8212,11 @@ mod tests {
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
 		};
-		assert_eq!(run.steer_tx.read().priority, i8::MAX, "the subscriber priority was dropped");
+		assert_eq!(
+			run.steer_tx.read().priority,
+			i8::MAX,
+			"the subscriber priority was dropped"
+		);
 	}
 
 	/// Scheduled per broadcast, a FETCH response joins its broadcast's domain at the
@@ -8211,8 +8228,15 @@ mod tests {
 		let publisher = grouped_publisher(origin.consume(), crate::session::Schedule::Broadcast);
 		let log = publisher.shared.session.log.clone();
 
-		let (_session, _serve, track) =
-			subscribe_at(&publisher, &mut a, "a", "video", 0, track::Info::timed().with_priority(60)).await;
+		let (_session, _serve, track) = subscribe_at(
+			&publisher,
+			&mut a,
+			"a",
+			"video",
+			0,
+			track::Info::timed().with_priority(60),
+		)
+		.await;
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 		group.finish().unwrap();

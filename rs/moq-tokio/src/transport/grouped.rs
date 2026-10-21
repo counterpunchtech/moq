@@ -27,7 +27,11 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 	}
 
 	/// Open a send group at `priority` in `domain`, or `None` when the backend has none.
-	fn send_group(&self, domain: Option<&Domain<Self>>, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
+	fn send_group(
+		&self,
+		domain: Option<&Domain<Self>>,
+		priority: i64,
+	) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = (domain, priority);
 		None
 	}

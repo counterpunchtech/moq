@@ -136,7 +136,7 @@ pub struct Info {
 	/// The publisher's priority for this track, higher first, defaulting to 0.
 	///
 	/// It breaks ties between subscriptions of equal subscriber priority. On a session
-	/// scheduled per broadcast ([`session::Schedule::Broadcast`](crate::session::Schedule::Broadcast))
+	/// scheduled per broadcast (`session::Schedule::Broadcast`)
 	/// it replaces the subscriber's priority, ordering the broadcast's tracks among
 	/// themselves. Reported in TRACK_INFO (Lite05+).
 	pub priority: i8,

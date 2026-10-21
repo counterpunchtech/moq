@@ -93,8 +93,9 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendDomain, SendGroup,
-    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendDomain,
+    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
