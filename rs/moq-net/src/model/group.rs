@@ -5047,9 +5047,7 @@ mod test {
 		let res = compressed_group(&pool).create_object(header(MAX_CACHE_BYTES + 1));
 		assert!(matches!(res, Err(Error::FrameTooLarge)));
 
-		let res = Info::from(1u64)
-			.produce_untimed()
-			.create_object(header(1));
+		let res = Info::from(1u64).produce_untimed().create_object(header(1));
 		assert!(matches!(res, Err(Error::ProtocolViolation)));
 	}
 

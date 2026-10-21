@@ -1125,7 +1125,13 @@ export class Subscriber {
 		requestId: bigint,
 		deadline: Deadline,
 		epoch: Epoch.Valid | undefined,
-	): Promise<{ stream: RequestStream; subscription: Subscription; alias: bigint; priority: number; maxAge?: number }> {
+	): Promise<{
+		stream: RequestStream;
+		subscription: Subscription;
+		alias: bigint;
+		priority: number;
+		maxAge?: number;
+	}> {
 		const version = this.#session.version;
 
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;

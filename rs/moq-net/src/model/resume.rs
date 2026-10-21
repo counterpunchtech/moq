@@ -35,8 +35,8 @@ use crate::time::Instant;
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use crate::ledger;
 use super::subscription::{Anchor, Cap, Position, Resolved, Subscription, Unheld, Window};
+use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
