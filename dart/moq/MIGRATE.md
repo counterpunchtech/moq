@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a time variant, so exhaustive switches need a case for it.
+`TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.

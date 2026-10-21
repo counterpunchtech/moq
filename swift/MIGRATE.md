@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Anchors can name a time (#6074)
+
+`Subscription.Anchor` gains `.time(timestampUs:)`, so exhaustive switches need a case for it.
+`TrackConsumer.update(subscription:)` now `throws`, on a time anchor an untimed track can't serve; call it with `try`.
+
 ### JSON consumers yield `Json.Timed` (#5677)
 
 `Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.

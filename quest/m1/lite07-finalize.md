@@ -89,9 +89,9 @@ is published; older versions are unchanged.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
-- [TRACKS](/quest/m1/archive/tracks.md) - lite-07 carries the request listing a broadcast's tracks as they appear
+- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
+- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - the `ietf` extension carries a track's ingress version once instead of a code per block
 
 ## Related
 
-- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension targets lite-07 wip and does not gate the cut
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this

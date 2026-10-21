@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Set `deltas = false` where you set `delta_ratio = 0`, and `deltas = true` for any positive ratio.
 With deltas on, the track carries a refresh ratio of 8 and the producer restates the value in a new group when a joiner asks.
 
+### Anchors can name a time (#6074)
+
+`moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
+`moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
+An update made before the subscription is established applies once it is, so a refusal then ends the consumer through its callback.
+
 ### JSON values carry their timestamp (#5677)
 
 `moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.

@@ -29,14 +29,15 @@
       "1.1.1.1"
       "8.8.8.8"
     ];
-    enableIPv6 = false;
   };
-
   boot = {
     loader.grub.device = "/dev/vda";
     kernelParams = [ "console=ttyS0" ];
     kernelModules = [ "qemu_fw_cfg" ];
     growPartition = true;
+    # The host forwards only IPv4, so eth0 stays IPv4-only, but tests still
+    # bind the IPv6 loopback.
+    kernel.sysctl."net.ipv6.conf.eth0.disable_ipv6" = true;
   };
   fileSystems."/" = {
     device = "/dev/disk/by-label/nixos";
@@ -94,8 +95,23 @@
     '';
   };
 
+  # A static user, unlike DynamicUser, gets real cache directories instead of
+  # symlinks into /var/cache/private. Builds resolve `..` lexically against
+  # canonical paths (askama's template includes), which misses through a
+  # symlinked HOME. On the switch, systemd moves the private directories back
+  # and chowns them, so caches and the registration survive.
+  users.users.github-runner = {
+    isSystemUser = true;
+    group = "github-runner";
+    # Java reads its home from passwd, not $HOME, so Gradle needs this too.
+    home = "/var/cache/github-runner-home";
+  };
+  users.groups.github-runner = { };
+
   services.github-runners.runner = {
     enable = true;
+    user = "github-runner";
+    group = "github-runner";
     url = runner.url;
     name = runner.name;
     extraLabels = runner.labels;
@@ -103,15 +119,17 @@
     tokenType = "registration";
     replace = true;
     workDir = "/var/cache/github-runner-work";
+    # Tools a hosted runner's base image provides and jobs call directly.
     extraPackages = with pkgs; [
       curl
       just
       openssh
+      procps
       unzip
       which
     ];
     extraEnvironment = {
-      HOME = "/var/cache/github-runner-home";
+      HOME = config.users.users.github-runner.home;
       MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
       CARGO_BUILD_JOBS = toString resources.cores;
     };
@@ -121,7 +139,7 @@
         "github-runner-work"
       ];
       CacheDirectoryMode = "0700";
-      # DynamicUser cache mounts default to noexec, but jobs execute checkout
+      # The sandbox mounts cache directories noexec, but jobs execute checkout
       # scripts, build outputs, and tools installed in their persistent home.
       ExecPaths = [
         "/var/cache/github-runner-home"

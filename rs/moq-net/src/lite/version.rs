@@ -124,6 +124,17 @@ impl Version {
 		}
 	}
 
+	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
+	/// tracks. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_tracks(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
@@ -266,6 +277,18 @@ impl Version {
 	/// never resumed through another route.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_epoch(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether a session may negotiate the `ietf` extension (draft-lcurley-moq-ietf), which
+	/// carries moq-transport object state between relays. Added on lite-07; published
+	/// versions get no framing changes.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_ietf(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
