@@ -2,7 +2,7 @@ The `/rs` Cargo workspace. Extends the root `AGENTS.md`.
 
 # Crates
 
-Crates are named `moq-<component>` (`hang` is the exception). Keep them modular; a crate does one thing. The ones whose role isn't obvious from the name:
+Component crates are named `moq-<component>` (`hang` is the exception); infrastructure like `kio` is not. Keep them modular; a crate does one thing. The ones whose role isn't obvious from the name:
 
 - `kio`: "easy async" primitives everything else polls through.
 - `moq-tokio`: configures the QUIC backends (`moq-quic`, our quinn fork, and Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
