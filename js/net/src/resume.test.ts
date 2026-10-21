@@ -107,7 +107,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	const ta = copy(a);
 	const tb = copy(b);
 	hooks.startTrack(ta.producer, { start: 1 });
-	hooks.startTrack(tb.producer, { start: 5 });
+	hooks.startTrack(tb.producer, { start: 5, requested: 3 });
 	const front = new Front();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe({ groups: { start: { included: 3 } } });

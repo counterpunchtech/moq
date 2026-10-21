@@ -727,7 +727,7 @@ export class Producer {
 	}
 
 	static {
-		sourceStart = (producer) => producer.#served?.start;
+		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
@@ -1489,12 +1489,16 @@ export class Producer {
 	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
-	#owes(final: number): boolean {
-		if (!this.#tailPending) return false;
+	#feedStart(): number | undefined {
 		const groups = this.#state.update.peek()?.groups;
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
-		const floor = served && served.requested === requested ? served.start : (requested ?? this.#arrivals.first());
+		return served && served.requested === requested ? served.start : requested;
+	}
+
+	#owes(final: number): boolean {
+		if (!this.#tailPending) return false;
+		const floor = this.#feedStart() ?? this.#arrivals.first();
 		if (floor === undefined) return final > 0;
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
