@@ -1957,12 +1957,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo {
-			refresh: info.refresh,
-			priority: info.priority,
-			max_age: info.max_age,
-			timescale: info.timescale,
-		})?;
+		writer.buffer(&lite::TrackInfo::from(&info))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -2019,12 +2014,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo {
-					refresh: info.refresh,
-					priority: info.priority,
-					max_age: info.max_age,
-					timescale: info.timescale,
-				},
+				info: lite::TrackInfo::from(&info),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),

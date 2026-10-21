@@ -106,6 +106,15 @@ export interface Info {
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
+	// pending: /quest/m1/public-model/ingest.md
+	/**
+	 * Whether a hop stamped this timed track's timestamps, or received them over a wire that
+	 * cannot say it didn't, so they may rewind and no group is checked for it. A local
+	 * publisher's writes are always checked. Mirrors the Rust `track::Info::unverified`.
+	 *
+	 * @internal
+	 */
+	unverified?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -134,11 +143,15 @@ function priorityByte(value: number): number {
 
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
+	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
+	// Only a timed track has timestamps to doubt.
+	if (info.unverified && timescale === undefined) throw new RangeError("an untimed track can't be unverified");
 	return {
-		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
+		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
+		...(info.unverified ? { unverified: true } : {}),
 	};
 }
 
@@ -673,9 +686,6 @@ export class Producer {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
-	// A session's copy of a remote track, whose groups are never checked for a rewind: a
-	// received timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	#remote = false;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -729,9 +739,6 @@ export class Producer {
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
-		};
-		hooks.receiveTrack = (producer) => {
-			producer.#remote = true;
 		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
@@ -1199,8 +1206,8 @@ export class Producer {
 			this.#drop(group.sequence, group.sequence + 1);
 		});
 		const sequence = group.sequence;
-		if (this.#remote) {
-			// Only a local publisher's writes are checked.
+		if (this.#unverified()) {
+			// Its timestamps may rewind, so they are not checked.
 		} else if (start) {
 			this.#record(entry, start, late);
 		} else {
@@ -1333,10 +1340,15 @@ export class Producer {
 		}
 
 		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#remote ? undefined : hooks.groupStart(group);
+		const start = this.#unverified() ? undefined : hooks.groupStart(group);
 		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		this.#publish(group, start, late);
+	}
+
+	// Whether this track's timestamps may rewind (see {@link Info.unverified}).
+	#unverified(): boolean {
+		return this.#state.info.peek()?.unverified === true;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

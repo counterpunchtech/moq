@@ -157,6 +157,16 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
+	/// Whether a hop stamped this timed track's timestamps, or received them over a wire
+	/// that cannot say they weren't, so they may rewind and no group is checked for it.
+	///
+	/// A local publisher's writes are always checked. A received track is unverified when it
+	/// arrived over moq-lite 05/06 (an untimed track there carries send times) or
+	/// moq-transport (a peer may stamp arrival times), or over lite-07 from a hop that says
+	/// so. Never set on an untimed track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) unverified: bool,
 }
 
 impl Default for Info {
@@ -167,6 +177,7 @@ impl Default for Info {
 			priority: DEFAULT_PRIORITY,
 			refresh: None,
 			properties: None,
+			unverified: false,
 		}
 	}
 }
@@ -411,9 +422,6 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
-	// A session's copy of a remote track. Its groups skip the rewind check: a received
-	// timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	received: bool,
 	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
 	// cut. Kept apart from the cache so reclaiming a slot cannot erase a disposition a
 	// relay must forward, and as ranges so a wide DROP costs one entry.
@@ -774,9 +782,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on a received track, which only a local publisher's writes are checked on.
+	/// `None` on an [unverified](Info::unverified) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.received {
+		if self.info.as_ref().is_some_and(|info| info.unverified) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2808,16 +2816,6 @@ impl Producer {
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
 		Ok(())
-	}
-
-	/// Mark this track as a session's copy of a remote one: its groups are never checked
-	/// for a rewind, which only a local publisher's writes refuse.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn received(&self) {
-		if let Ok(mut state) = self.modify() {
-			state.received = true;
-		}
 	}
 
 	/// Record sequences the upstream publisher explicitly gave up.

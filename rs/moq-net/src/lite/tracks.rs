@@ -131,6 +131,7 @@ mod test {
 			priority: 3,
 			max_age: Some(Duration::from_secs(2)),
 			timescale: Some(Timescale::MICRO),
+			unverified: true,
 		};
 		let TracksEvent::Added { name, info: got } = roundtrip(&TracksEvent::Added {
 			name: "video".into(),

@@ -320,6 +320,18 @@ impl Version {
 		}
 	}
 
+	/// Whether TRACK_INFO says if a timed track's timestamps are unverified. Added in
+	/// lite-07; earlier, a receiver cannot tell an untimed track's send times from media
+	/// time, so it treats every timed track as unverified.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_unverified(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether discovery streams end their initial set with SYNCED rather than a count.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_synced(self) -> bool {

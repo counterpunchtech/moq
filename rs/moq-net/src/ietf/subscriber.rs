@@ -477,6 +477,8 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 		.with_refresh(properties.dynamic_groups.then_some(0));
 	info.properties =
 		Some(std::sync::Arc::new(properties.unknown.clone())).filter(|unknown| !unknown.values.is_empty());
+	// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+	info.unverified = info.timescale.is_some();
 	info
 }
 
@@ -3006,7 +3008,6 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
-		track.received();
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
 		// may still arrive after a higher one's.
@@ -3868,7 +3869,6 @@ where
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
 		let mut track = request.accept(accepted_info(&ok.properties));
-		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
 		Some(Idle {
@@ -12007,12 +12007,11 @@ mod stitch_tests {
 			);
 
 			// The subscriber accepts a timed track at microseconds, matching `run_subscribe`.
-			let track = track::Producer::new(
-				std::sync::Arc::new(crate::broadcast::Info::default()),
-				"video",
-				track::Info::default().with_timescale(timescale.map(|_| Timescale::MICRO)),
-			);
-			track.received();
+			let info = accepted_info(&ietf::Properties {
+				timescale: timescale.map(|_| Timescale::MICRO),
+				..Default::default()
+			});
+			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 			let fill = kio::Producer::new(fill);
 
 			{
@@ -14041,8 +14040,8 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted:
-	/// only a local publisher's writes refuse a rewind.
+	/// A received group whose first object rewinds past the group before it is accepted: a
+	/// moq-transport peer may stamp arrival times, so its timed tracks are unverified.
 	#[moq_clock::test]
 	async fn a_received_rewind_is_accepted() {
 		use futures::FutureExt;

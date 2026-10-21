@@ -102,7 +102,6 @@ lands before the cut.
 - [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - a replaced route copy stays while a group below its bound is in flight or it backs a handed-out group late, and no longer than the reader's budget
 - [Resume through an outage](/quest/m1/resume-outage.md) - a same-epoch resume after an unclosed route dies delivers the backlog its max age still holds, pinned by a regression test
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
-- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [A failed HLS export answers with an error](/quest/m1/hls-failure-signal.md) - playlists answer a no-store 5xx once their timeline fails, and so does the DASH manifest for a shared reference failure, so a truncated recording never looks complete
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version

@@ -404,6 +404,23 @@ export function hasRefresh(version: Version): boolean {
 	}
 }
 
+/** Whether TRACK_INFO says if a timed track's timestamps are unverified. Added in lite-07; earlier,
+ * a receiver cannot tell an untimed track's send times from media time, so every timed track is. */
+export function hasUnverified(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

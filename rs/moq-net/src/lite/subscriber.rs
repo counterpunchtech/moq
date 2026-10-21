@@ -1780,12 +1780,7 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					let slot = source.subscriber.announces.acquire()?;
-					let info = track::Info::default()
-						.with_timescale(info.timescale)
-						.with_max_age(info.max_age)
-						.with_priority(info.priority)
-						.with_refresh(info.refresh);
-					source.lister.add(name.clone(), info)?;
+					source.lister.add(name.clone(), info.into())?;
 					self.listed.insert(name, slot);
 				}
 				lite::TracksEvent::Removed { name } => {
@@ -2828,8 +2823,9 @@ mod tests {
 	}
 
 	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
-	/// group 4 starts at 1000ms, returning the stream's result and the track.
-	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
+	/// group 4 starts at 1000ms and whose publisher's TRACK_INFO said `unverified`, returning
+	/// the stream's result and the track.
+	async fn receive_rewind(version: Version, unverified: bool) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
@@ -2858,12 +2854,18 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 
+		let sent = lite::TrackInfo {
+			unverified,
+			..lite::TrackInfo::from(&crate::track::Info::timed())
+		}
+		.encode_bytes(version)
+		.unwrap();
+		let info = lite::TrackInfo::decode_slice(&sent, version).unwrap().0;
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
-			crate::track::Info::timed(),
+			track::Info::from(info),
 		);
-		track.received();
 		let mut before = track.create_group(4u64.into()).unwrap();
 		before
 			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
@@ -2884,16 +2886,28 @@ mod tests {
 		(res, track)
 	}
 
-	/// A received timestamp may not be media time (lite-05/06 untimed tracks carry send
-	/// times), so a received group that rewinds is accepted at every version and the track
-	/// stays open. Only a local publisher's writes refuse a rewind.
+	/// A received group that rewinds is accepted, and the track stays open, wherever its
+	/// timestamps are unverified: always on lite-05/06, whose untimed tracks carry send times,
+	/// and on lite-07 when the publisher says so.
 	#[moq_clock::test]
-	async fn a_received_rewind_is_accepted_at_every_version() {
-		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let (res, track) = receive_rewind(version).await;
+	async fn an_unverified_rewind_is_accepted() {
+		for (version, unverified) in [
+			(Version::Lite05, false),
+			(Version::Lite06, false),
+			(Version::Lite07, true),
+		] {
+			let (res, track) = receive_rewind(version, unverified).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			assert!(track.closed().now_or_never().is_none(), "{version}");
 		}
+	}
+
+	/// A lite-07 track whose publisher vouches for its timestamps is checked like a local
+	/// write, so a received group that rewinds is refused.
+	#[moq_clock::test]
+	async fn a_verified_rewind_is_refused() {
+		let (res, _track) = receive_rewind(Version::Lite07, false).await;
+		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
@@ -6395,11 +6409,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					// window matches what the upstream advertises (relays re-serve with
 					// the same bound). `broadcast` is left at its default here;
 					// `track::Request::accept` stamps the track's real broadcast.
-					let model = track::Info::default()
-						.with_timescale(info.timescale)
-						.with_max_age(info.max_age)
-						.with_priority(info.priority)
-						.with_refresh(info.refresh);
+					let model = track::Info::from(info);
 					if !ietf {
 						return Poll::Ready(Ok((model, HeldTrack(stream))));
 					}
@@ -6666,7 +6676,6 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			false => request,
 		};
 		let serving = request.accept(info);
-		serving.received();
 		Self {
 			largest: None,
 			demand: serving.demand(),

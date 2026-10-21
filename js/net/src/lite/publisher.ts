@@ -1442,6 +1442,7 @@ export class Publisher {
 					maxAge: info.maxAge,
 					// `#serveGroup` emits each frame converted to it.
 					timescale: info.timescale ?? undefined,
+					unverified: info.unverified,
 				});
 			})();
 

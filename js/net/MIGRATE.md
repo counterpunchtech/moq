@@ -46,6 +46,7 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
+A received group is checked too when every hop vouched for it over moq-lite-07. One received over moq-lite-05/06 or moq-transport is accepted as is.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)

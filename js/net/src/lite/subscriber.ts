@@ -863,7 +863,6 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
-		hooks.receiveTrack(producer);
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -966,6 +965,7 @@ export class Subscriber {
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh,
+			unverified: info.unverified,
 		};
 	}
 

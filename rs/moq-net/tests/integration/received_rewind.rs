@@ -1,11 +1,11 @@
 #![cfg(feature = "async")]
 
-//! A relay re-serves what it received without checking it for a rewind.
+//! A relay re-serves unverified timestamps as unverified.
 //!
 //! Lite-06 stamps an untimed track's frames with their send time and declares
 //! milliseconds, so the relay's copy reads as timed and re-advertises that scale. A group
-//! sent after a higher one carries the later stamp, which the next hop must not refuse:
-//! only a local publisher's writes are checked.
+//! sent after a higher one carries the later stamp, which no hop may refuse: the relay's
+//! copy is unverified, and it says so to a lite-07 subscriber.
 
 use crate::support;
 
