@@ -29,7 +29,10 @@ pub struct Origin {
 	dynamic: NonZeroSlab<DynamicEntry>,
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
-	broadcast_request: NonZeroSlab<moq_net::origin::Request>,
+	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
+
+	/// Claim answers being filled before their exact route is announced.
+	prepared: NonZeroSlab<(moq_net::origin::Prepared, crate::ffi::Background)>,
 }
 
 #[derive(Clone)]
@@ -331,17 +334,11 @@ impl Origin {
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(
-		&mut self,
-		origin: Id,
-		prefix: &str,
-		route: moq_net::origin::Route,
-		on_request: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix, route);
+		let result = origin.producer.dynamic(prefix);
 		origin.driver.check()?;
 		let inner = result?;
 		let (task, close) = Task::new(on_request);
@@ -350,8 +347,9 @@ impl Origin {
 			inner: Some(inner),
 		})?;
 
+		let request_driver = driver.clone();
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, close))).await;
+			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, close, request_driver))).await;
 			let entry = State::lock().origin.dynamic.remove(id);
 			if let Some(entry) = entry {
 				entry.task.callback.call(res);
@@ -361,7 +359,11 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_dynamic(id: Id, mut close: oneshot::Receiver<()>) -> Result<(), Error> {
+	async fn run_dynamic(
+		id: Id,
+		mut close: oneshot::Receiver<()>,
+		driver: crate::ffi::Background,
+	) -> Result<(), Error> {
 		loop {
 			let request = tokio::select! {
 				biased;
@@ -379,22 +381,13 @@ impl Origin {
 				},
 			};
 
-			let request_id = State::lock().origin.broadcast_request.insert(request)?;
+			let request_id = State::lock().origin.broadcast_request.insert((request, driver.clone()))?;
 			let callback = State::lock().origin.dynamic.get(id).map(|entry| entry.task.callback);
 			let Some(callback) = callback else {
 				return Ok(());
 			};
 			callback.call(request_id);
 		}
-	}
-
-	pub fn dynamic_update(&self, dynamic: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let dynamic = self
-			.dynamic
-			.get(dynamic)
-			.and_then(|entry| entry.inner.as_ref())
-			.ok_or(Error::NotFound)?;
-		Ok(dynamic.update(route)?)
 	}
 
 	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
@@ -407,7 +400,7 @@ impl Origin {
 
 	pub fn broadcast_request_path(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
 		let request = self.broadcast_request.get(request).ok_or(Error::NotFound)?;
-		let path = request.path();
+		let path = request.0.path();
 		*dst = crate::moq_string {
 			data: path.as_str().as_ptr().cast::<std::ffi::c_char>(),
 			len: path.as_str().len(),
@@ -415,8 +408,26 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn broadcast_request_take(&mut self, request: Id) -> Result<moq_net::origin::Request, Error> {
+	pub fn broadcast_request_take(
+		&mut self,
+		request: Id,
+	) -> Result<(moq_net::origin::Request, crate::ffi::Background), Error> {
 		self.broadcast_request.remove(request).ok_or(Error::NotFound)
+	}
+
+	pub fn prepared_insert(
+		&mut self,
+		prepared: moq_net::origin::Prepared,
+		driver: crate::ffi::Background,
+	) -> Result<Id, Error> {
+		self.prepared.insert((prepared, driver))
+	}
+
+	pub fn prepared_take(
+		&mut self,
+		prepared: Id,
+	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background), Error> {
+		self.prepared.remove(prepared).ok_or(Error::NotFound)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
