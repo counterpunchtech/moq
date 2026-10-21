@@ -15178,6 +15178,30 @@ mod test {
 		assert_eq!(drained_drops(&mut subscriber), [(0, WIDE)]);
 	}
 
+	/// A descending reader joining a queued fill makes it newest first, as any descending
+	/// subscriber does a subscription.
+	#[test]
+	fn a_descending_reader_turns_a_queued_fill_newest_first() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut ascending = producer.subscribe(replay().with_groups(0..).with_order(Order::Ascending));
+		let mut descending = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let _ = ascending.poll_recv_group(&kio::Waiter::noop());
+		let _ = descending.poll_recv_group(&kio::Waiter::noop());
+
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 4));
+		assert_eq!(fill.order(), Order::Descending);
+		assert!(
+			dynamic.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
+			"both readers share the fill"
+		);
+	}
+
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
 	#[test]
 	#[cfg(feature = "async")]

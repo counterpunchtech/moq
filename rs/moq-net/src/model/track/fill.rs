@@ -215,6 +215,10 @@ impl FillState {
 			if pending.queued {
 				pending.priority = pending.priority.max(ask.priority);
 				pending.max_delay = looser(pending.max_delay, ask.max_delay);
+				// Any descending reader makes it newest first, as it does a subscription.
+				if ask.order == Order::Descending {
+					pending.order = Order::Descending;
+				}
 				if groups.start == pending.start.group && ask.start.group == groups.start {
 					pending.start.frame = pending.start.frame.min(ask.start.frame);
 				}
