@@ -30,6 +30,8 @@ pub struct SubscribeTracks<'a> {
 	pub group_order: Option<GroupOrder>,
 	/// The default Location Filter of each PUBLISH subscription.
 	pub filter: Option<Filter>,
+	/// FILL_PARAMETERS (draft-20+), which each PUBLISH applies as it first forwards.
+	pub fill: Option<super::Fill>,
 	/// INCLUDE_PROPERTIES (draft-20+): whether each PUBLISH carries Track Properties.
 	pub properties_wanted: bool,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
@@ -65,6 +67,7 @@ impl Message for SubscribeTracks<'_> {
 			0x20 => self.subscriber_priority.filter(|_| defaults),
 			0x21 => self.filter.filter(|_| defaults),
 			0x22 => self.group_order.filter(|_| defaults),
+			0x23 => self.fill.filter(|_| Filter::is_draft20(version)),
 			0x32 => self.new_group.filter(|_| defaults),
 			0x35 => include_properties,
 			super::max_age::PARAMETER => self.max_age,
@@ -92,7 +95,7 @@ impl Message for SubscribeTracks<'_> {
 			0x20 => subscriber_priority: Option<u8> where defaults,
 			0x21 => filter: Option<Filter> where defaults,
 			0x22 => group_order: Option<GroupOrder> where defaults,
-			0x23 => _fill: Option<super::Fill> where Filter::is_draft20(version),
+			0x23 => fill: Option<super::Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
 			0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
@@ -120,6 +123,7 @@ impl Message for SubscribeTracks<'_> {
 			subscriber_priority,
 			group_order,
 			filter,
+			fill,
 			properties_wanted: include_properties.unwrap_or(true),
 			max_age: super::max_age::validate(max_age)?,
 			new_group,
@@ -202,6 +206,7 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
+			fill: None,
 			properties_wanted: true,
 			max_age: None,
 			new_group: None,

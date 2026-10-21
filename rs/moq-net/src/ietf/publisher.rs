@@ -1099,17 +1099,25 @@ where
 				return super::request_stream::reject(stream, error).await;
 			}
 			// Draft-18 allows one subscription per track and role (section 5.1), so a track a
-			// SUBSCRIBE_TRACKS PUBLISHed is subscribed already. Later drafts dropped the rule.
-			if self.version == Version::Draft18 && self.listings.lock().published(&msg.track_namespace, &msg.track_name)
-			{
-				let error = ietf::RequestError {
-					request_id: None,
-					error_code: request::DUPLICATE_SUBSCRIPTION,
-					reason_phrase: "the track is PUBLISHed to this session".into(),
-					retry_interval: 0,
-				};
-				return super::request_stream::reject(stream, error).await;
-			}
+			// SUBSCRIBE_TRACKS PUBLISHed is subscribed already, and one subscribed here is not
+			// PUBLISHed. Later drafts dropped the rule.
+			let _subscribed = match self.version {
+				Version::Draft18 => {
+					match tracks::Subscribed::subscribe(&self.listings, &msg.track_namespace, &msg.track_name) {
+						Some(subscribed) => Some(subscribed),
+						None => {
+							let error = ietf::RequestError {
+								request_id: None,
+								error_code: request::DUPLICATE_SUBSCRIPTION,
+								reason_phrase: "the track is PUBLISHed to this session".into(),
+								retry_interval: 0,
+							};
+							return super::request_stream::reject(stream, error).await;
+						}
+					}
+				}
+				_ => None,
+			};
 			let request_id = msg.request_id;
 			let track_name = msg.track_name.clone();
 			let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
@@ -1790,7 +1798,7 @@ where
 				))
 			}
 			// The draft forbids it on a track that did not advertise DYNAMIC_GROUPS.
-			None if update.new_group.is_some() && serve.track.info().refresh.is_none() => Some((
+			None if update.new_group.is_some() && !serve.dynamic => Some((
 				"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 				Error::Unsupported,
 			)),
@@ -4273,6 +4281,9 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	budget: kio::coop::Budget,
 	/// A subscription we initiated with PUBLISH, which a REQUEST_UPDATE may pause.
 	pausable: bool,
+	/// Whether the track advertised DYNAMIC_GROUPS, which an update's NEW_GROUP_REQUEST
+	/// needs.
+	dynamic: bool,
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
@@ -4298,6 +4309,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		// never write TIMESCALE, whatever the caller passed in, so datagrams and group
 		// objects on those drafts go out unstamped.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
+		let dynamic = track.info().refresh.is_some();
 		let priority = kio::Producer::new(track.subscription().priority);
 		let mut session = session;
 		let ranking = Ranking {
@@ -4326,6 +4338,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			terminal: Default::default(),
 			budget: kio::coop::Budget::new(32),
 			pausable: false,
+			dynamic,
 		}
 	}
 

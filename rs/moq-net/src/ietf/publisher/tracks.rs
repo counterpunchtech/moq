@@ -22,16 +22,11 @@ pub(super) struct Listings {
 	/// The prefix of every established SUBSCRIBE_TRACKS, by a key its guard removes.
 	prefixes: HashMap<u64, crate::PathOwned>,
 	next: u64,
-	/// How many PUBLISH subscriptions of ours each track has: draft-18 allows the peer one
-	/// subscription per track, so its SUBSCRIBE to one of them is a duplicate.
+	/// How many PUBLISH subscriptions of ours each track has, and how many SUBSCRIBEs of
+	/// the peer's: draft-18 allows the peer one subscription per track (section 5.1), so
+	/// neither kind may join the other.
 	published: HashMap<(crate::PathOwned, Arc<str>), usize>,
-}
-
-impl Listings {
-	/// Whether a PUBLISH of ours already subscribes the peer to `namespace`'s `track`.
-	pub(super) fn published(&self, namespace: &crate::Path, track: &str) -> bool {
-		self.published.contains_key(&(namespace.to_owned(), Arc::from(track)))
-	}
+	subscribed: HashMap<(crate::PathOwned, Arc<str>), usize>,
 }
 
 /// Holds a SUBSCRIBE_TRACKS prefix as established until dropped.
@@ -69,30 +64,61 @@ impl Drop for Established {
 	}
 }
 
-/// Counts one PUBLISH subscription to a track until dropped.
-struct Published {
+/// Counts one subscription to a track, a PUBLISH of ours or a SUBSCRIBE of the peer's,
+/// until dropped.
+pub(super) struct Subscribed {
 	listings: kio::Shared<Listings>,
 	key: (crate::PathOwned, Arc<str>),
+	/// A SUBSCRIBE of the peer's, rather than a PUBLISH of ours.
+	direct: bool,
 }
 
-impl Published {
-	fn new(listings: &kio::Shared<Listings>, namespace: crate::PathOwned, track: Arc<str>) -> Self {
-		let key = (namespace, track);
-		*listings.lock().published.entry(key.clone()).or_default() += 1;
-		Self {
+impl Subscribed {
+	/// Count a PUBLISH of ours to `namespace`'s `track`, unless the peer SUBSCRIBEd to it.
+	fn publish(listings: &kio::Shared<Listings>, namespace: crate::PathOwned, track: Arc<str>) -> Option<Self> {
+		Self::claim(listings, (namespace, track), false)
+	}
+
+	/// Count the peer's SUBSCRIBE to `namespace`'s `track`, unless a PUBLISH of ours
+	/// subscribes it already.
+	pub(super) fn subscribe(listings: &kio::Shared<Listings>, namespace: &crate::Path, track: &str) -> Option<Self> {
+		Self::claim(listings, (namespace.to_owned(), Arc::from(track)), true)
+	}
+
+	fn claim(listings: &kio::Shared<Listings>, key: (crate::PathOwned, Arc<str>), direct: bool) -> Option<Self> {
+		let mut locked = listings.lock();
+		let Listings {
+			published, subscribed, ..
+		} = &mut *locked;
+		let (mine, other) = if direct {
+			(subscribed, published)
+		} else {
+			(published, subscribed)
+		};
+		if other.contains_key(&key) {
+			return None;
+		}
+		*mine.entry(key.clone()).or_default() += 1;
+		Some(Self {
 			listings: listings.clone(),
 			key,
-		}
+			direct,
+		})
 	}
 }
 
-impl Drop for Published {
+impl Drop for Subscribed {
 	fn drop(&mut self) {
 		let mut listings = self.listings.lock();
-		if let Some(count) = listings.published.get_mut(&self.key) {
+		let counts = if self.direct {
+			&mut listings.subscribed
+		} else {
+			&mut listings.published
+		};
+		if let Some(count) = counts.get_mut(&self.key) {
 			*count -= 1;
 			if *count == 0 {
-				listings.published.remove(&self.key);
+				counts.remove(&self.key);
 			}
 		}
 	}
@@ -108,6 +134,8 @@ struct Params {
 	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST, applied on the first resume.
 	new_group: Option<u64>,
+	/// FILL_PARAMETERS (draft-20+), applied on the first resume.
+	fill: Option<ietf::Fill>,
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
@@ -144,6 +172,8 @@ struct Listed {
 	live: kio::Consumer<()>,
 	/// The subscription slot the PUBLISH holds for as long as it lives.
 	slot: crate::session::Slot,
+	/// Counts the PUBLISH against the peer's SUBSCRIBEs for as long as it lives.
+	subscribed: Subscribed,
 	params: Params,
 }
 
@@ -253,6 +283,7 @@ where
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: msg.max_age,
 				new_group: msg.new_group,
+				fill: msg.fill,
 			},
 			properties_wanted: msg.properties_wanted,
 			skips: Skips::default(),
@@ -613,6 +644,13 @@ where
 						skip(name);
 						continue;
 					};
+					// Held while the subscription lives, from now so a SUBSCRIBE cannot slip in
+					// before the PUBLISH goes out: on draft-18 a track the peer SUBSCRIBEd to is
+					// skipped instead (section 5.1).
+					let Some(subscribed) = Subscribed::publish(&self.listings, namespace.clone(), name.clone()) else {
+						skip(name);
+						continue;
+					};
 					let entry = kio::Producer::new(());
 					let task = Listed {
 						track,
@@ -622,6 +660,7 @@ where
 						listed: entry.consume(),
 						live: request.live.clone(),
 						slot,
+						subscribed,
 						params: request.params,
 					};
 					listed.insert(name.clone(), entry);
@@ -647,9 +686,11 @@ where
 			listed,
 			live,
 			slot,
+			subscribed,
 			mut params,
 		} = task;
 		let _slot = slot;
+		let _subscribed = subscribed;
 		// An update may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS, which
 		// INCLUDE_PROPERTIES=0 leaves out.
 		let dynamic = properties.dynamic_groups;
@@ -686,9 +727,7 @@ where
 			return Ok(());
 		};
 
-		// Held while the subscription lives: draft-18 refuses the peer a second subscription
-		// to the track, and a joining FETCH needs the subscription forwarding.
-		let _published = Published::new(&self.listings, namespace.clone(), name.clone());
+		// A joining FETCH needs the subscription forwarding.
 		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(request_id));
 		self.pause_join(join.as_ref());
 
@@ -739,8 +778,9 @@ where
 		})
 		.await;
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
-		// the resume.
+		// the resume, as does the listing's FILL_PARAMETERS.
 		let mut new_group: Option<u64>;
+		let mut fill = params.fill.take();
 		let resume = match answer {
 			None => {
 				stream.writer.abort(&Error::Cancel);
@@ -794,8 +834,9 @@ where
 						&track,
 						&namespace,
 						request_id,
-						params,
+						&mut params,
 						how,
+						dynamic,
 						join.as_ref(),
 						&listed,
 						&mut gate,
@@ -902,7 +943,7 @@ where
 			match update.forward {
 				Some(true) => {
 					resume = Some(Resume {
-						fill: update.fill,
+						fill: update.fill.or(fill.take()),
 						new_group: update.new_group.or(new_group.take()),
 						answer: true,
 					})
@@ -934,8 +975,9 @@ where
 		track: &track::Consumer,
 		namespace: &crate::PathOwned,
 		request_id: RequestId,
-		params: Params,
+		params: &mut Params,
 		how: Resume,
+		dynamic: bool,
 		join: Option<&Join<GroupOf<S>>>,
 		listed: &kio::Consumer<()>,
 		gate: &mut crate::auth::Gate,
@@ -983,6 +1025,7 @@ where
 		)
 		.ranked(self.priority.clone());
 		serve.pausable = true;
+		serve.dynamic = dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
 		}
@@ -1040,6 +1083,10 @@ where
 			})
 			.await
 		};
+		// What an update changed while forwarding outlives a pause.
+		let applied = serve.track.subscription();
+		params.priority = crate::ietf::priority::to_wire(applied.priority);
+		params.max_age = applied.max_delay.as_millis().try_into().ok();
 		let served = match served {
 			Ok(Some(Served::Paused)) => Served::Paused,
 			Ok(Some(served)) => {
@@ -1139,6 +1186,7 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
+			fill: None,
 			properties_wanted: true,
 			max_age: None,
 			new_group: None,
@@ -1657,6 +1705,169 @@ mod tests {
 				None,
 				"{version}: the refused join reached the track"
 			);
+		}
+	}
+
+	/// While forwarding, an update's NEW_GROUP_REQUEST also needs the advertised
+	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out.
+	#[moq_clock::test]
+	async fn a_forwarding_new_group_needs_the_advertised_dynamic_groups() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let _live = h
+			.broadcast
+			.create_track("live", crate::track::Info::timed().with_refresh(Some(1)))
+			.unwrap();
+		let request = ietf::SubscribeTracks {
+			properties_wanted: false,
+			..listing(false)
+		};
+		let mut request = h.request(&request).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
+		let mut stream = loop {
+			let (stream, _, name, _) = h.publish().await;
+			if name == "live" {
+				break stream;
+			}
+		};
+		publish_ok(&mut stream).await;
+		send(&mut stream, &update(2, true)).await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+		let ask = ietf::SubscribeUpdate {
+			forward: None,
+			filter: None,
+			new_group: Some(0),
+			..update(4, true)
+		};
+		send(&mut stream, &ask).await;
+		let (id, body) = next(&mut stream).await;
+		assert_eq!(id, ietf::RequestError::ID);
+		assert_eq!(request_error(&body, version), request::NOT_SUPPORTED);
+	}
+
+	/// An update taken while forwarding outlives a pause: the next resume keeps it.
+	#[moq_clock::test]
+	async fn a_forwarding_update_outlives_a_pause() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let video = h.tracks.remove("video").unwrap();
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = loop {
+				let (stream, _, name, _) = h.publish().await;
+				if name == "video" {
+					break stream;
+				}
+			};
+			publish_ok(&mut stream).await;
+			send(&mut stream, &update(2, true)).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+			let reprice = ietf::SubscribeUpdate {
+				subscriber_priority: Some(7),
+				filter: None,
+				..update(4, false)
+			};
+			send(&mut stream, &reprice).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+			send(&mut stream, &update(6, true)).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+			let priority = video.subscription().map(|subscription| subscription.priority);
+			assert_eq!(priority, Some(crate::ietf::priority::from_wire(7)), "{version}");
+		}
+	}
+
+	/// The listing's FILL_PARAMETERS (draft-20+) apply on a PUBLISH's first resume, as its
+	/// Location Filter does, so a resume asking for neither still fills the current group.
+	#[moq_clock::test]
+	async fn a_listing_fill_applies_on_the_first_resume() {
+		for version in [Version::Draft20, Version::Draft22] {
+			let mut h = harness(version);
+			let video = h.tracks.remove("video").unwrap();
+			let mut group = video.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"cached".as_slice()).unwrap();
+
+			let request = ietf::SubscribeTracks {
+				filter: Some(Filter::NextObject),
+				fill: Some(ietf::Fill {
+					filter: Some(Filter::Relative(1)),
+					range_filters: false,
+				}),
+				..listing(false)
+			};
+			let mut request = h.request(&request).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = loop {
+				let (stream, _, name, _) = h.publish().await;
+				if name == "video" {
+					break stream;
+				}
+			};
+			publish_ok(&mut stream).await;
+			let resume = ietf::SubscribeUpdate {
+				filter: None,
+				..update(2, true)
+			};
+			send(&mut stream, &resume).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+
+			let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+				.await
+				.unwrap();
+			let mut reader = crate::coding::Reader::new(recv, version);
+			let mut bytes = Vec::new();
+			while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+				.await
+				.unwrap()
+			{
+				bytes.extend_from_slice(&chunk);
+			}
+			assert!(bytes.windows(6).any(|w| w == b"cached"), "{version}: no fill");
+		}
+	}
+
+	/// On draft-18 a track the peer already SUBSCRIBEd to is skipped rather than PUBLISHed
+	/// a second time; later drafts PUBLISH it.
+	#[moq_clock::test]
+	async fn a_subscribed_track_is_skipped_on_draft_18() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let mut h = harness(version);
+			let subscribe = ietf::Subscribe {
+				request_id: RequestId(0),
+				track_namespace: crate::Path::new("room/cam"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: true,
+				forward: true,
+				rendezvous: false,
+				range_filters: false,
+				authorization_token: None,
+				epoch: None,
+				max_age: None,
+				new_group: None,
+			};
+			let mut subscription = h.request(&subscribe).await;
+			assert_eq!(next(&mut subscription).await.0, ietf::SubscribeOk::ID, "{version}");
+
+			let request = ietf::SubscribeTracks {
+				request_id: RequestId(2),
+				..listing(false)
+			};
+			let mut request = h.request(&request).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (_audio, _, name, _) = h.publish().await;
+			if version == Version::Draft18 {
+				assert_eq!(name, "audio");
+				let (id, body) = next(&mut request).await;
+				assert_eq!(id, ietf::PublishSkipped::ID);
+				let skip: ietf::PublishSkipped = body.message(version).unwrap();
+				assert_eq!(skip.track_name, "video");
+			} else {
+				let (_, _, other, _) = h.publish().await;
+				assert!([name, other].contains(&"video".to_string()), "{version}");
+			}
 		}
 	}
 
