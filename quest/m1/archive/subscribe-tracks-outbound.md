@@ -73,6 +73,12 @@ TRACKS' events map as follows:
   which matches TRACKS' rule.
 - **Properties.** A property TRACK_INFO needs but PUBLISH lacks takes the
   same default it takes from SUBSCRIBE_OK today.
+- **Draft-22 parameters.** Draft-22 section 9.18 drops SUBSCRIBER_PRIORITY,
+  LOCATION_FILTER, and NEW_GROUP_REQUEST from SUBSCRIBE_TRACKS, while section
+  3.6.2 still allows any subscription parameter. Send only the section 9.18
+  set on draft-22 (`ietf::SubscribeTracks` encodes all of them today), and put
+  the join filter on the resuming REQUEST_UPDATE. The inbound decoder accepts
+  both readings.
 - **A non-conforming peer** may send objects despite FORWARD=0; stop reading
   them rather than buffer.
 

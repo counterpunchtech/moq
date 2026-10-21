@@ -327,10 +327,23 @@ where
 		drop(live);
 		request.skips.lock().clear();
 		match cancelled {
-			// The PUBLISHes keep running while the peer acknowledges, however slowly.
+			// A refused update left its REQUEST_ERROR buffered, so flush before the FIN. The
+			// PUBLISHes keep running while the peer acknowledges, however slowly.
 			Ok(()) => {
+				let mut finished = false;
 				let _ = broadcasts
-					.drive(|waiter| stream.writer.poll_close(&mut waiter.context()))
+					.drive(|waiter| {
+						let mut cx = waiter.context();
+						if !finished {
+							if let Err(err) =
+								ready!(stream.writer.poll_flush(&mut cx)).and_then(|()| stream.writer.finish())
+							{
+								return Poll::Ready(Err(err));
+							}
+							finished = true;
+						}
+						stream.writer.poll_close(&mut cx)
+					})
 					.await;
 			}
 			Err(err) => stream.writer.abort(&err),
@@ -371,7 +384,7 @@ where
 			return Poll::Ready(Ok(()));
 		}
 		while !*finished {
-			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(cx)) {
+			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(cx)) {
 				Ok(Some(Next::Message(update))) => {
 					// Its Request ID is spent like any other, and a bad one is the session's error.
 					if let Err(err) = self.control.accept(update.request_id)
@@ -383,8 +396,8 @@ where
 						);
 						return Poll::Ready(Err(err));
 					}
-					// A new prefix or FORWARD would re-scope the listing under every PUBLISH it
-					// made. Refusing it ends the request (section 10.9.1).
+					// A new prefix or FORWARD would change which later tracks are listed and
+					// how, which we do not support. Refusing it ends the request (section 10.9.1).
 					let err = update.refused.unwrap_or(Error::Unsupported);
 					let code = request::to_code(&err, request::Kind::SubscribeNamespace, self.version);
 					stream.writer.buffer_varint(ietf::RequestError::ID)?;
@@ -1528,6 +1541,26 @@ mod tests {
 				matches!(&closed, memory::Error::Session { reason, .. } if reason == "invalid request ID"),
 				"{version}: {closed:?}"
 			);
+		}
+	}
+
+	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-20 it may
+	/// carry FORWARD, which is refused the same way rather than closing the session.
+	#[moq_clock::test]
+	async fn a_listing_update_is_refused() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let refused = ietf::SubscribeUpdate {
+				filter: None,
+				forward: Filter::is_draft20(version).then_some(false),
+				..update(2, false)
+			};
+			send(&mut request, &refused).await;
+			let (id, body) = next(&mut request).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}");
+			assert_eq!(request_error(&body, version), request::NOT_SUPPORTED, "{version}");
 		}
 	}
 

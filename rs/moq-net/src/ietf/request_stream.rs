@@ -479,9 +479,10 @@ impl Decode<Version> for Update {
 	}
 }
 
-/// The namespace-only parameters of a modern REQUEST_UPDATE.
+/// The namespace-only parameters of a modern REQUEST_UPDATE. `TRACKS` marks one on a
+/// SUBSCRIBE_TRACKS, which from draft-20 may also carry FORWARD.
 #[derive(Debug)]
-pub(super) struct NamespaceUpdate {
+pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::PathOwned>,
 	pub(super) refused: Option<Error>,
@@ -499,7 +500,7 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl Decode<Version> for NamespaceUpdate {
+impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
@@ -510,6 +511,7 @@ impl Decode<Version> for NamespaceUpdate {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
+				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
 			if !data.is_empty() {
