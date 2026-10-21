@@ -1,6 +1,7 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { Handle as AuthHandle } from "../auth.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -141,6 +142,14 @@ export class Reload {
 	 * its rate rather than encode at zero.
 	 */
 	readonly bandwidth: Allocator;
+
+	/**
+	 * The auth handle every session of the loop is built on, spanning reconnects.
+	 *
+	 * Each session presents every token it holds, so a route naming one keeps it across a
+	 * reconnect, and its grant follows the live session. It ends when the loop closes.
+	 */
+	readonly auth = new AuthHandle();
 
 	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
 	readonly versions?: readonly string[];
@@ -403,6 +412,7 @@ export class Reload {
 							webtransport: this.webtransport,
 							publish: this.publish,
 							consume: this.consume,
+							auth: this.auth,
 							signal,
 						});
 					} finally {
@@ -639,6 +649,8 @@ export class Reload {
 	close(abort?: Error) {
 		this.#signals.close();
 		this.#draining?.retire();
+		// No session will present the tokens again, so they end with the loop.
+		this.auth.abort(abort ?? new Error("connection closed"));
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }

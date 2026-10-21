@@ -271,3 +271,64 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 		resident.close();
 	}
 });
+
+test("the connection's tokens ride every session across a GOAWAY", async () => {
+	// Every dial gets a lite-07 session that grants each token it is presented.
+	const relays: { server: WebTransport; tokens: string[]; withdrawn: string[] }[] = [];
+	const stub = function StubWebTransport(dialed: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		const relay = { server: pair.server, tokens: [] as string[], withdrawn: [] as string[] };
+		relays.push(relay);
+		void accept({ transport: pair.server, url: new URL(dialed) }).then((session) => {
+			const requests = session.auth.requests();
+			void (async () => {
+				for (;;) {
+					const request = await requests.next();
+					if (!request) break;
+					const token = new TextDecoder().decode(request.token);
+					relay.tokens.push(token);
+					const issued = request.accept({
+						publish: new Path.Patterns([Path.Pattern.all()]),
+						subscribe: new Path.Patterns(),
+					});
+					void issued.closed.then(() => relay.withdrawn.push(token));
+				}
+			})();
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		versions: [Lite.ALPN_07_WIP],
+		goaway: { handover },
+		delay: { initial: Milli(1) },
+	});
+	const token = await reload.auth.add("token");
+	const first = relays[0];
+	if (!first) throw new Error("no first dial");
+	expect(first.tokens).toContain("token");
+
+	const stream = await Stream.open(first.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+
+	// The replacement presents it with no help from the application, while the draining
+	// session keeps presenting it beside its successor.
+	await waitUntil(() => relays[1]?.tokens.includes("token") === true);
+	await waitUntil(() => token.grant.peek() !== undefined && reload.established.peek() !== undefined);
+	await settle();
+	expect(first.withdrawn).not.toContain("token");
+	let ended = false;
+	void token.closed.then(() => {
+		ended = true;
+	});
+	await settle();
+	expect(ended).toBe(false);
+
+	// The tokens end with the loop.
+	reload.close();
+	expect(await token.closed).toBeInstanceOf(Error);
+});

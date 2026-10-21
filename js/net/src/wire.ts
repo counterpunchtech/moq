@@ -8,6 +8,7 @@
  * @module
  */
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
+import type { AuthSession } from "./auth_session.ts";
 import type * as broadcast from "./broadcast.ts";
 import type { Drain } from "./connection/goaway.ts";
 import type * as Epoch from "./epoch.ts";
@@ -139,6 +140,9 @@ export interface Established {
 	// private: plumbing
 	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
 	readonly goaway: GetPromise<Drain>;
+	// private: plumbing
+	/** This session's side of its auth handle. */
+	readonly auth: AuthSession;
 }
 
 type View = Broadcast | OriginProducer | OriginConsumer | Established;
