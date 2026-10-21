@@ -367,13 +367,14 @@ impl Misses {
 	/// The part of `hole` nobody has a verdict on yet.
 	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 		let mut left = RangeSet::new();
-		left.insert(hole);
+		left.insert(hole.clone());
+		// Only what overlaps the hole, so judging every run costs each one the same.
 		for claimed in [&state.drops, &self.given_up, &self.wanted] {
-			for run in claimed.iter() {
+			for run in claimed.overlapping(&hole) {
 				left.remove(run.clone());
 			}
 		}
-		for sequence in &self.filled {
+		for sequence in self.filled.range(hole) {
 			left.remove(*sequence..*sequence + 1);
 		}
 		left.iter().cloned().collect()

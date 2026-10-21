@@ -1103,8 +1103,9 @@ impl TrackState {
 	}
 
 	/// The first cached group at or above `from` that `servable` covers for which `f`
-	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run,
-	/// one per run otherwise.
+	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run.
+	/// Several runs leapfrog the cache, so a run holding nothing (a reader's misses) costs
+	/// one lookup rather than a walk over every run past it.
 	fn find_servable<'a, R>(
 		&'a self,
 		servable: &Servable,
@@ -1127,13 +1128,31 @@ impl TrackState {
 				scan(self.lookup.range((Bound::Included(from), end)))
 			}
 			Servable::Runs(runs) => {
-				let mut runs = runs.overlapping(from..=u64::MAX);
-				let each =
-					|run: &ops::RangeInclusive<u64>| scan(self.lookup.range((*run.start()).max(from)..=*run.end()));
-				match rev {
-					true => runs.rev().find_map(each),
-					false => runs.find_map(each),
+				// What is left to search, shrinking from the end the search starts at.
+				let (mut lo, mut hi) = (from, u64::MAX);
+				while lo <= hi {
+					let mut left = runs.overlapping(lo..=hi);
+					let run = match rev {
+						true => left.next_back(),
+						false => left.next(),
+					}?;
+					let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
+					// The cache from the run on, toward the far end: one lookup either finds
+					// the run's groups or the next cached group past a run holding none.
+					let leap = match rev {
+						true => leap(self.lookup.range(lo..=end).rev(), start..=end, &mut f),
+						false => leap(self.lookup.range(start..=hi), start..=end, &mut f),
+					};
+					match leap {
+						Leap::Found(found) => return Some(found),
+						Leap::Empty => return None,
+						Leap::Past(sequence) if rev => hi = sequence,
+						Leap::Past(sequence) => lo = sequence,
+						Leap::Exhausted if rev => hi = start.checked_sub(1)?,
+						Leap::Exhausted => lo = end.checked_add(1)?,
+					}
 				}
+				None
 			}
 		}
 	}
@@ -4973,6 +4992,42 @@ impl Published {
 			cap,
 			servable,
 		}
+	}
+}
+
+/// What one run's lookup found, for [`TrackState::find_servable`] leapfrogging the cache.
+enum Leap<R> {
+	/// A group in the run that the search answered.
+	Found(R),
+	/// The run's groups, none answering.
+	Exhausted,
+	/// Nothing in the run: the nearest cached group past it.
+	Past(u64),
+	/// Nothing cached from the run on.
+	Empty,
+}
+
+/// Search `cached`, ordered from the run toward the far end, for a group in `run` that `f`
+/// answers.
+fn leap<'a, R>(
+	mut cached: impl Iterator<Item = (&'a u64, &'a Slot)>,
+	run: ops::RangeInclusive<u64>,
+	f: &mut impl FnMut(&'a Slot) -> Option<R>,
+) -> Leap<R> {
+	let Some((&first, slot)) = cached.next() else {
+		return Leap::Empty;
+	};
+	if !run.contains(&first) {
+		return Leap::Past(first);
+	}
+	let mut within = std::iter::once(slot).chain(
+		cached
+			.take_while(|(sequence, _)| run.contains(*sequence))
+			.map(|(_, slot)| slot),
+	);
+	match within.find_map(f) {
+		Some(found) => Leap::Found(found),
+		None => Leap::Exhausted,
 	}
 }
 
