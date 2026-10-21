@@ -2,7 +2,7 @@
 //!
 //! Its API mirrors quinn's, plus what moq-quic adds:
 //! [`SendGroup`]s that schedule streams and datagrams together, [`SendStream::reset_at`] to
-//! keep a prefix reliable, [`RecvStream::read_held`] to hold receive credit until a message is
+//! keep a prefix reliable, [`RecvStream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`Connection::set_limits`] to change flow control on a live connection.
 //!
 //! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
