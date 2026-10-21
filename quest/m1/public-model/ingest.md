@@ -127,6 +127,15 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     timer: the model folds a gap only on a write, so the session still
     settles the tail with `set_tail_pending(false)`. The shape is this
     quest's to settle.
+  - Landed in #6111: a plain `finish_at` on a `received()` copy. The model
+    holds readers at a hole below the end until the grace passes on the
+    pool's wall clock, counting `drop_groups` as accounted and keeping the
+    gap above the latest arrival open while groups still land.
+    `finish_at_pending` and `set_tail_pending` go, `demand_arrivals` folds
+    into the start declaration, `drop_groups` is public, and the ledger
+    moves out of `model/`. The session no longer settles early when every
+    stream is in, so an IETF publisher that skips group IDs without a
+    drop makes readers wait out the grace at END_OF_TRACK.
 - **Session end** (`track::Producer::close`, `abort_session`; both
   subscribers): public. Fold `abort_session` into the public `abort` (abort
   open groups too) unless the implementer finds a reader-visible difference,
@@ -148,6 +157,15 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   TRACK_STATUS `accept` → `set_idle` race with it. Regression test: accept,
   replay a retained group on the same task, and SUBSCRIBE_OK carries
   Largest Location on a multi-thread runtime over many runs.
+  - Landed in #6111: public `track::Request::request_start(floor)`, applied
+    atomically with `accept`, gates `poll_start` (the lite publisher's
+    resolved start) until `start_at`. The IETF TRACK_STATUS race is fixed
+    with a crate-private `Request::idle()` applied in the same accept.
+  - Still open: the public way to accept idle, replay, then go live. Gating
+    `poll_live` on a pending start breaks lite-06 relays (no SUBSCRIBE_OK, so
+    the start resolves only with the first served group). Options: public
+    `Request::idle()` plus `Producer::set_live`; or `request_start` also
+    gating `poll_live`, accepting the lite-06 change.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
   `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups
@@ -175,6 +193,8 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   check skips it (#5803). It goes public with the other ingest calls, unless
   [time provenance](/quest/m1/lite-time-provenance.md) makes received
   timestamps checkable first.
+  Public in #6111 (JS `Track.Producer.received()`), and it also arms the
+  received-end grace above.
 - Passthrough, stay private and marked: `group::Producer::wire`,
   `set_wire`, `mark_gap`, `set_end_object`, `group::Wire`, the `object` and
   `datagram` modules, `track::Producer::insert_wire_datagram`,
@@ -192,6 +212,9 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
   an unaccepted request so objects landing before SUBSCRIBE_OK are kept.
   Replace it with the resolved-start shape above: the request is accepted
   with its start pending, so early data has a public producer to land in.
+  Done in #6111: the IETF subscriber holds the request's demand before
+  SUBSCRIBE_OK and accepts at the answer, so the hook goes. JS has no
+  pending-start gate; its lite publisher does not wait on one.
 - `Group.Producer.mirror` (`@internal`, lite subscriber fetch coalescing):
   moved to the deferred quest, which waits on Model ranges and JS track
   handover.
