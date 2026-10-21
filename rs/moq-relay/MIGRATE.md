@@ -5,7 +5,7 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### `Accepted` takes any transport's handshake
+### `Accepted` takes any transport's handshake (#6176)
 
 `Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
 

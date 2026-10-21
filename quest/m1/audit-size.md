@@ -54,7 +54,7 @@ Native and WASM main numbers are from 2026-10-19 (2b28f5eac); JS from
   `js/net/src/ietf/index.test.ts` fails if the entry statically reaches it
   again.
 - Fixed: moq-net boxes the transport, so its session drivers compile once
-  instead of per transport and per instantiating crate (PR_LINK).
+  instead of per transport and per instantiating crate ([#6176](https://github.com/moq-dev/moq/pull/6176)).
   Stripped profiling builds fell 31.8 to 22.5 MiB (relay), 49.1 to 42.5 MiB
   (CLI), 28.0 to 21.8 MiB (`libmoq_ffi.so`), 254.6 to 207.8 MiB (unstripped
   `libmoq.a`) and 862 to 786 KB gzipped (`@moq/wasm`).

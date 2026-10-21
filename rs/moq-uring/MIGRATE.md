@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Wrap sessions in `transport::Local`
+### Wrap sessions in `transport::Local` (#6176)
 
 moq-net dropped `connect_lite` and `accept_lite`, and every session now needs a `Send` transport.
 Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, binding))` and call `connect` or `accept`.

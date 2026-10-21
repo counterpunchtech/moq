@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Sessions box their transport
+### Sessions box their transport (#6176)
 
 `Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.
 `Client::connect_lite`, `Server::accept_lite`, and `Server::accept_request_lite` are gone; call `connect`, `accept`, or `accept_request`, which accept every ALPN.
