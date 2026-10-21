@@ -1187,6 +1187,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 				max_age_us: None,
 				refresh: Some(1),
 				timescale: None,
+				compress: false,
 			}),
 		)
 		.unwrap();
