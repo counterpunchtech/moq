@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, Second } from "@moq/clock";
+import { Manual, Milli, Nano, now, Second } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -1459,5 +1459,29 @@ test("an effect interval delays a full period after a stalled event loop", async
 	} finally {
 		effect.close();
 		restore();
+	}
+});
+
+test("an effect interval starts its next period on a newly installed clock's origin", async () => {
+	const first = new Manual();
+	first.jump(Nano(1000));
+	const restoreFirst = first.install();
+	const second = new Manual();
+	let restoreSecond: (() => void) | undefined;
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => {
+			at.push(now());
+			if (at.length === 1) restoreSecond = second.install();
+		}, Nano(10));
+		await first.advance(Nano(10));
+		expect(at).toEqual([1010]);
+		await second.advance(Nano(10));
+		expect(at).toEqual([1010, 10]);
+	} finally {
+		effect.close();
+		restoreSecond?.();
+		restoreFirst();
 	}
 });

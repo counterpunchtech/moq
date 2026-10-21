@@ -877,7 +877,9 @@ export class Effect {
 				} catch (error) {
 					console.error("effect interval error", error, this.#stack);
 				}
-				next = Instant(Math.max(Instant.add(next, period), Instant.add(now(), period)));
+				// A callback may install a clock with a different origin. A full Delay period
+				// starts from that clock's now, never from the previous clock's deadline.
+				next = Instant.add(now(), period);
 			}
 		})().catch(noop);
 		this.cleanup(() => abort.abort());
