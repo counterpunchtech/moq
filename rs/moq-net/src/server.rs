@@ -831,7 +831,8 @@ impl Handshake {
 				client_setup,
 			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
 			PausedHandshake::IetfModern(paused) => paused.ok(server, runtime, peer_hop, auth),
-			PausedHandshake::Legacy(paused) => paused.ok(server, runtime, peer_hop, auth).await,
+			// Boxed so the bidi SETUP write of these old versions doesn't size every caller's future.
+			PausedHandshake::Legacy(paused) => Box::pin(paused.ok(server, runtime, peer_hop, auth)).await,
 		}
 	}
 

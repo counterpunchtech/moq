@@ -740,7 +740,7 @@ impl Server {
 							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, handshake: request, quic, deadline, active })
+							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
 						}.boxed());
 					}
 				}
@@ -763,7 +763,7 @@ impl Server {
 								identity,
 								authority,
 								link,
-								handshake: request,
+								handshake: Box::new(request),
 								#[cfg(feature = "quic")]
 								quic: None,
 								deadline,
@@ -936,7 +936,7 @@ impl Listener {
 				alpn: Some(protocol),
 				..Default::default()
 			},
-			handshake: request,
+			handshake: Box::new(request),
 			#[cfg(feature = "quic")]
 			quic: None,
 			deadline,
@@ -1082,7 +1082,7 @@ pub(crate) async fn accept_websocket(
 		authority,
 		identity: options.identity,
 		link: options.link,
-		handshake: request,
+		handshake: Box::new(request),
 		#[cfg(feature = "quic")]
 		quic: None,
 		deadline,
@@ -1573,7 +1573,7 @@ async fn stream_request(
 				authority: None,
 				identity: None,
 				link,
-				handshake: request,
+				handshake: Box::new(request),
 				#[cfg(feature = "quic")]
 				quic: None,
 				deadline,
@@ -1637,7 +1637,7 @@ pub struct Request {
 	/// The link facts the transport could see.
 	link: Link,
 	/// The paused moq-net handshake; the same type whatever the transport.
-	handshake: moq_net::server::Handshake,
+	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Connection>,
@@ -1672,13 +1672,13 @@ impl Request {
 
 	/// Publish the given origin to the session.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
-		self.handshake = self.handshake.with_publisher(publish);
+		*self.handshake = (*self.handshake).with_publisher(publish);
 		self
 	}
 
 	/// Subscribe to the given origin from the session.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
-		self.handshake = self.handshake.with_subscriber(subscribe);
+		*self.handshake = (*self.handshake).with_subscriber(subscribe);
 		self
 	}
 
@@ -1686,19 +1686,19 @@ impl Request {
 	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
-		self.handshake = self.handshake.with_peer_hop(hop);
+		*self.handshake = (*self.handshake).with_peer_hop(hop);
 		self
 	}
 
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
-		self.handshake = self.handshake.with_stats(stats);
+		*self.handshake = (*self.handshake).with_stats(stats);
 		self
 	}
 
 	/// Set request caps after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
-		self.handshake = self.handshake.with_limits(limits);
+		*self.handshake = (*self.handshake).with_limits(limits);
 		self
 	}
 
