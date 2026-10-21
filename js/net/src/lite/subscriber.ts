@@ -35,6 +35,7 @@ import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
+import { Budget } from "../util/yield.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	AnnounceHistory,
@@ -78,6 +79,10 @@ import {
 	Version,
 	waitsForSubscriberFin,
 } from "./version.ts";
+
+// A peer's buffered TRACKS events decode without reaching a task boundary, and a flood of adds
+// and removals of one name never reaches the announces cap: yield so it cannot starve the host.
+const listingBudget = new Budget();
 
 // Request streams refuse exhausted peer credit, with one deadline covering create and answer.
 export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
@@ -704,6 +709,8 @@ export class Subscriber {
 			await new TracksMessage(broadcast, consumed.epoch).encode(stream.writer, this.version);
 			let synced = false;
 			for (;;) {
+				const pause = listingBudget.poll();
+				if (pause !== undefined) await untilAborted(pause, stop);
 				const event = await untilAborted(decodeTracksEventMaybe(stream.reader, this.version), stop);
 				if (!event) {
 					// The peer's broadcast ended, whether or not its retraction has arrived: end the

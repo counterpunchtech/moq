@@ -240,6 +240,37 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
+test("a flood of a peer's listing churn yields to the host's tasks", async () => {
+	const { subscriber, listed } = handPlayed();
+	const tracks = subscriber.consume(Path.from("room")).tracks();
+	const peer = await listed();
+	// Churn of one name never reaches the announces cap, so only the budget bounds it.
+	const flood = await bytes(async (w) => {
+		await encodeTracksEvent(w, { kind: "added", name: "first", info }, version);
+		for (let i = 0; i < 20_000; i++) {
+			await encodeTracksEvent(w, { kind: "added", name: "churn", info }, version);
+			await encodeTracksEvent(w, { kind: "removed", name: "churn" }, version);
+		}
+		await encodeTracksEvent(w, { kind: "added", name: "last", info }, version);
+	});
+	await peer.stream.writer.write(flood);
+	expect(await next(tracks)).toBe("synced");
+	expect(await next(tracks)).toBe("+first");
+	// The receiver is mid-flood: a task queued now runs before it reaches the end.
+	let last = false;
+	let ranFirst: boolean | undefined;
+	setTimeout(() => {
+		ranFirst = !last;
+	}, 0);
+	let event: string;
+	do event = await next(tracks);
+	while (event !== "+last");
+	last = true;
+	await settle();
+	expect(ranFirst).toBe(true);
+	tracks.close();
+});
+
 test("a version without the Tracks Stream refuses the listing", async () => {
 	const pair = createMockTransportPair();
 	const subscriber = new Subscriber(pair.client, Version.DRAFT_06, randomHop());
