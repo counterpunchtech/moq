@@ -15222,6 +15222,31 @@ mod test {
 		assert_eq!(drained_drops(&mut subscriber), [(0, WIDE)]);
 	}
 
+	/// A handler refusing a wide fill one group at a time, as a FETCH-capable session does,
+	/// pays for each refusal rather than for every refusal before it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fill_refused_group_by_group_stays_linear() {
+		const WIDE: u64 = 1 << 40;
+		const REFUSED: u64 = 100_000;
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(WIDE).unwrap();
+		write_group(&producer, WIDE);
+		assert_eq!(drain_groups(&mut subscriber), [WIDE]);
+
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
+			panic!("the miss below the start is asked");
+		};
+		for _ in 0..REFUSED {
+			let sequence = fill.next().unwrap();
+			fill.drop_groups(sequence..sequence + 1);
+			assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		}
+		assert_eq!(fill.next(), Some(WIDE - REFUSED - 1));
+	}
+
 	/// A descending reader joining a queued fill makes it newest first, as any descending
 	/// subscriber does a subscription.
 	#[test]

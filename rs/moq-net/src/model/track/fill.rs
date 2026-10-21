@@ -51,8 +51,12 @@ struct Pending {
 // pending: /quest/m1/public-model/deferred.md
 pub(crate) struct Outcome {
 	accepted: RangeSet<u64>,
-	// Why each refused run was refused, in the order the handler refused them.
-	refused: Vec<(ops::Range<u64>, Error)>,
+	// Why each refused run was refused; refusing a sequence again replaces why.
+	refused: RangeMap<u64, Refusal>,
+	refusals: u64,
+	// Accepted or refused, kept as answers arrive so a fill answered group by group costs
+	// the runs each answer touches, not every answer before it.
+	resolved: RangeSet<u64>,
 	// The budget the fill asked its handler for, so a looser reader can tell that an
 	// [`Error::Old`] was not its own.
 	asked: Option<Duration>,
@@ -62,11 +66,7 @@ impl Outcome {
 	/// Why `sequence` was refused, if it was.
 	// private: capability gap
 	pub(crate) fn refused(&self, sequence: u64) -> Option<&Error> {
-		self.refused
-			.iter()
-			.rev()
-			.find(|(groups, _)| groups.contains(&sequence))
-			.map(|(_, err)| err)
+		self.refused.get(&sequence).map(|refusal| &refusal.err)
 	}
 
 	pub(super) fn is_accepted(&self, sequence: u64) -> bool {
@@ -89,31 +89,45 @@ impl Outcome {
 			for accepted in self.accepted.overlapping(run) {
 				answers.push((accepted.start.max(run.start)..accepted.end.min(run.end), Ok(())));
 			}
-			for (refused, err) in &self.refused {
+			for (refused, refusal) in self.refused.overlapping(run) {
 				let groups = refused.start.max(run.start)..refused.end.min(run.end);
-				if !groups.is_empty() {
-					answers.push((groups, Err((err.clone(), self.asked))));
-				}
+				answers.push((groups, Err((refusal.err.clone(), self.asked))));
 			}
 		}
 		answers
 	}
 
-	fn resolved(&self) -> RangeSet<u64> {
-		let mut resolved = self.accepted.clone();
-		for (groups, _) in &self.refused {
-			resolved.insert(groups.clone());
-		}
-		resolved
+	fn accept(&mut self, groups: ops::Range<u64>) {
+		self.accepted.insert(groups.clone());
+		self.resolved.insert(groups);
 	}
 
 	fn refuse(&mut self, groups: ops::Range<u64>, err: Error) {
 		if groups.is_empty() {
 			return;
 		}
-		self.refused.push((groups, err));
+		let id = self.refusals;
+		self.refusals += 1;
+		self.refused.insert(groups.clone(), Refusal { id, err });
+		self.resolved.insert(groups);
 	}
 }
+
+/// One refusal, equal only to itself: the map keeps a run it refused whole, but never merges
+/// two refusals whose errors may differ.
+#[derive(Clone)]
+struct Refusal {
+	id: u64,
+	err: Error,
+}
+
+impl PartialEq for Refusal {
+	fn eq(&self, other: &Self) -> bool {
+		self.id == other.id
+	}
+}
+
+impl Eq for Refusal {}
 
 /// A reader's request: the run `start.group..end`, from `start.frame` in its first group.
 pub(super) struct Ask {
@@ -469,12 +483,14 @@ impl Fill {
 	/// since it was asked. `None` once every group is answered.
 	pub fn next(&self) -> Option<u64> {
 		loop {
-			let resolved = self.inner.result.read().resolved();
 			let span = self.inner.start.group..self.inner.end;
-			let mut gaps = resolved.gaps(&span);
-			let sequence = match self.inner.order {
-				Order::Ascending => gaps.next().map(|gap| gap.start),
-				Order::Descending => gaps.last().map(|gap| gap.end - 1),
+			let sequence = {
+				let outcome = self.inner.result.read();
+				let mut gaps = outcome.resolved.gaps(&span);
+				match self.inner.order {
+					Order::Ascending => gaps.next().map(|gap| gap.start),
+					Order::Descending => gaps.last().map(|gap| gap.end - 1),
+				}
 			}?;
 			// The live feed may have delivered it since: answered by the cache, not the source.
 			let cached = self
@@ -489,7 +505,7 @@ impl Fill {
 			let Ok(mut outcome) = self.inner.result.write() else {
 				return Some(sequence);
 			};
-			outcome.accepted.insert(sequence..sequence + 1);
+			outcome.accept(sequence..sequence + 1);
 			drop(outcome);
 			uncover(&self.inner.fills, self.inner.id, sequence..sequence + 1);
 		}
@@ -536,14 +552,14 @@ impl Inner {
 		let Some(end) = sequence.checked_add(1) else {
 			return Err(Error::InvalidRange);
 		};
-		if self.result.read().resolved().contains(&sequence) {
+		if self.result.read().resolved.contains(&sequence) {
 			return Err(Error::Duplicate);
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state)
 			.and_then(|mut state| state.insert_group_request(sequence, self.frame_start(sequence), info));
 		if let Ok(mut outcome) = self.result.write() {
-			outcome.accepted.insert(sequence..end);
+			outcome.accept(sequence..end);
 		}
 		uncover(&self.fills, self.id, sequence..end);
 		res
@@ -570,8 +586,7 @@ impl Inner {
 
 	/// The part of `groups` nothing answered yet.
 	fn unresolved(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
-		let resolved = self.result.read().resolved();
-		resolved.gaps(&groups).collect()
+		self.result.read().resolved.gaps(&groups).collect()
 	}
 
 	fn refuse(&self, groups: &RangeSet<u64>, err: Error) {
