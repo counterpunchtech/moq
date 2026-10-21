@@ -138,7 +138,7 @@ pub trait Stats {
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
 
-/// The smallest stream and connection receive window a transport that leases may offer.
+/// The smallest connection receive window a transport that leases may offer.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
 /// window can never complete, so the window has to fit the largest one with its framing:

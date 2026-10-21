@@ -3454,6 +3454,38 @@ mod tests {
         assert!(!client.leased(ids[0]).unwrap().evicted);
     }
 
+    /// A reader waiting on tiny frames holds copies of their bytes, not the receive buffers they
+    /// arrived in, so a byte of credit cannot pin a whole batch of datagrams.
+    #[test]
+    fn waiting_lease_releases_datagram_buffers() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let buffers: Vec<Bytes> = (0..8).map(|_| Bytes::from(vec![0u8; 64 * 1024])).collect();
+        for (offset, buffer) in buffers.iter().enumerate() {
+            let _ = client
+                .received(
+                    frame::Stream {
+                        id,
+                        offset: offset as u64,
+                        fin: false,
+                        data: buffer.slice(..1),
+                    },
+                    // One datagram of a receive batch: too little over-allocation for the
+                    // assembler to copy it out.
+                    1200,
+                )
+                .unwrap();
+            assert!(matches!(
+                wait(&mut client, id, buffers.len() + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        assert!(buffers.into_iter().all(|buffer| buffer.is_unique()));
+        let leased = client.leased(id).unwrap();
+        assert_eq!(leased.len(), 8);
+        assert!(leased.chunks().count() <= 4, "merged as they arrive");
+    }
+
     /// A consume whose credit only pays a shrunk window's debt reruns the stuck pass: the
     /// readers that would have rerun it are already waiting, and the peer is still blocked.
     #[test]

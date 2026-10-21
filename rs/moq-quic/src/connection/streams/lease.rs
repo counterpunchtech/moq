@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use thiserror::Error;
 
 use super::{Chunks, ReadError, ReadableError, RecvStream, ShouldTransmit, StreamEvent, StreamId};
@@ -21,6 +21,9 @@ pub struct Leased {
     chunks: VecDeque<Bytes>,
     /// Bytes in `chunks`.
     len: u64,
+    /// The trailing chunks that still slice the datagram buffers they arrived in, which a byte
+    /// of them keeps whole.
+    fresh: usize,
     /// Bytes whose connection credit is withheld: `len`, plus taken bytes not yet consumed.
     held: u64,
     /// How the stream ended, once the last byte is leased.
@@ -77,6 +80,7 @@ impl Leased {
             false => self.chunks.pop_front().expect("front exists"),
         };
         self.len -= chunk.len() as u64;
+        self.fresh = self.fresh.min(self.chunks.len());
         chunk
     }
 
@@ -98,9 +102,35 @@ impl Leased {
             left -= front.len();
             self.chunks.pop_front();
         }
+        self.fresh = self.fresh.min(self.chunks.len());
         let freed = self.held - self.len;
         self.held = self.len;
         freed
+    }
+
+    /// Copy the fresh chunks out of their datagram buffers, for a reader about to wait on them.
+    ///
+    /// Credit counts the leased bytes, but a slice keeps its whole receive buffer alive, so a
+    /// peer splitting a unit into tiny frames would otherwise hold many buffers per byte of
+    /// credit. Bytes handed out without waiting never pay for the copy. Absorbing each smaller
+    /// predecessor keeps a slowly arriving unit to few chunks while copying each byte only a
+    /// logarithmic number of times.
+    fn compact(&mut self) {
+        if self.fresh == 0 {
+            return;
+        }
+        let mut start = self.chunks.len() - self.fresh;
+        let mut size: usize = self.chunks.range(start..).map(Bytes::len).sum();
+        while start > 0 && self.chunks[start - 1].len() <= size {
+            start -= 1;
+            size += self.chunks[start].len();
+        }
+        let mut buf = BytesMut::with_capacity(size);
+        for chunk in self.chunks.drain(start..) {
+            buf.extend_from_slice(&chunk);
+        }
+        self.chunks.push_back(buf.freeze());
+        self.fresh = 0;
     }
 }
 
@@ -170,6 +200,7 @@ impl RecvStream<'_> {
                 Some(End::Reset(code)) => return Err(LeaseError::Reset(code)),
                 None => {
                     lease.want = Some(want);
+                    lease.compact();
                     // An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
                     let evicted = self.state.evict_if_stuck().inspect(|max_data| {
                         self.pending.max_data |= max_data.should_transmit();
@@ -259,6 +290,7 @@ impl RecvStream<'_> {
         let len: u64 = read.iter().map(|chunk| chunk.len() as u64).sum();
         lease.len += len;
         lease.held += len;
+        lease.fresh += read.len();
         lease.chunks.append(&mut read);
         lease.end = end;
         Ok(transmit)
@@ -422,6 +454,7 @@ impl StreamsState {
         let held = std::mem::take(&mut lease.len);
         lease.held -= held;
         lease.chunks.clear();
+        lease.fresh = 0;
         lease.want = None;
         lease.ready = false;
         lease.evicted = true;
