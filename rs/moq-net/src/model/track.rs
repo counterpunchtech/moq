@@ -5428,13 +5428,13 @@ impl Cursor {
 			let state = self.state.read();
 			misses.judge(&state, (from, revision, cap), || admitted(window, from, cap), drift, &mut given_up, waiter)
 		};
-		misses.ask(&fills, &asks, &asking, &mut given_up);
+		misses.ask(&self.state, &fills, &asks, &asking, &mut given_up);
 		loop {
 			let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
 			if retry.is_empty() {
 				break;
 			}
-			misses.ask(&fills, &retry, &asking, &mut given_up);
+			misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
 		}
 		if let Some(drops) = &mut self.drops {
 			for run in given_up {
@@ -14564,6 +14564,142 @@ mod test {
 			"the fetch gets the accepted group"
 		);
 		group.finish().unwrap();
+	}
+
+	/// A feed declared to start at group 2, with groups 2 and 3 written, read from group 0.
+	fn started_late() -> (Producer, Dynamic, Subscriber) {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let subscriber = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		(producer, dynamic, subscriber)
+	}
+
+	fn write_filled(group: Result<group::Producer>, millis: u64) {
+		let mut group = group.unwrap();
+		group.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	fn drained_drops(subscriber: &mut Subscriber) -> Vec<ops::Range<u64>> {
+		let mut dropped = Vec::new();
+		while let Poll::Ready(range) = subscriber.poll_drop(&kio::Waiter::noop()) {
+			dropped.push(range);
+		}
+		dropped
+	}
+
+	/// What a reader asks for under the feed's start is a miss, asked at once: the reader
+	/// reads what the handler accepts, and what it refuses is named dropped only once the
+	/// feed gives up on it too, since it may still arrive late.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_miss_below_the_start_is_filled() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		assert!(drained_drops(&mut subscriber).is_empty());
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			read.push(group.sequence);
+		}
+		assert_eq!(read, [2, 3]);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+		write_filled(fill.accept(0, None), 0);
+		fill.drop_groups(1..2);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the filled group is read");
+		};
+		assert_eq!(group.sequence, 0);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(drained_drops(&mut subscriber).is_empty(), "group 1 may still arrive");
+
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [1..2]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "a refusal is not asked again");
+	}
+
+	/// A group the handler refused that still arrives live is delivered.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_miss_that_arrives_late_is_read() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		assert!(drained_drops(&mut subscriber).is_empty());
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		fill.drop_groups(0..2);
+		write_group(&producer, 1);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the late group is read");
+		};
+		assert_eq!(group.sequence, 1);
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [0..1]);
+	}
+
+	/// With no handler to fill it, a miss is named dropped once the feed gives up on it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_miss_with_no_handler_is_named_dropped() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		drop(dynamic);
+		let waiter = kio::Waiter::noop();
+		assert!(drained_drops(&mut subscriber).is_empty());
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			read.push(group.sequence);
+		}
+		assert_eq!(read, [2, 3]);
+		assert!(drained_drops(&mut subscriber).is_empty());
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [0..2]);
+	}
+
+	/// An ordered reader waits on a fill for its miss rather than skipping past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_waits_on_a_fill() {
+		let (_producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		let mut next = || match subscriber.poll_next_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			Poll::Pending => None,
+			_ => panic!("the read ended"),
+		};
+		assert_eq!(next(), None, "group 0 is being filled");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		write_filled(fill.accept(0, None), 0);
+		assert_eq!(next(), Some(0));
+		assert_eq!(next(), None, "group 1 is being filled");
+		fill.drop_groups(1..2);
+		assert_eq!(next(), Some(2));
+		assert_eq!(next(), Some(3));
+	}
+
+	/// A fill nobody waits on any more is withdrawn: it names nothing dropped, so a later
+	/// reader can still ask for the same history.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_withdrawn_fill_names_nothing_dropped() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the gap is a miss");
+		};
+		drop(subscriber);
+		assert!(!fill.is_used());
+		drop(fill);
+		assert!(drops(&producer).is_empty());
 	}
 
 	/// Fetch group 3 and drop it through the fill it queues, returning how the fetch ended.

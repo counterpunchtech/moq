@@ -253,6 +253,16 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 
+		// A refused group that arrived live is the feed's, and no longer refused.
+		let arrived: Vec<u64> = self
+			.refused
+			.iter()
+			.flat_map(|run| state.lookup.range(run.clone()).map(|(sequence, _)| *sequence))
+			.collect();
+		for sequence in arrived {
+			self.refused.remove(sequence..sequence + 1);
+		}
+
 		let now = state.cache.pool().now_wall();
 		let start = state.start_sequence.unwrap_or(0);
 		let mut wake: Option<crate::time::Instant> = None;
@@ -261,12 +271,14 @@ impl Misses {
 				for hole in self.unclaimed(state, hole) {
 					let (unfed, awaited) = state.unfed(hole, now);
 					for run in unfed.iter() {
+						asks.insert(run.clone());
+						// Refused already: given up now the feed gave up too, not asked again.
 						for refused in self.refused.overlapping(run).cloned().collect::<Vec<_>>() {
 							let gone = refused.start.max(run.start)..refused.end.min(run.end);
 							self.refused.remove(gone.clone());
+							asks.remove(gone.clone());
 							self.give_up(gone, given_up);
 						}
-						asks.insert(run.clone());
 					}
 					for (run, folds) in awaited {
 						// Under the feed's start: asked now rather than after the grace.
@@ -312,8 +324,15 @@ impl Misses {
 		asks
 	}
 
-	/// Ask the fills for `runs`, giving up what no handler can take.
-	pub fn ask(&mut self, fills: &kio::Shared<FillState>, runs: &RangeSet<u64>, asking: &Asking, given_up: &mut GivenUp) {
+	/// Ask the fills for `runs`, settling what no handler can take as refused.
+	pub fn ask(
+		&mut self,
+		state: &kio::Consumer<TrackState>,
+		fills: &kio::Shared<FillState>,
+		runs: &RangeSet<u64>,
+		asking: &Asking,
+		given_up: &mut GivenUp,
+	) {
 		for run in runs.iter() {
 			let frame = asking
 				.start
@@ -333,7 +352,7 @@ impl Misses {
 			self.wanted.insert(run.clone());
 			for groups in unfillable {
 				self.wanted.remove(groups.clone());
-				self.give_up(groups, given_up);
+				self.settle(&state.read(), groups, given_up);
 			}
 			self.joins.extend(joins);
 		}
@@ -358,15 +377,18 @@ impl Misses {
 	/// otherwise held until it does, since the live feed may still deliver them.
 	fn settle(&mut self, state: &TrackState, groups: ops::Range<u64>, given_up: &mut GivenUp) {
 		let now = state.cache.pool().now_wall();
-		let mut left = RangeSet::new();
-		left.insert(groups.clone());
-		for run in state.unfed(groups, now).0.iter() {
-			left.remove(run.clone());
-			self.give_up(run.clone(), given_up);
-		}
-		for run in left.iter() {
-			self.refused.insert(run.clone());
-			self.deferred.insert(run.clone());
+		// What arrived meanwhile is the feed's to serve.
+		for hole in holes(state, groups) {
+			let mut left = RangeSet::new();
+			left.insert(hole.clone());
+			for run in state.unfed(hole, now).0.iter() {
+				left.remove(run.clone());
+				self.give_up(run.clone(), given_up);
+			}
+			for run in left.iter() {
+				self.refused.insert(run.clone());
+				self.deferred.insert(run.clone());
+			}
 		}
 	}
 
