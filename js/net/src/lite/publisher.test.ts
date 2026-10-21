@@ -963,6 +963,36 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+for (const skipped of ["failed", "stale"] as const) {
+	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
+		const sub = await servedSubscription({
+			version: Version.DRAFT_06,
+			startGroup: 5,
+			maxAge: skipped === "stale" ? Milli(0) : undefined,
+		});
+		try {
+			hooks.startTrack(sub.track, { start: 5, requested: 5 });
+			const group = new GroupProducer(5);
+			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+			sub.track.writeGroup(group);
+			group.close(skipped === "failed" ? new Error("cut") : undefined);
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8);
+			sub.serve(6);
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(6);
+			if (skipped === "failed") {
+				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7, 7]);
+			}
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
 test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {

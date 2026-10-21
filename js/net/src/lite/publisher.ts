@@ -1091,6 +1091,8 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
+		// Dispositions before START refine its boundary; later ones must be named as drops.
+		const skipped: Run[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
 		let endSent = false;
@@ -1146,6 +1148,12 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
+				if (startSequence !== undefined && skipped.length > 0) {
+					for (const range of skipped) {
+						if (!(await drop(Math.max(range.start, startSequence), range.end))) return false;
+					}
+					skipped.length = 0;
+				}
 				if (pendingDrops.length > 0) {
 					for (const dropped of pendingDrops.splice(0)) {
 						if (
@@ -1217,12 +1225,13 @@ export class Publisher {
 					!startSent && hasLargest(this.version)
 						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
 						: undefined;
-				const recv = hooks.tryRecvGroup(track, startSent);
+				const recv = hooks.tryRecvGroup(track, emitRange);
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!(await drop(recv.start, recv.end))) return false;
+						if (!startSent) insertRun(skipped, recv.start, recv.end);
+						else if (!(await drop(recv.start, recv.end))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1300,6 +1309,10 @@ export class Publisher {
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
 					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					for (const range of skipped) {
+						if (range.start <= startSequence && range.end > startSequence)
+							startSequence = Math.min(range.end, group.sequence);
+					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
