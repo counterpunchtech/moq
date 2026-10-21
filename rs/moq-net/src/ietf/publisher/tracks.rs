@@ -643,9 +643,25 @@ where
 		let _slot = slot;
 		let absolute = self.origin.absolute(&namespace).to_owned();
 
-		// Waits on the peer's credit for as long as the track is listed and the request
-		// stands; a peer that grants none holds only this task and its slot. An allocated ID
-		// is always sent.
+		// Waits on the peer's stream credit, then its request credit, for as long as the
+		// track is listed and the request stands; a peer that grants none holds only this
+		// task and its slot. The stream comes first since opening one spends no ID, while an
+		// allocated ID is always sent.
+		let mut session = self.session.clone();
+		let opened = {
+			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
+			kio::wait(|waiter| {
+				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
+					return Poll::Ready(None);
+				}
+				waiter.poll_future(opening.as_mut()).map(Some)
+			})
+			.await
+		};
+		let Some(opened) = opened else {
+			return Ok(());
+		};
+		let mut stream = opened?;
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -653,10 +669,10 @@ where
 			self.control.poll_next_request_id(waiter).map(Some)
 		})
 		.await;
+		// Dropped unwritten, the stream is reset before its header, which the peer ignores.
 		let Some(request_id) = allocated else {
 			return Ok(());
 		};
-		let mut stream = Stream::open(&mut self.session.clone(), self.version).await?;
 
 		// Held while the subscription lives: draft-18 refuses the peer a second subscription
 		// to the track, and a joining FETCH needs the subscription forwarding.
@@ -682,7 +698,6 @@ where
 		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let mut session = self.session.clone();
 
 		// PUBLISH_OK or REQUEST_ERROR. A track unlisted before the answer has nothing to
 		// end yet, so the request is reset.
@@ -766,7 +781,7 @@ where
 						self.write_request_ok(&mut stream.writer, request_id, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
-							break Served::Track(Ok(()));
+							break unlisted();
 						}
 						continue;
 					}
@@ -781,11 +796,11 @@ where
 				if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(Wait::Cancelled);
 				}
-				if listed.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Wait::Removed);
-				}
 				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Wait::Revoked);
+				}
+				if listed.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Wait::Removed);
 				}
 				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, &mut cx)) {
 					UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
@@ -806,7 +821,7 @@ where
 
 			let update = match wait {
 				Wait::Update(update) => update,
-				Wait::Removed => break Served::Track(Ok(())),
+				Wait::Removed => break unlisted(),
 				Wait::Revoked => {
 					tracing::info!(broadcast = %absolute, track = %name, "publish no longer authorized");
 					break Served::Track(Err(Error::Unauthorized));
@@ -986,11 +1001,11 @@ where
 			// A track no longer listed ends its PUBLISH even while the track itself goes on,
 			// as when its broadcast's route is withdrawn.
 			crate::auth::until(serving, |waiter| {
-				if listed.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Error::Cancel.into());
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Error::Unauthorized.into());
 				}
-				match gate.poll_denied(waiter) {
-					Poll::Ready(()) => Poll::Ready(Error::Unauthorized.into()),
+				match listed.poll_closed(waiter) {
+					Poll::Ready(()) => Poll::Ready(Error::Cancel.into()),
 					Poll::Pending => Poll::Pending,
 				}
 			})
@@ -1009,8 +1024,7 @@ where
 				*opened += serve.opened();
 				return Err(());
 			}
-			// Unlisted: the track has not ended, so no END_OF_TRACK, but it is gone here.
-			Err(_) if listed.is_closed() => Served::Track(Ok(())),
+			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
 			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
@@ -1019,6 +1033,14 @@ where
 		*opened += serve.opened();
 		Ok(served)
 	}
+}
+
+/// How a PUBLISH whose track is no longer listed ends: in error, since the track may go on
+/// elsewhere, as when its broadcast's route is withdrawn, and a clean end would tell the
+/// subscriber it is over. A track that finished is unlisted the same way, so it ends in
+/// error too.
+fn unlisted() -> Served {
+	Served::Track(Err(Error::NotFound))
 }
 
 #[cfg(test)]
@@ -1548,7 +1570,8 @@ mod tests {
 	}
 
 	/// A forwarding PUBLISH ends with PUBLISH_DONE once its track is no longer listed, here
-	/// because its broadcast's route went, even while the track itself goes on.
+	/// because its broadcast's route went, even while the track itself goes on. The track
+	/// has not ended, so neither does the PUBLISH cleanly.
 	#[moq_clock::test]
 	async fn an_unlisted_forwarding_publish_ends() {
 		for version in [Version::Draft18, Version::Draft22] {
@@ -1570,8 +1593,29 @@ mod tests {
 			let mut group = video.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"after".as_slice()).unwrap();
 			group.finish().unwrap();
-			let (id, _) = next(&mut stream).await;
+			let (id, body) = next(&mut stream).await;
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert!(done.end(version).is_err(), "{version}: ended cleanly");
+		}
+	}
+
+	/// A paused PUBLISH ends in error once its track is unlisted, here because its
+	/// broadcast's route went, never with the clean end that says the track is over.
+	#[moq_clock::test]
+	async fn an_unlisted_paused_publish_ends_in_error() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (mut stream, ..) = h.publish().await;
+			publish_ok(&mut stream).await;
+
+			drop(h.broadcast);
+			let (id, body) = next(&mut stream).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert!(done.end(version).is_err(), "{version}: ended cleanly");
 		}
 	}
 
