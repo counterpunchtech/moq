@@ -509,6 +509,7 @@ interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
 	epoch?: Epoch.Valid;
+	unlisted?: boolean;
 }
 
 // Constructs a Consumer from within this module without exposing a public constructor
@@ -527,6 +528,8 @@ export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
 	#epoch?: Epoch.Valid;
+	// Served on request through a route claiming a shorter prefix, which names no broadcast to list.
+	#unlisted: boolean;
 
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
@@ -535,6 +538,7 @@ export class Consumer {
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
 		this.#epoch = shared?.epoch;
+		this.#unlisted = shared?.unlisted ?? false;
 		if (shared) {
 			this.#state = shared.state;
 		} else {
@@ -549,7 +553,7 @@ export class Consumer {
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
-			tracks: (owner) => listTracks(this.#state.listing, owner),
+			tracks: (owner) => this.#tracks(owner),
 			lister: () => new Lister(this.#state.listing),
 		});
 	}
@@ -562,6 +566,9 @@ export class Consumer {
 		};
 		hooks.stampEpoch = (target, epoch) => {
 			target.#epoch = epoch;
+		};
+		hooks.stampUnlisted = (target) => {
+			target.#unlisted = true;
 		};
 	}
 
@@ -614,7 +621,12 @@ export class Consumer {
 	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
 	// stays unexported; a subclass passes it straight back into its own `super(...)`.
 	protected shareState(): never {
-		return { state: this.#state, path: this.#path, epoch: this.#epoch } satisfies Shared as never;
+		return {
+			state: this.#state,
+			path: this.#path,
+			epoch: this.#epoch,
+			unlisted: this.#unlisted,
+		} satisfies Shared as never;
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
@@ -634,7 +646,12 @@ export class Consumer {
 	 * has closed.
 	 */
 	tracks(): Tracks {
-		return listTracks(this.#state.listing);
+		return this.#tracks();
+	}
+
+	#tracks(owner?: object): Tracks {
+		if (this.#unlisted) throw new NotFound("a route claiming a prefix lists no tracks");
+		return listTracks(this.#state.listing, owner);
 	}
 
 	/**

@@ -376,11 +376,14 @@ function unroutable(): StreamError {
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
+	/** The prefix the route claims; every served path is at or beneath it. */
+	readonly prefix: Path.Valid;
 	/** False when a session announced the route: it may serve that session's broadcast. */
 	readonly originated: boolean;
 
-	constructor(root: Path.Valid, originated: boolean) {
+	constructor(root: Path.Valid, prefix: Path.Valid, originated: boolean) {
 		this.root = root;
+		this.prefix = prefix;
 		this.originated = originated;
 	}
 
@@ -437,6 +440,9 @@ class ServeState {
 			this.settled.update((n) => n + 1);
 			return;
 		}
+		// A route claiming a prefix names no broadcast, so a path it serves on request has no
+		// inventory to list.
+		if (path !== this.prefix) hooks.stampUnlisted(front);
 		this.served.set(path, front);
 		void front.closed.then(() => {
 			if (this.served.get(path) !== front) return;
@@ -1326,7 +1332,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
-		const server = new ServeState(this.#scope.root, originated);
+		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},
@@ -1657,7 +1663,6 @@ export class Consumer {
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path, epoch) => this.#local(scope.path(path), epoch),
 			demand: (path, epoch, signal) => this.#demand(scope.path(path), epoch, signal),
-			covered: (path) => this.#covered(scope.path(path)),
 		});
 	}
 
@@ -2125,16 +2130,6 @@ export class Consumer {
 		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received))) return undefined;
 		if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch) return undefined;
 		return local;
-	}
-
-	/**
-	 * Whether the originated route that would serve `path` claims it only through a shorter
-	 * prefix. Such a route claims capability, not inventory, so it names no broadcast to list.
-	 */
-	#covered(path: Path.Valid): boolean {
-		if (this.#local(path)) return false;
-		const entry = this.#state.bestEntry(path, received);
-		return entry !== undefined && !this.#state.routes.peek()?.get(path)?.includes(entry);
 	}
 
 	/**

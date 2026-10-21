@@ -1453,9 +1453,6 @@ export class Publisher {
 		try {
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			const origin = this.#publish && wireOf(this.#publish);
-			// A route claiming a prefix names no broadcast, so a path it serves on request has
-			// nothing to list.
-			if (origin?.covered(msg.broadcast)) throw new NotFound(`broadcast ${msg.broadcast}`);
 			const front =
 				origin &&
 				(origin.local(msg.broadcast, msg.epoch) ??

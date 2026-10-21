@@ -3,7 +3,7 @@ import { Milli } from "@moq/clock";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
 import * as Epoch from "../epoch.ts";
-import { fromTransport, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -337,6 +337,38 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 	dynamic.close();
 });
 
+test("a local read through a covering prefix route is NOT_FOUND, and through its exact route lists", async () => {
+	const origin = new OriginProducer();
+	for (const prefix of ["room", "room/bob"]) {
+		const dynamic = origin.dynamic(Path.from(prefix));
+		void (async () => {
+			for await (const request of dynamic.requested()) {
+				const served = new BroadcastProducer();
+				served.createTrack("video");
+				request.accept(served);
+			}
+		})();
+	}
+	const consumer = origin.consume();
+	const alice = consumer.request(Path.from("room/alice"));
+	const bob = consumer.request(Path.from("room/bob"));
+	await settle();
+
+	const covered = alice.active.peek();
+	if (!covered) throw new Error("expected the covering route to serve");
+	expect(() => covered.tracks()).toThrow(NotFound);
+	// Every handle cloned from it refuses too.
+	expect(() => covered.clone().tracks()).toThrow(NotFound);
+
+	const exact = bob.active.peek();
+	if (!exact) throw new Error("expected the exact route to serve");
+	const tracks = exact.tracks();
+	expect(await next(tracks)).toBe("+video");
+	expect(await next(tracks)).toBe("synced");
+	tracks.close();
+	origin.close();
+});
+
 test("a listing over a session carries each track's info, end to end", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -396,6 +428,27 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 	broadcast.close();
 	client.abort();
 	server.abort();
+});
+
+test("an epoch-pinned front served through a covering prefix route is NOT_FOUND", async () => {
+	const origin = new OriginProducer();
+	const dynamic = origin.dynamic(Path.from("room"), { epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
+	void (async () => {
+		for await (const request of dynamic.requested()) {
+			const served = new BroadcastProducer();
+			served.createTrack("video");
+			request.accept(served);
+		}
+	})();
+	const request = origin.consume().request(Path.from("room/alice"));
+	await settle();
+	const front = request.active.peek();
+	if (!front) throw new Error("expected the covering route to serve");
+	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	// A later reader asks again, and is refused again.
+	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	request.close();
+	origin.close();
 });
 
 test("lite-06 cannot list over a session", async () => {

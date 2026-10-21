@@ -106,9 +106,6 @@ export interface OriginConsumer {
 	// pending: /quest/m1/public-model/answer.md
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
 	demand(path: Path.Valid, epoch?: Epoch.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
-	// pending: /quest/m1/public-model/answer.md
-	/** Whether the route serving `path` claims it only through a shorter prefix, so it names no broadcast to list. */
-	covered(path: Path.Valid): boolean;
 }
 
 // pending: /quest/m1/public-model/answer.md

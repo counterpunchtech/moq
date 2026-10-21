@@ -1019,9 +1019,16 @@ export class Front {
 					listing.next = undefined;
 					try {
 						listing.reader = this.#source?.wire.tracks();
-					} catch {
+					} catch (err) {
 						// A closing source lists nothing more; the front moves off it soon.
 						listing.reader = undefined;
+						// A live one refuses: served through a route claiming a prefix, it names
+						// nothing to list. A later reader asks again.
+						if (listing.source && listing.source.from.closed.peek() === undefined) {
+							stop();
+							lister.abort(err instanceof Error ? err : new Error(String(err)));
+							continue;
+						}
 					}
 				}
 				const reader = listing.reader;
