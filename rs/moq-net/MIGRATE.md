@@ -14,6 +14,11 @@ The handle backs one active session at a time, plus the ones draining after a GO
 A handle a session creates for itself still ends with that session.
 On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` failing with that code.
 
+### Anchors can name a time (#6074)
+
+`track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
+Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.
