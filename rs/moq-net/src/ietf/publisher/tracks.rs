@@ -2,8 +2,8 @@
 //!
 //! Every track of every broadcast under the request's prefix is listed, later tracks and
 //! broadcasts included, but no track's data is pushed unasked. A FORWARD=0 request gets a
-//! paused PUBLISH per track, which carries the track's properties and a PUBLISH_DONE once
-//! the track is no longer listed; the subscriber resumes one with REQUEST_UPDATE to get its
+//! paused PUBLISH per track, which carries the track's properties and an error PUBLISH_DONE
+//! once the track is no longer listed; the subscriber resumes one with REQUEST_UPDATE to get its
 //! data, served from the cache as a SUBSCRIBE would be. A FORWARD=1 request asks for every
 //! track's data, which no draft lets us downgrade, so from draft-19 each track is answered
 //! with PUBLISH_SKIPPED and the subscriber SUBSCRIBEs to what it wants. Draft-18 has no such
@@ -1047,10 +1047,10 @@ where
 	}
 }
 
-/// How a PUBLISH whose track is no longer listed ends: in error, since the track may go on
-/// elsewhere, as when its broadcast's route is withdrawn, and a clean end would tell the
-/// subscriber it is over. A track that finished is unlisted the same way, so it ends in
-/// error too.
+/// How a PUBLISH whose track is no longer listed ends: always in error, never TRACK_ENDED.
+/// A track that leaves the listing may go on elsewhere, as when its broadcast's route is
+/// withdrawn, and a clean end would tell the subscriber it is over. A finished track is
+/// unlisted the same way, so it deliberately ends in error too.
 fn unlisted() -> Served {
 	Served::Track(Err(Error::NotFound))
 }
