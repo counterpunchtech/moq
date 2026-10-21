@@ -349,32 +349,44 @@ impl StreamsState {
 
         let (new_bytes, closed) =
             rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
+        let stopped = rs.stopped;
+        self.spend(new_bytes);
+
+        let transmit = if !stopped {
+            self.events.push_back(StreamEvent::Readable { id });
+            self.lease_readable(id);
+            self.unlooked.insert(id);
+            // Credit released while the peer still had room may not have been worth a frame
+            // then; it is now that the peer is about to block.
+            ShouldTransmit(self.max_data_due())
+        } else {
+            // Stopped streams become closed instantly on FIN, so check whether we need to clean up
+            if closed {
+                let rs = self.recv.remove(&id).flatten().unwrap();
+                self.stream_recv_freed(id, rs);
+            }
+
+            // We don't buffer data on stopped streams, so issue flow control credit immediately
+            self.add_read_credits(new_bytes)
+        };
+        Ok(self.evict_after_arrival(transmit))
+    }
+
+    /// Count `new_bytes` of connection credit the peer spent.
+    fn spend(&mut self, new_bytes: u64) {
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);
         // Credit only returns between arrivals, so an arrival is when the most is spent.
         let spent = (self.data_recvd + self.receive_window).saturating_sub(self.local_max_data);
         self.peak_spent = self.peak_spent.max(spent);
+    }
 
-        if !rs.stopped {
-            self.events.push_back(StreamEvent::Readable { id });
-            self.lease_readable(id);
-            self.unlooked.insert(id);
-            // The frame that spends the last of the window is when every reader may be stuck.
-            let evicted = self.evict_if_stuck();
-            // Credit released while the peer still had room may not have been worth a frame
-            // then; it is now that the peer is about to block.
-            return Ok(ShouldTransmit(
-                self.max_data_due() || evicted.is_some_and(ShouldTransmit::should_transmit),
-            ));
-        }
-
-        // Stopped streams become closed instantly on FIN, so check whether we need to clean up
-        if closed {
-            let rs = self.recv.remove(&id).flatten().unwrap();
-            self.stream_recv_freed(id, rs);
-        }
-
-        // We don't buffer data on stopped streams, so issue flow control credit immediately
-        Ok(self.add_read_credits(new_bytes))
+    /// Rerun the stuck check after an arrival, which may spend the last of the window or return
+    /// credit that only pays shrink debt, adding any `MAX_DATA` it frees to `transmit`.
+    fn evict_after_arrival(&mut self, transmit: ShouldTransmit) -> ShouldTransmit {
+        let evicted = self.evict_if_stuck();
+        ShouldTransmit(
+            transmit.should_transmit() || evicted.is_some_and(ShouldTransmit::should_transmit),
+        )
     }
 
     /// Process incoming RESET_STREAM frame
@@ -423,8 +435,9 @@ impl StreamsState {
             // Redundant reset
             return Ok(ShouldTransmit(false));
         };
-        self.data_recvd = self.data_recvd.saturating_add(new_bytes);
-        let credit = if rs.stopped {
+        let stopped = rs.stopped;
+        self.spend(new_bytes);
+        let credit = if stopped {
             // Stopped streams should be disposed immediately on reset, and have already returned
             // read credits up to their highest offset.
             let rs = self.recv.remove(&id).flatten().unwrap();
@@ -433,14 +446,16 @@ impl StreamsState {
         } else {
             self.events.push_back(StreamEvent::Readable { id });
             self.lease_readable(id);
+            self.unlooked.insert(id);
             freed
         };
 
         // Update connection-level flow control
-        Ok(match credit {
+        let transmit = match credit {
             0 => ShouldTransmit(false),
             credit => self.add_read_credits(credit),
-        })
+        };
+        Ok(self.evict_after_arrival(transmit))
     }
 
     /// Process incoming `STOP_SENDING` frame
@@ -3588,6 +3603,80 @@ mod tests {
         assert_eq!(client.credit_stats().evicted, 1);
         assert_eq!(readable(&mut client), [ids[2]]);
         assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// Credit a stopped stream's arrival returns may only pay a shrunk window's debt, leaving the
+    /// peer blocked behind readers that are already waiting, so the arrival reruns the stuck pass.
+    #[test]
+    fn stopped_arrival_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        data(&mut client, ids[0], 0, 1, false);
+        let _ = stop(&mut client, ids[0], 0);
+        for id in [ids[1], ids[2]] {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+        readable(&mut client);
+
+        // The peer spends the rest of its credit on the stopped stream; the debt absorbs it.
+        data(&mut client, ids[0], 1, WINDOW as usize, false);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]], "newest first");
+        assert!(
+            client.local_max_data > client.data_recvd,
+            "the peer has credit"
+        );
+    }
+
+    /// A reset that wakes a waiting reader leaves it ready to observe the reset and release its
+    /// credit, so another reader's stuck check must not evict anyone in the meantime.
+    #[test]
+    fn reset_wake_is_not_stuck() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        data(&mut client, ids[0], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        assert!(matches!(
+            wait(&mut client, ids[0], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        data(&mut client, ids[1], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+
+        reset(&mut client, ids[0], WINDOW as u32);
+        assert!(matches!(
+            wait(&mut client, ids[1], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert_eq!(
+            wait(&mut client, ids[0], WINDOW as usize + 1),
+            Err(LeaseError::Reset(0u32.into()))
+        );
+    }
+
+    /// A reset's final size spends credit like data does, so it counts toward the peak.
+    #[test]
+    fn reset_counts_toward_peak() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 10, false);
+        reset(&mut client, id, 100);
+        assert_eq!(client.credit_stats().peak_spent, 100);
     }
 
     /// Bytes a reader took outlive an eviction until it stops the stream, so their credit
