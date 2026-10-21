@@ -4,7 +4,7 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
-### Rust embedders move to gstreamer 0.25
+### Rust embedders move to gstreamer 0.25 (#6169)
 
 Only Rust code that links `gstmoq` as a library is affected; pipelines and the loadable plugin are not.
 `plugin_init`, `plugin_register_static`, and the `glib::Enum` impls on `ConnectionStatus` and `MediaContainer` now use gstreamer 0.25 and glib 0.22 types, which need Rust 1.92.
