@@ -282,7 +282,7 @@ test("mutate removes a section", async () => {
 
 // Let the producer see a demand change, which the signal delivers in a microtask.
 async function settle(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
 
 // Publish `{"n":0}` through `{"n":3}`: a 7-byte snapshot and 21 bytes of deltas.

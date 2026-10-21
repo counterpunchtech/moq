@@ -226,7 +226,7 @@ async function groups(track: Track.Producer): Promise<[number, number | undefine
 
 // Let the producer see a demand change, which the signal delivers in a microtask.
 async function settle(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
 
 test("a joiner over the ratio gets a fresh header", async () => {
