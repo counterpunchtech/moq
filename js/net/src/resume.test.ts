@@ -1812,3 +1812,62 @@ test.each(["lands", "expired"])(
 		}
 	},
 );
+
+test("a datagram below the group floor does not keep a finite track's copy", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	await settle();
+	// The floor passes the datagram: a datagram read would only discard it.
+	sub.setGroups({ start: { included: 1 } });
+	ta.write(1);
+	ta.producer.finishAt({ group: 2, frame: 0 });
+	expect(drain(sub)).toEqual([1]);
+	expect(await sub.recvGroup()).toBeUndefined();
+	await settle();
+	expect(sub.closed.peek()).toBeNull();
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("a retained copy declaring another end after a clean end fails the reads", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+	try {
+		ta.write(0);
+		ta.write(2);
+		expect(drain(sub)).toEqual([0, 2]);
+
+		// The new route ends at 3, while the old one still owes group 1.
+		tb.write(2);
+		tb.producer.finishAt({ group: 3, frame: 0 });
+		tb.producer.close();
+		front.serve(b.consume());
+		await settle();
+		ta.write(1);
+		await settle();
+		expect(sub.closed.peek()).toBeNull();
+
+		// The copy still holding group 1 claims another end: its content is refused.
+		ta.producer.finishAt({ group: 5, frame: 0 });
+		await settle();
+		expect(sub.end()).toEqual({ group: 3, frame: 0 });
+		await expect(sub.recvGroup()).rejects.toThrow("changed its properties");
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});

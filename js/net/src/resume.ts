@@ -275,6 +275,8 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
+	/** A copy declared another end after the track ended cleanly: reads fail with this. */
+	#refused?: Error;
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
@@ -470,7 +472,7 @@ class Reader implements ResumeSource {
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered): Recv {
-		if (this.#closed) return { kind: "done" };
+		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#delivered = delivered;
 		this.sync();
 		this.#groupsRead = true;
@@ -540,7 +542,7 @@ class Reader implements ResumeSource {
 	}
 
 	tryDatagram(delivered: Delivered): RecvDatagram {
-		if (this.#closed) return { kind: "done" };
+		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#delivered = delivered;
 		this.sync();
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
@@ -837,6 +839,10 @@ class Reader implements ResumeSource {
 			return;
 		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
 			if (declared.frame === 0) this.#declared = end;
+		} else if (this.#ended) {
+			// `closed` already settled cleanly: stop reading the copies that claim other content.
+			this.#refused = new Incompatible(this.route.name);
+			this.close(this.#refused);
 		} else {
 			this.#shell.close(new Incompatible(this.route.name));
 		}

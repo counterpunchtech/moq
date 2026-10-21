@@ -1849,9 +1849,18 @@ export class Subscriber {
 				);
 		hooks.spent = (subscriber, start, end, delivered) => {
 			const state = subscriber.#state;
+			// A datagram outside the cursor is gone for good, as a read would discard it.
+			const cursor = subscriber.#cursor.peek();
+			const readable = state.datagrams
+				.peek()
+				.some(
+					(datagram) =>
+						datagram.sequence >= cursor.start &&
+						(cursor.end === undefined || datagram.sequence < cursor.end),
+				);
 			return (
 				(state.closed.peek() !== undefined || subscriber.#complete()) &&
-				state.datagrams.peek().length === 0 &&
+				!readable &&
 				!hooks.hasUnreadGroup(subscriber, start, end, delivered)
 			);
 		};
