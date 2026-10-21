@@ -25,16 +25,12 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
-/// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
-
 /// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// Demand can cross a Lite hop before the producer's retention bound is
-		// known, so use the largest duration that remains wire-encodable.
-		max_delay: Duration::from_millis(MAX_SAFE_DELAY_MS),
+		// No Max Age is the publisher's retention alone, whatever it turns out to be.
+		max_delay: None,
 		..Default::default()
 	}
 }
@@ -1234,7 +1230,7 @@ where
 					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 					if let Some(max_age) = msg.max_age {
-						subscription.max_delay = Duration::from_millis(max_age);
+						subscription.max_delay = Some(Duration::from_millis(max_age));
 					}
 					// A range that resolves without the live edge has a fixed start, which is no
 					// join: bound the subscription before subscribing so the ratio never judges it.
@@ -1736,7 +1732,7 @@ where
 		}
 		if let Some(max_age) = update.max_age {
 			let mut subscription = serve.track.subscription();
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
@@ -12822,7 +12818,7 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.max_delay.as_millis(), MAX_SAFE_DELAY_MS as u128);
+		assert_eq!(subscription.max_delay, None, "no Max Age is the publisher's retention alone");
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber

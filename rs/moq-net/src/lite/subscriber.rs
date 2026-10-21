@@ -5800,7 +5800,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						let start_moved = active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = subscription.max_delay;
+						active.max_delay = wire_max_delay(subscription.max_delay);
 						// A lowered floor owes groups nobody asked for until now, in the track's
 						// arrivals that held fetches read as well as in the session's tail.
 						let lowered = subscription.start().map(|start| {
@@ -5811,7 +5811,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							producer.demand_arrivals(groups.clone());
 						}
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(tail::grace(subscription.max_delay));
+							tail.set_grace(tail::grace(subscription.budget()));
 							if let Some(groups) = lowered {
 								tail.demand(groups, self.subscriber.runtime.now());
 							}
@@ -5886,7 +5886,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_delay)));
+		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.budget())));
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -5977,6 +5977,12 @@ enum Begin<S: crate::transport::poll::Session> {
 	Establish(Establish<S>),
 }
 
+/// The `Subscriber Max Age` a SUBSCRIBE carries for `max_delay`: `None` is the publisher's
+/// max age alone, which the largest value every peer can read leaves to its clamp.
+fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration {
+	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
+}
+
 /// Buffer the current SUBSCRIBE parameters with an updated end. The caller flushes.
 fn buffer_update<S: crate::transport::poll::Session>(
 	active: &mut SubStream<S>,
@@ -6043,7 +6049,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: self.subscription.priority,
-						max_delay: self.subscription.max_delay,
+						max_delay: wire_max_delay(self.subscription.max_delay),
 						start_group: bounds.start_group,
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
@@ -6096,7 +6102,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		SubStream {
 			stream,
 			id: self.id,
-			max_delay: self.subscription.max_delay,
+			max_delay: wire_max_delay(self.subscription.max_delay),
 			start: self.subscription.start(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
@@ -6455,7 +6461,7 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// Serve on-demand fetches of uncached groups from this session.
 	dynamic: track::Dynamic,
 	sub: Sub<S>,
-	fetches: kio::Tasks<FetchServeRun<S>>,
+	fetches: kio::Tasks<FillServeRun<S>>,
 	/// Fetches a pre-lite-05 upstream has no FETCH for, held for the live feed.
 	feed_fetches: FeedFetches,
 	// A dedicated close-watch handle for the session-died arm.
@@ -6508,7 +6514,7 @@ struct FeedFetches {
 }
 
 struct HeldFetch {
-	req: group::Request,
+	req: track::GroupFill,
 	waiter: kio::Waiter,
 }
 
@@ -6539,7 +6545,14 @@ impl FeedFetches {
 		}
 	}
 
-	fn push(&mut self, req: group::Request, feed: track::Consumer) {
+	/// Hold every group of `fill` for the live feed.
+	fn push_fill(&mut self, fill: track::Fill, feed: &track::Consumer) {
+		for sequence in fill.start().group..fill.end() {
+			self.push(fill.group(sequence), feed.clone());
+		}
+	}
+
+	fn push(&mut self, req: track::GroupFill, feed: track::Consumer) {
 		let Some(arrivals) = feed.arrivals() else {
 			req.reject(Error::NotFound);
 			return;
@@ -6553,7 +6566,7 @@ impl FeedFetches {
 		// The last caller may leave and a replacement attempt arrive before the
 		// queued cancellation gets polled. The old attempt owns no callers now.
 		if let Some(previous) = self.held.remove(&sequence) {
-			debug_assert!(previous.req.demand().poll_unused(&kio::Waiter::noop()).is_ready());
+			debug_assert!(previous.req.poll_unused(&kio::Waiter::noop()).is_ready());
 		}
 		if self.held.len() >= self.max {
 			req.reject(Error::TooManyRequests);
@@ -6625,7 +6638,7 @@ impl FeedFetches {
 			{
 				self.polled += 1;
 			}
-			if held.req.demand().poll_unused(&held.waiter).is_ready() {
+			if held.req.poll_unused(&held.waiter).is_ready() {
 				settled.push((held.req, None));
 				continue;
 			}
@@ -6756,16 +6769,17 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// (1) Track demand: a fetch, a subscription change, or the origin
 					// handing the track to another route.
 
-					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
-					match self.dynamic.poll_requested_group(waiter) {
-						Poll::Ready(Ok(req)) => {
+					// A fill is bounded and serves readers already waiting, so serve it ahead of
+					// subscription churn.
+					match self.dynamic.poll_requested_fill(waiter) {
+						Poll::Ready(Ok(fill)) => {
 							if self.supports_fetch {
 								self.fetches
-									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
+									.push(FillServeRun::new(serve.clone(), fill, self.timescale));
 							} else {
 								// No FETCH on the wire: wait for the live feed, which a
 								// subscription arriving alongside may still be opening.
-								self.feed_fetches.push(req, self.serving.consume());
+								self.feed_fetches.push_fill(fill, &self.serving.consume());
 							}
 							continue;
 						}
@@ -6909,10 +6923,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered.
-										if let Some(requested) = active.requested
-											&& let Ok(mut tail) = active.tail.write()
-										{
-											tail.account(requested.group..start.group, serve.subscriber.runtime.now());
+										// Recorded as dropped too, so a reader asking for them
+										// later is told so rather than fetching what the publisher
+										// already gave up.
+										if let Some(requested) = active.requested {
+											if let Ok(mut tail) = active.tail.write() {
+												tail.account(requested.group..start.group, serve.subscriber.runtime.now());
+											}
+											self.serving.drop_groups(requested.group..start.group);
 										}
 									}
 									// The publisher will never send these groups, so they
@@ -6959,7 +6977,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
 									tail.set_grace(tail::grace(
-										subscription.map(|sub| sub.max_delay).unwrap_or_default(),
+										subscription.map(|sub| sub.budget()).unwrap_or_default(),
 									));
 									tail.expire(serve.subscriber.runtime.now());
 								}
@@ -6989,6 +7007,59 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 	}
 }
 
+/// Serves one fill a group at a time, newest first for a descending reader, each with its
+/// own [`FetchServeRun`], until it is answered or nobody waits on it.
+struct FillServeRun<S: crate::transport::poll::Session> {
+	serve: TrackServe<S>,
+	fill: track::Fill,
+	timescale: Option<Timescale>,
+	run: Option<(u64, FetchServeRun<S>)>,
+}
+
+impl<S: crate::transport::poll::Session> FillServeRun<S> {
+	fn new(serve: TrackServe<S>, fill: track::Fill, timescale: Option<Timescale>) -> Self {
+		Self {
+			serve,
+			fill,
+			timescale,
+			run: None,
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> kio::Task for FillServeRun<S> {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let last = match &mut self.run {
+				Some((sequence, run)) => {
+					ready!(run.poll(waiter));
+					let sequence = *sequence;
+					self.run = None;
+					Some(sequence)
+				}
+				None => None,
+			};
+			// Withdrawn: nobody waits on what is left, so it records nothing.
+			if self.fill.poll_unused(waiter).is_ready() {
+				return Poll::Ready(());
+			}
+			let Some(sequence) = self.fill.next() else {
+				return Poll::Ready(());
+			};
+			// Every run answers its group, so the same one coming back is a bug; ending the
+			// fill names it dropped rather than fetching it forever.
+			if last == Some(sequence) {
+				debug_assert!(false, "fill group {sequence} left unanswered");
+				return Poll::Ready(());
+			}
+			let run = FetchServeRun::new(self.serve.clone(), self.fill.group(sequence), self.timescale);
+			self.run = Some((sequence, run));
+		}
+	}
+}
+
 /// Serves one downstream fetch end-to-end on its own bidi stream: send FETCH,
 /// then fill the group from the bare FRAME messages that follow. The timescale
 /// comes from this track's TRACK_INFO (already known), and the group sequence
@@ -7005,16 +7076,16 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 
 enum FetchRunState<S: crate::transport::poll::Session> {
 	Open {
-		request: Option<group::Request>,
+		request: Option<track::GroupFill>,
 	},
 	Send {
-		request: Option<group::Request>,
+		request: Option<track::GroupFill>,
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
 	/// Flushed; waiting for the publisher to answer before accepting.
 	Answer {
-		request: Option<group::Request>,
+		request: Option<track::GroupFill>,
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
@@ -7023,7 +7094,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 		producer: crate::recv::Group,
 		// The accepted request's demand: fetches that joined it but have not yet
 		// picked the group up from the cache.
-		joined: kio::Producer<track::FetchOutcome>,
+		joined: kio::Producer<track::FillOutcome>,
 		// Boxed so the other states stay small; one allocation per fetch.
 		ingest: Box<FrameIngest>,
 	},
@@ -7032,7 +7103,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> FetchRunState<S> {
 	/// The downstream request, while it waits on the publisher's answer.
-	fn request(&self) -> Option<&group::Request> {
+	fn request(&self) -> Option<&track::GroupFill> {
 		match self {
 			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_ref(),
 			Self::Ingest { .. } | Self::Done => None,
@@ -7041,7 +7112,7 @@ impl<S: crate::transport::poll::Session> FetchRunState<S> {
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
-	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
+	fn new(serve: TrackServe<S>, request: track::GroupFill, timescale: Option<Timescale>) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -7120,7 +7191,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
 			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
 			if let Some(request) = self.state.request()
-				&& request.demand().poll_unused(waiter).is_ready()
+				&& request.poll_unused(waiter).is_ready()
 			{
 				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
 				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
@@ -7252,7 +7323,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					let group_info = track::Info::default().with_timescale(self.timescale);
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
-					let joined = request.result.clone();
+					let joined = request.joined();
 					let mut producer = match request.accept(group_info) {
 						Ok(producer) => producer,
 						Err(err) => {

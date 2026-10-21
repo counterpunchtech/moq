@@ -1425,7 +1425,7 @@ impl Recover {
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
-		Some(reader.mirrored.max_delay)
+		Some(reader.mirrored.budget())
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.

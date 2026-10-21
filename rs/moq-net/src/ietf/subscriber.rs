@@ -2756,8 +2756,7 @@ where
 			super::max_age::millis(
 				aggregate
 					.as_ref()
-					.map(|s| s.max_delay)
-					.unwrap_or(Duration::from_millis(super::max_age::MAX_MILLIS)),
+					.map_or(Duration::MAX, |s| s.budget()),
 			)
 		});
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
@@ -3067,7 +3066,7 @@ where
 			Idle,
 			Revoked,
 			Done(Result<u64, Error>),
-			Fetch(group::Request),
+			Fill(track::Fill),
 			Update(Update),
 		}
 
@@ -3119,8 +3118,8 @@ where
 						fetch_done = true;
 					}
 					// An error is the track closing, which the arms below report.
-					if let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(waiter) {
-						return Poll::Ready(End::Fetch(request));
+					if let Poll::Ready(Ok(requested)) = dynamic.poll_requested_fill(waiter) {
+						return Poll::Ready(End::Fill(requested));
 					}
 					let _ = group_fetches.poll(waiter);
 					// A group past the answer's Largest also makes the copy current, so a join
@@ -3139,7 +3138,7 @@ where
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
 							if max_age_supported {
-								wanted_max_age = Some(super::max_age::millis(subscription.max_delay));
+								wanted_max_age = Some(super::max_age::millis(subscription.budget()));
 							}
 						}
 					}
@@ -3210,13 +3209,10 @@ where
 						revoked = true;
 						break true;
 					}
-					End::Fetch(request) => {
-						let fetch = self.clone().run_group_fetch(
-							broadcast_path.to_owned(),
-							track_name.to_owned(),
-							request,
-							timescale,
-						);
+					End::Fill(requested) => {
+						let fetch = self
+							.clone()
+							.serve_fill(broadcast_path.to_owned(), track_name.to_owned(), requested, timescale);
 						group_fetches.push(fetch);
 					}
 					End::Idle => {
@@ -3326,7 +3322,7 @@ where
 		let mut linger = crate::time::Deadline::new(&self.runtime);
 		let mut subscribed = idle.track.subscription().is_some();
 		enum Step {
-			Fetch(group::Request),
+			Fill(track::Fill),
 			Subscribe,
 			Expired,
 			Revoked,
@@ -3340,8 +3336,8 @@ where
 				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Step::Revoked);
 				}
-				if let Poll::Ready(Ok(request)) = idle.dynamic.poll_requested_group(waiter) {
-					return Poll::Ready(Step::Fetch(request));
+				if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_fill(waiter) {
+					return Poll::Ready(Step::Fill(fill));
 				}
 				let _ = group_fetches.poll(waiter);
 				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
@@ -3367,11 +3363,11 @@ where
 			.await;
 
 			match step {
-				Step::Fetch(request) => {
-					let fetch = self.clone().run_group_fetch(
+				Step::Fill(fill) => {
+					let fetch = self.clone().serve_fill(
 						broadcast_path.to_owned(),
 						track_name.to_owned(),
-						request,
+						fill,
 						idle.timescale,
 					);
 					group_fetches.push(fetch);
@@ -4852,6 +4848,26 @@ where
 		Ok(Fetched::Frame)
 	}
 
+	/// Serve a fill a group at a time, newest first for a descending reader, until it is
+	/// answered or nobody waits on it.
+	async fn serve_fill(self, broadcast: PathOwned, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+		{
+			// Every fetch answers its group, so the same one coming back is a bug; ending the
+			// fill names it dropped rather than fetching it forever.
+			if last == Some(sequence) {
+				debug_assert!(false, "fill group {sequence} left unanswered");
+				return;
+			}
+			last = Some(sequence);
+			self.clone()
+				.run_group_fetch(broadcast.clone(), name.clone(), fill.group(sequence), timescale)
+				.await;
+		}
+	}
+
 	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
 	/// draft-20 filtered) FETCH for this subscription's track. It asks from the frame the reader wants through the end
 	/// of the group, so a publisher that evicted the prefix can still answer.
@@ -4863,7 +4879,7 @@ where
 		self,
 		broadcast: PathOwned,
 		name: String,
-		request: group::Request,
+		request: track::GroupFill,
 		timescale: Option<Timescale>,
 	) {
 		let validity = self.validity.start();
@@ -4955,7 +4971,7 @@ where
 					if let Poll::Ready(res) = response {
 						return Poll::Ready(Some(res));
 					}
-					request.demand().poll_unused(waiter).map(|_| None)
+					request.poll_unused(waiter).map(|_| None)
 				})
 				.await
 			}
@@ -5030,9 +5046,9 @@ where
 		let end = (end.group == sequence).then_some(end.object);
 
 		// Joined fetches still count until they pick the accepted group up from the cache.
-		let joined = request.result.clone();
+		let joined = request.joined();
 		// The track was accepted before any fetch was asked, so it keeps that info.
-		let track = request.state.clone();
+		let track = request.track();
 		let mut producer = match request.accept(None) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.

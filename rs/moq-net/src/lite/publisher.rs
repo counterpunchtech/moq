@@ -92,7 +92,7 @@ struct Shared<S: crate::transport::poll::Session> {
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
+pub(super) const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 
 /// The budget to serve a peer with, given what its wire could tell us.
 ///
@@ -101,10 +101,10 @@ const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 /// as real time would discard backlog a legacy subscriber never declined, so fall
 /// back to a window wide enough not to drop and leave enforcement to the receiver,
 /// exactly as the IETF path does for the same reason.
-fn serving_max_delay(version: Version, requested: Duration) -> Duration {
+fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> {
 	match version.carries_max_delay() {
-		true => requested,
-		false => Duration::from_millis(MAX_SAFE_DELAY_MS),
+		true => Some(requested),
+		false => Some(Duration::from_millis(MAX_SAFE_DELAY_MS)),
 	}
 }
 
