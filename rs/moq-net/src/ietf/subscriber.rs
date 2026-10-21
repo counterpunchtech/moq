@@ -7107,7 +7107,7 @@ mod tests {
 					let requested = track.dynamic();
 					let mut pending = Box::pin(track.consume().fetch_group(0, None));
 					assert!(futures::poll!(pending.as_mut()).is_pending());
-					let group = requested.requested_group().await.expect("group request");
+					let group = requested.requested_fill_group().await.expect("group request");
 					fetch = Some((track, pending));
 					moq_clock::sim::spawn(subscriber.run_group_fetch(
 						Path::new("broadcast").to_owned(),
@@ -14713,8 +14713,8 @@ mod stitch_tests {
 			let dynamic = self.track.dynamic();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let request = dynamic.requested_group().await.expect("group request");
-			let track = request.state.clone();
+			let request = dynamic.requested_fill_group().await.expect("group request");
+			let track = request.track();
 			let producer = request.accept(None).unwrap();
 			let consumer = producer.consume();
 			let slot = kio::Producer::new(GroupFetch::Ready {
@@ -15313,8 +15313,8 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("group request");
-		let outcome = request.result.clone();
+		let request = dynamic.requested_fill_group().await.expect("group request");
+		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),
 			"video".into(),
@@ -15335,7 +15335,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().rejected,
+				outcome.read().refused(GROUP).cloned(),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
@@ -15556,7 +15556,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("no group requested");
+		let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -15623,7 +15623,7 @@ mod joining_fetch_tests {
 					let mut fetch =
 						std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
 					assert!(futures::poll!(fetch.as_mut()).is_pending());
-					let request = dynamic.requested_group().await.expect("no group requested");
+					let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 					subscriber
 						.clone()
@@ -15738,7 +15738,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_group().await.expect("no group requested");
+		let request = dynamic.requested_fill_group().await.expect("no group requested");
 
 		let serving = moq_clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),

@@ -10137,7 +10137,7 @@ mod serve_tests {
 			let request = h._broadcast.reserve_track("cam").unwrap();
 			let dynamic = request.dynamic();
 			let fetching = request.consume().fetch_group(4, None);
-			let mut fetched = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+			let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 			for object in 0..2 {
 				fetched.write_frame(None, format!("4-{object}").into_bytes()).unwrap();
 			}

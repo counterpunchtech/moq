@@ -98,14 +98,11 @@ pub(super) const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 ///
 /// A version without the field decodes as [`Duration::ZERO`], which is
 /// indistinguishable from a peer genuinely asking for the live edge. Serving that
-/// as real time would discard backlog a legacy subscriber never declined, so fall
-/// back to a window wide enough not to drop and leave enforcement to the receiver,
-/// exactly as the IETF path does for the same reason.
+/// as real time would discard backlog a legacy subscriber never declined, so serve the
+/// publisher's max age alone and leave enforcement to the receiver, exactly as the IETF
+/// path does for the same reason.
 fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> {
-	match version.carries_max_delay() {
-		true => Some(requested),
-		false => Some(Duration::from_millis(MAX_SAFE_DELAY_MS)),
-	}
+	version.carries_max_delay().then_some(requested)
 }
 
 /// Position a subscription's read cursor for the wire serving it.
@@ -4980,17 +4977,14 @@ mod serve_group_test {
 	fn a_version_without_the_field_serves_a_non_dropping_budget() {
 		for version in [Version::Lite01, Version::Lite02] {
 			let max_delay = serving_max_delay(version, Duration::ZERO);
-			assert!(
-				max_delay >= Duration::from_secs(86_400),
-				"{version:?} must not be served as real time: {max_delay:?}"
-			);
+			assert_eq!(max_delay, None, "{version:?} must not be served as real time");
 		}
 
 		// A version that does carry it is taken at its word, zero included.
-		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Duration::ZERO);
+		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Some(Duration::ZERO));
 		assert_eq!(
 			serving_max_delay(Version::Lite05, Duration::from_secs(3)),
-			Duration::from_secs(3)
+			Some(Duration::from_secs(3))
 		);
 	}
 
@@ -6070,7 +6064,9 @@ mod serve_group_test {
 			drop(track);
 			run.await.unwrap();
 		}
-		assert_eq!(drops(&mut writer, &log, version).await, [(4, 4), (0, 1), (3, 3)]);
+		// The feed gave up on 0, 1 and 3 before the update, so they are misses named as the
+		// cursor judges them, ahead of the stale group.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3), (4, 4)]);
 	}
 
 	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
@@ -6117,7 +6113,8 @@ mod serve_group_test {
 		track.finish_at(track::Position::group(6)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
-		assert_eq!(drops(&mut writer, &log, version).await, [(1, 4)]);
+		// The feed gives up on 2..5 once its grace passes, a miss nothing fills.
+		assert_eq!(drops(&mut writer, &log, version).await, [(2, 4), (1, 1)]);
 	}
 
 	/// A raised floor sends no early drop: a later update may lower it again, and the
@@ -7718,12 +7715,12 @@ mod tests {
 			}
 		}
 		let _request = groups
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("one shared fetch")
 			.unwrap();
 		assert!(
-			groups.requested_group().now_or_never().is_none(),
+			groups.requested_fill_group().now_or_never().is_none(),
 			"same group coalesces in the model"
 		);
 		assert_eq!(

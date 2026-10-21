@@ -6,6 +6,10 @@
 //! under where the feed starts, or accounted for by the arrival ledger without being cached
 //! (evicted, or a gap the feed skipped). A hole the ledger still waits for is deferred and
 //! judged again as the feed moves.
+//!
+//! A start is no promise, since a group below it may still arrive late. A hole under it is
+//! asked at once, but a refusal is final only once the ledger gives up on it too; until
+//! then the live feed may still deliver it.
 
 use std::{
 	collections::BTreeSet,
@@ -39,6 +43,9 @@ pub(super) struct Misses {
 	judged: RangeSet<u64>,
 	/// Holes the live feed may still deliver, judged again on every probe.
 	deferred: RangeSet<u64>,
+	/// Asked under the feed's start and refused, never asked again: given up once the feed
+	/// gives up on them, unless they arrive first.
+	refused: RangeSet<u64>,
 	/// The fills this reader waits on.
 	joins: Vec<Join>,
 	/// The sequences of `joins` still unanswered.
@@ -160,25 +167,27 @@ impl Misses {
 					continue;
 				}
 			};
+			// Read only after the outcome's lock is released.
+			let state = state.read();
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
 				match answer {
 					Ok(()) => {
-						let state = state.read();
 						for sequence in groups {
 							match state.lookup.get(&sequence).is_some_and(|slot| !slot.is_aborted()) {
 								true => {
 									self.filled.insert(sequence);
 								}
-								false => self.give_up(sequence..sequence + 1, given_up),
+								false => self.settle(&state, sequence..sequence + 1, given_up),
 							}
 						}
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
 					// A drop the track recorded is named by the drop cursor already.
-					Err(_) => self.give_up(groups, given_up),
+					Err(_) => self.settle(&state, groups, given_up),
 				}
 			}
+			drop(state);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
 		retry
@@ -193,6 +202,7 @@ impl Misses {
 		target: impl FnOnce() -> RangeInclusiveSet<u64>,
 		drift: &Drift,
 		given_up: &mut GivenUp,
+		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut asks = RangeSet::new();
 		// The feed's start is unknown until the serving session resolves it, and readers
@@ -218,10 +228,12 @@ impl Misses {
 		self.at = Some(at);
 
 		let low = state.live_floor.unwrap_or(0);
+		// A run's exclusive end must exist, so the last sequence is never judged.
+		let top = newest.min(u64::MAX - 1);
 		let mut span = RangeSet::new();
-		if low <= newest {
-			for run in target().overlapping(&(low..=newest)) {
-				span.insert((*run.start()).max(low)..(*run.end()).min(newest) + 1);
+		if low <= top {
+			for run in target().overlapping(&(low..=top)) {
+				span.insert((*run.start()).max(low)..(*run.end()).min(top) + 1);
 			}
 		}
 		// What left the span is forgotten, so it is judged afresh if it comes back.
@@ -241,41 +253,49 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 
-		let start = state.start_sequence.or(state.arrivals.first());
-		let datagrams: BTreeSet<u64> = state.datagrams.iter().map(|datagram| datagram.sequence).collect();
+		let now = state.cache.pool().now_wall();
+		let start = state.start_sequence.unwrap_or(0);
+		let mut wake: Option<crate::time::Instant> = None;
 		for run in candidates.iter() {
 			for hole in holes(state, run.clone()) {
 				for hole in self.unclaimed(state, hole) {
-					let Some(start) = start else {
-						self.deferred.insert(hole);
-						continue;
-					};
-					// Below where the feed starts: it will never come live.
-					if hole.start < start {
-						asks.insert(hole.start..hole.end.min(start));
-					}
-					let above = hole.start.max(start)..hole.end;
-					if above.is_empty() {
-						continue;
-					}
-					// Accounted for by the feed and not cached: evicted, or skipped. A buffered
-					// datagram arrived and is served as one.
-					let mut from = above.start;
-					for arrived in state.arrivals.accounted(above.clone()) {
-						if from < arrived.start {
-							self.deferred.insert(from..arrived.start);
+					let (unfed, awaited) = state.unfed(hole, now);
+					for run in unfed.iter() {
+						for refused in self.refused.overlapping(run).cloned().collect::<Vec<_>>() {
+							let gone = refused.start.max(run.start)..refused.end.min(run.end);
+							self.refused.remove(gone.clone());
+							self.give_up(gone, given_up);
 						}
-						asks.insert(arrived.clone());
-						for sequence in datagrams.range(arrived.clone()) {
-							asks.remove(*sequence..*sequence + 1);
-						}
-						from = arrived.end;
+						asks.insert(run.clone());
 					}
-					if from < above.end {
-						self.deferred.insert(from..above.end);
+					for (run, folds) in awaited {
+						// Under the feed's start: asked now rather than after the grace.
+						let early = run.start..run.end.min(start);
+						if !early.is_empty() {
+							asks.insert(early);
+						}
+						self.deferred.insert(run);
+						wake = match (wake, folds) {
+							(Some(a), Some(b)) => Some(a.min(b)),
+							(a, b) => a.or(b),
+						};
 					}
 				}
 			}
+		}
+		for run in self.refused.iter() {
+			asks.remove(run.clone());
+		}
+		for run in asks.iter() {
+			self.deferred.remove(run.clone());
+		}
+		// A buffered datagram arrived, and is served as one.
+		for datagram in &state.datagrams {
+			asks.remove(datagram.sequence..datagram.sequence.saturating_add(1));
+		}
+		// A gap the feed still waits for becomes a miss when it folds.
+		if let Some(at) = wake {
+			state.cache.watch_wall(at, waiter);
 		}
 
 		// Starts never rewind, so a run whose newest group is stale under this reader's
@@ -334,6 +354,22 @@ impl Misses {
 		left.iter().cloned().collect()
 	}
 
+	/// Take in a fill's refusal of `groups`: final where the feed gave up on them too,
+	/// otherwise held until it does, since the live feed may still deliver them.
+	fn settle(&mut self, state: &TrackState, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+		let now = state.cache.pool().now_wall();
+		let mut left = RangeSet::new();
+		left.insert(groups.clone());
+		for run in state.unfed(groups, now).0.iter() {
+			left.remove(run.clone());
+			self.give_up(run.clone(), given_up);
+		}
+		for run in left.iter() {
+			self.refused.insert(run.clone());
+			self.deferred.insert(run.clone());
+		}
+	}
+
 	fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
 		if groups.is_empty() {
 			return;
@@ -343,8 +379,45 @@ impl Misses {
 	}
 }
 
+impl TrackState {
+	/// Split `hole`, which the cache holds nothing for, into what the live feed will never
+	/// deliver and the gaps it still waits for, with when each stops being waited for.
+	///
+	/// Never: accounted for by its arrivals (evicted, or a gap it skipped), or in a gap its
+	/// grace gave up on. A declared start is no promise: a group below it may still arrive.
+	#[allow(clippy::type_complexity)]
+	pub(super) fn unfed(
+		&self,
+		hole: ops::Range<u64>,
+		now: crate::time::Instant,
+	) -> (RangeSet<u64>, Vec<(ops::Range<u64>, Option<crate::time::Instant>)>) {
+		let mut unfed = RangeSet::new();
+		let mut awaited = Vec::new();
+		let mut from = hole.start;
+		let grace = self.arrivals.grace();
+		let mut gap = |groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self
+			.arrivals
+			.folds_at(groups.start, grace)
+		{
+			Some(at) if at <= now => unfed.insert(groups),
+			folds => awaited.push((groups, folds)),
+		};
+		for arrived in self.arrivals.accounted(from..hole.end) {
+			if from < arrived.start {
+				gap(from..arrived.start, &mut unfed);
+			}
+			from = arrived.end;
+			unfed.insert(arrived);
+		}
+		if from < hole.end {
+			gap(from..hole.end, &mut unfed);
+		}
+		(unfed, awaited)
+	}
+}
+
 /// The runs of `run` the cache holds nothing servable for.
-fn holes(state: &TrackState, run: ops::Range<u64>) -> Vec<ops::Range<u64>> {
+pub(super) fn holes(state: &TrackState, run: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 	let mut holes = Vec::new();
 	let mut from = run.start;
 	for (&sequence, slot) in state.lookup.range(run.clone()) {

@@ -320,7 +320,7 @@ mod tests {
 				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				max_delay: Duration::from_millis(rng.random_range(0..8)),
+				max_delay: Some(Duration::from_millis(rng.random_range(0..8))),
 				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending

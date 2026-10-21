@@ -60,7 +60,7 @@ pub(crate) struct Outcome {
 
 impl Outcome {
 	/// Why `sequence` was refused, if it was.
-	pub(super) fn refused(&self, sequence: u64) -> Option<&Error> {
+	pub(crate) fn refused(&self, sequence: u64) -> Option<&Error> {
 		self.refused
 			.iter()
 			.rev()
@@ -182,6 +182,12 @@ impl FillState {
 
 	pub(super) fn has_queued(&self) -> bool {
 		!self.queue.is_empty()
+	}
+
+	/// Whether no fill is pending, queued or taken.
+	#[cfg(test)]
+	pub(super) fn is_empty(&self) -> bool {
+		self.pending.is_empty() && self.queue.is_empty() && self.covers.is_empty()
 	}
 
 	/// Join every fill covering `ask`, queueing a new one for each run none covers. Returns
@@ -540,7 +546,7 @@ impl Inner {
 		}
 		if let Ok(mut state) = TrackState::modify(&self.state) {
 			for groups in unresolved.iter() {
-				state.drop_groups(groups.clone());
+				state.drop_unfed(groups.clone());
 			}
 		}
 		self.refuse(&unresolved, err);
@@ -613,28 +619,9 @@ impl Drop for Inner {
 		// since (the live feed delivered it) is no drop at all.
 		let left = self.unresolved(self.start.group..self.end);
 		if !left.is_empty() && self.result.is_used() {
-			let mut dropped = RangeSet::new();
 			if let Ok(mut state) = TrackState::modify(&self.state) {
 				for groups in left.iter() {
-					let mut from = groups.start;
-					let cached: Vec<u64> = state
-						.lookup
-						.range(groups.clone())
-						.filter(|(_, slot)| !slot.is_aborted())
-						.map(|(sequence, _)| *sequence)
-						.collect();
-					for sequence in cached {
-						if from < sequence {
-							dropped.insert(from..sequence);
-						}
-						from = sequence + 1;
-					}
-					if from < groups.end {
-						dropped.insert(from..groups.end);
-					}
-				}
-				for groups in dropped.iter() {
-					state.drop_groups(groups.clone());
+					state.drop_unfed(groups.clone());
 				}
 			}
 			if let Ok(mut outcome) = self.result.write() {
@@ -644,6 +631,27 @@ impl Drop for Inner {
 			}
 		}
 		self.fills.lock().end(self.id);
+	}
+}
+
+impl TrackState {
+	/// Record `groups` as dropped, as a fill's source answered, except what the cache holds
+	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
+	fn drop_unfed(&mut self, groups: ops::Range<u64>) {
+		// Until the serving session resolves where the feed starts, it may deliver anything.
+		if self.start_pending {
+			return;
+		}
+		let now = self.cache.pool().now_wall();
+		let mut dropped = RangeSet::new();
+		for hole in super::miss::holes(self, groups) {
+			for groups in self.unfed(hole, now).0.iter() {
+				dropped.insert(groups.clone());
+			}
+		}
+		for groups in dropped.iter() {
+			self.drop_groups(groups.clone());
+		}
 	}
 }
 
@@ -680,6 +688,12 @@ impl GroupFill {
 	/// Poll until no reader waits on the fill.
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.result.poll_unused(waiter).map(|_| ())
+	}
+
+	/// Whether a reader still waits on the fill.
+	#[cfg(test)]
+	pub(crate) fn is_used(&self) -> bool {
+		self.inner.result.is_used()
 	}
 
 	/// The fill's readers, for a session keeping a group alive while any still wait.

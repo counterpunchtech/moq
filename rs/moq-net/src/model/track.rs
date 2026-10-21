@@ -3166,6 +3166,21 @@ impl Dynamic {
 		fill::poll_requested(&self.state, &self.fills, waiter)
 	}
 
+	/// The next fill, which a test expects to name a single group.
+	#[cfg(test)]
+	pub(crate) fn poll_requested_fill_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupFill>> {
+		self.poll_requested_fill(waiter).map_ok(|fill| {
+			assert_eq!(fill.end() - fill.start().group, 1, "a one-group fill");
+			fill.group(fill.start().group)
+		})
+	}
+
+	/// [`Self::poll_requested_fill_group`], awaited.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) async fn requested_fill_group(&self) -> Result<GroupFill> {
+		kio::wait(|waiter| self.poll_requested_fill_group(waiter)).await
+	}
+
 	/// Watch subscriber demand without keeping the track alive.
 	pub fn demand(&self) -> Demand {
 		Demand::new(self.name.clone(), self.state.weak())
@@ -5411,7 +5426,7 @@ impl Cursor {
 		}
 		let asks = {
 			let state = self.state.read();
-			misses.judge(&state, (from, revision, cap), || admitted(window, from, cap), drift, &mut given_up)
+			misses.judge(&state, (from, revision, cap), || admitted(window, from, cap), drift, &mut given_up, waiter)
 		};
 		misses.ask(&fills, &asks, &asking, &mut given_up);
 		loop {
@@ -8733,19 +8748,19 @@ mod test {
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().max_delay, Duration::from_secs(10));
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
+		assert_eq!(subscriber.subscription().max_delay, Some(Duration::from_secs(10)));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
 			.update(Subscription::default().with_max_delay(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_millis(500)));
 
 		subscriber
 			.update(Subscription::default().with_max_delay(Duration::ZERO))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::ZERO));
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
@@ -8822,13 +8837,13 @@ mod test {
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
 	}
 
 	#[test]
@@ -8840,7 +8855,7 @@ mod test {
 		let _a = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let _b = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 
-		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_secs(2)));
 	}
 
 	#[test]
@@ -10322,7 +10337,7 @@ mod test {
 		let dynamic = request.dynamic();
 		let consumer = request.consume();
 		let mut pending = consumer.fetch_group(2, None);
-		let Poll::Ready(Ok(req)) = dynamic.poll_requested_group(&waiter) else {
+		let Poll::Ready(Ok(req)) = dynamic.poll_requested_fill_group(&waiter) else {
 			panic!("fetch request should be ready");
 		};
 		let mut fetched = req.accept(None).unwrap();
@@ -10363,7 +10378,7 @@ mod test {
 
 		let pending = consumer.fetch_group(100, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("fetch request is ready")
 			.unwrap();
@@ -11288,7 +11303,7 @@ mod test {
 		assert_eq!(arrival.assert_group().sequence, 1);
 
 		let _pending = consumer.fetch_group(0, None);
-		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		req.accept(None).unwrap().finish().unwrap();
 		assert!(
 			arrival.recv_group().now_or_never().is_none(),
@@ -12570,7 +12585,7 @@ mod test {
 		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hello");
 
 		// Nothing was queued for the dynamic handler to serve.
-		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
+		assert!(dynamic.poll_requested_fill_group(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[moq_clock::test]
@@ -12588,7 +12603,7 @@ mod test {
 		assert!(kio::Task::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12616,14 +12631,14 @@ mod test {
 
 		let pending = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
 
 		req.reject(Error::Cancel);
 		assert!(matches!(pending.await, Err(Error::Cancel)));
-		let fetch = producer.state.read().fetch.clone();
+		let fetch = producer.state.read().fills.clone();
 		assert!(fetch.read().is_empty());
 	}
 
@@ -12636,7 +12651,7 @@ mod test {
 
 		let pending = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12656,25 +12671,25 @@ mod test {
 
 		let first = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
 		let second = consumer.fetch_group(5, None);
 
 		drop(first);
-		assert!(req.demand().poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(req.poll_unused(&kio::Waiter::noop()).is_pending());
 		drop(second);
-		assert!(req.demand().poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(req.poll_unused(&kio::Waiter::noop()).is_ready());
 
 		let retry = consumer.fetch_group(5, None);
 		let fresh = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
 		drop(req);
-		assert!(fresh.demand().poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(fresh.poll_unused(&kio::Waiter::noop()).is_pending());
 		fresh.accept(Info::timed()).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
@@ -12689,8 +12704,8 @@ mod test {
 		let consumer = producer.consume();
 
 		drop(consumer.fetch_group(5, None));
-		assert!(dynamic.requested_group().now_or_never().is_none());
-		let fetch = producer.state.read().fetch.clone();
+		assert!(dynamic.requested_fill_group().now_or_never().is_none());
+		let fetch = producer.state.read().fills.clone();
 		assert!(fetch.read().is_empty());
 	}
 
@@ -12705,7 +12720,7 @@ mod test {
 
 		let first = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12716,7 +12731,7 @@ mod test {
 		assert!(kio::Task::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
 
 		let fresh = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
@@ -12735,7 +12750,7 @@ mod test {
 
 		let first = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12743,7 +12758,7 @@ mod test {
 
 		let retry = consumer.fetch_group(5, None);
 		let fresh = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
@@ -12756,7 +12771,7 @@ mod test {
 
 		let mut fetched = retry.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"hi");
-		assert!(!fresh.demand().is_used(), "the retry left the fresh request");
+		assert!(!fresh.is_used(), "the retry left the fresh request");
 		assert!(matches!(fresh.accept(Info::timed()), Err(Error::Duplicate)));
 	}
 
@@ -12780,7 +12795,7 @@ mod test {
 
 		let first = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12808,7 +12823,7 @@ mod test {
 
 		let _tail = consumer.fetch_group(5, group::Fetch::default().with_frame_start(3));
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12816,7 +12831,7 @@ mod test {
 
 		let mut whole = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("the wider fetch misses and queues its own request")
 			.unwrap();
@@ -12835,7 +12850,7 @@ mod test {
 
 		let first = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12845,7 +12860,7 @@ mod test {
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
@@ -12862,7 +12877,7 @@ mod test {
 
 		let pending = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12871,7 +12886,7 @@ mod test {
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -12916,7 +12931,7 @@ mod test {
 			"must not answer from the tail"
 		);
 
-		let request = dynamic.requested_group().await.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!((request.sequence(), request.frame_start()), (0, 0));
 
 		// Serving it replaces the too-narrow entry rather than colliding with it.
@@ -12950,7 +12965,7 @@ mod test {
 			.unwrap();
 
 		let fetch = consumer.fetch_group(0, None);
-		let request = dynamic.requested_group().await.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
 		let mut head = request.accept(Info::timed()).unwrap();
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
@@ -12994,7 +13009,7 @@ mod test {
 		live.start_at(1).unwrap();
 		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
 		let fetch = consumer.fetch_group(0, None);
-		let mut head = dynamic.requested_group().await.unwrap().accept(Info::timed()).unwrap();
+		let mut head = dynamic.requested_fill_group().await.unwrap().accept(Info::timed()).unwrap();
 		for _ in 0..3 {
 			head.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		}
@@ -13020,7 +13035,7 @@ mod test {
 			.unwrap();
 
 		let fetch = consumer.fetch_group(0, None);
-		let request = dynamic.requested_group().await.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
 		let mut head = request.accept(Info::timed()).unwrap();
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
@@ -13051,7 +13066,7 @@ mod test {
 		);
 
 		let _fetch = consumer.fetch_group(0, None);
-		let request = dynamic.requested_group().await.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
 		let mut head = request.accept(Info::timed()).unwrap();
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
@@ -13143,7 +13158,7 @@ mod test {
 			.unwrap();
 		live.finish().unwrap();
 		let fetch = consumer.fetch_group(0, None);
-		let mut head = dynamic.requested_group().await.unwrap().accept(Info::timed()).unwrap();
+		let mut head = dynamic.requested_fill_group().await.unwrap().accept(Info::timed()).unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
 			.unwrap();
 		head.finish().unwrap();
@@ -13194,7 +13209,7 @@ mod test {
 		let mut wider = std::pin::pin!(_wider);
 		assert!(futures::poll!(wider.as_mut()).is_pending());
 
-		let request = dynamic.requested_group().await.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!(request.frame_start(), 2, "widened while queued");
 
 		// Handed off now: the handler holds its own copy of the range, so a later wider
@@ -13206,7 +13221,7 @@ mod test {
 
 		// A handler may keep tracking the joined demand past the accept, as the lite
 		// subscriber does, which holds the result channel open.
-		let _joined = request.result.clone();
+		let _joined = request.joined();
 		let mut group = request.accept(Info::timed()).unwrap();
 		// A handler numbers the frames from where it was asked to start, as `serve_fetch`
 		// does; that offset is what makes the cached group too narrow for `widest`.
@@ -13248,7 +13263,7 @@ mod test {
 		assert!(kio::Task::poll(&mut *first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -13256,7 +13271,7 @@ mod test {
 		assert_eq!(req.priority(), 7);
 		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
 		assert!(
-			dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending(),
+			dynamic.poll_requested_fill_group(&kio::Waiter::noop()).is_pending(),
 			"the second fetch queued a duplicate request"
 		);
 
@@ -13285,7 +13300,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
-		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
 		let mut loose = consumer.fetch_group(5, None);
 		assert!(kio::Task::poll(&mut *loose, &kio::Waiter::noop()).is_pending());
@@ -13294,7 +13309,7 @@ mod test {
 		assert!(matches!(tight.await, Err(Error::Old)));
 		assert!(kio::Task::poll(&mut *loose, &kio::Waiter::noop()).is_pending());
 
-		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(req.max_delay(), None);
 		let mut group = req.accept(Info::timed()).unwrap();
 		group
@@ -13314,7 +13329,7 @@ mod test {
 		let first = consumer.fetch_group(5, None);
 		let second = consumer.fetch_group(5, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -13327,7 +13342,7 @@ mod test {
 		let mut retry = consumer.fetch_group(5, None);
 		assert!(kio::Task::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -13348,7 +13363,7 @@ mod test {
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
 		// And the attempt didn't leak.
-		let fetch = producer.state.read().fetch.clone();
+		let fetch = producer.state.read().fills.clone();
 		assert!(fetch.read().is_empty());
 	}
 
@@ -13377,7 +13392,7 @@ mod test {
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 
 		// And it doesn't signal the dynamic handler.
-		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
+		assert!(dynamic.poll_requested_fill_group(&kio::Waiter::noop()).is_pending());
 	}
 
 	/// Mint a track whose groups charge into a bounded [`cache::Pool`].
@@ -13608,7 +13623,7 @@ mod test {
 		// Serve a backfill before the track is accepted, then grow it.
 		let pending = consumer.fetch_group(0, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -13802,7 +13817,7 @@ mod test {
 		// Serve backfill seq 0 before the track is accepted.
 		let pending = consumer.fetch_group(0, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -13864,7 +13879,7 @@ mod test {
 		for sequence in 1..=5u64 {
 			let pending = consumer.fetch_group(sequence, None);
 			let req = dynamic
-				.requested_group()
+				.requested_fill_group()
 				.now_or_never()
 				.expect("should not block")
 				.unwrap();
@@ -14004,7 +14019,7 @@ mod test {
 		// old arrival entry for seq 1 now resolves to it.
 		let pending = consumer.fetch_group(1, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14036,7 +14051,7 @@ mod test {
 		for sequence in [2u64, 3u64] {
 			let pending = consumer.fetch_group(sequence, None);
 			let req = dynamic
-				.requested_group()
+				.requested_fill_group()
 				.now_or_never()
 				.expect("should not block")
 				.unwrap();
@@ -14100,7 +14115,7 @@ mod test {
 		// Re-fetch it: the replacement takes over max_sequence.
 		let pending = consumer.fetch_group(1, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14141,7 +14156,7 @@ mod test {
 		let pending = consumer.fetch_group(0, None);
 
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14207,7 +14222,7 @@ mod test {
 
 		let pending = consumer.fetch_group(2, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14259,7 +14274,7 @@ mod test {
 		// Fetch the gap: it lands in the cache and resolves the fetch...
 		let pending = consumer.fetch_group(2, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14293,7 +14308,7 @@ mod test {
 		// Serve a backfill fetch for an old sequence.
 		let pending = consumer.fetch_group(2, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -14503,93 +14518,101 @@ mod test {
 		));
 	}
 
+	/// Every fetch that joined a fill counts as its demand, and the last to leave
+	/// withdraws it.
 	#[test]
-	#[cfg(feature = "async")]
-	fn fetch_request_demand_counts_every_joined_caller() {
+	fn fill_demand_counts_every_joined_caller() {
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 		let first = consumer.fetch_group(3, None);
 		let second = consumer.fetch_group(3, None);
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
-		let demand = request.demand();
-		assert_eq!(demand.sequence(), 3);
-		assert!(demand.is_used());
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("one fill for both fetches");
+		};
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the second joined");
+		assert_eq!((fill.start(), fill.end()), (Position::group(3), 4));
+		assert!(fill.is_used());
 		drop(first);
-		assert!(demand.poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(fill.poll_unused(&waiter).is_pending());
 		drop(second);
-		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
-		request.reject(Error::Cancel);
-		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Cancel))));
-
-		// The async close helper reports clean acceptance separately from rejection.
-		for accepted in [true, false] {
-			let producer = track_producer("test", Info::timed());
-			let dynamic = producer.dynamic();
-			let consumer = producer.consume();
-			let fetch = consumer.fetch_group(3, None);
-			let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
-			let demand = request.demand();
-			let group = if accepted {
-				Some(request.accept(Info::timed()).unwrap())
-			} else {
-				request.reject(Error::NotFound);
-				None
-			};
-			assert!(matches!(
-				(accepted, demand.closed().now_or_never()),
-				(true, Some(Error::Dropped)) | (false, Some(Error::NotFound))
-			));
-			drop(fetch);
-			if let Some(mut group) = group {
-				group.finish().unwrap();
-			}
-		}
+		assert!(fill.poll_unused(&waiter).is_ready());
+		drop(fill);
+		assert!(
+			!producer.state.read().drops.contains(&3),
+			"a withdrawn fill records nothing"
+		);
 	}
 
+	/// A fill accepting a group resolves the fetch from the cache.
 	#[test]
-	fn accepted_group_request_demand_ends_cleanly() {
+	fn accepted_fill_resolves_its_fetch() {
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
-			panic!("the fetch request is ready");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the fill is ready");
 		};
-		let demand = request.demand();
-		let mut group = request.accept(Info::timed()).unwrap();
-
-		assert!(!demand.is_used());
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::Dropped))));
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::Dropped))));
+		let mut group = fill.accept(3, Info::timed()).unwrap();
+		assert!(matches!(fill.accept(3, None), Err(Error::Duplicate)));
+		assert!(matches!(fill.accept(4, None), Err(Error::InvalidRange)));
 		assert!(
 			matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))),
-			"the fetch still gets the accepted group"
+			"the fetch gets the accepted group"
 		);
 		group.finish().unwrap();
 	}
 
-	#[test]
-	fn rejected_group_request_demand_keeps_its_reason() {
-		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+	/// Fetch group 3 and drop it through the fill it queues, returning how the fetch ended.
+	fn drop_through_fill(producer: &Producer, dynamic: &Dynamic, drop_all: bool) -> Error {
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(&waiter) else {
-			panic!("the fetch request is ready");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the fill is ready");
 		};
-		let demand = request.demand();
-		request.reject(Error::NotFound);
+		match drop_all {
+			true => fill.drop_groups(0..10),
+			false => drop(fill),
+		}
+		match kio::Task::poll(&mut *fetch, &waiter) {
+			Poll::Ready(Err(err)) => err,
+			_ => panic!("the fetch fails"),
+		}
+	}
 
-		assert!(!demand.is_used());
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Err(Error::NotFound))));
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Err(Error::NotFound))));
-		assert!(matches!(
-			kio::Task::poll(&mut *fetch, &waiter),
-			Poll::Ready(Err(Error::NotFound))
-		));
+	fn drops(producer: &Producer) -> Vec<ops::Range<u64>> {
+		producer.state.read().drops.iter().cloned().collect()
+	}
+
+	/// A group the source no longer has fails its fetch, and is named dropped for good only
+	/// once the live feed gave up on it too: a fetch answered before a late group header
+	/// arrives says nothing about the feed.
+	#[moq_clock::test]
+	async fn dropped_fill_group_fails_its_fetch() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		write_group(&producer, 5);
+		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
+		assert!(drops(&producer).is_empty(), "the feed may still deliver 3");
+
+		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
+		assert_eq!(drops(&producer), vec![3..4], "clipped to the fill");
+	}
+
+	/// Dropping a fill a reader still waits on names what it left as dropped.
+	#[moq_clock::test]
+	async fn fill_dropped_unanswered_names_the_rest_dropped() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		write_group(&producer, 5);
+		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		assert!(matches!(drop_through_fill(&producer, &dynamic, false), Error::Dropped));
+		assert_eq!(drops(&producer), vec![3..4]);
 	}
 
 	#[moq_clock::test]
@@ -14912,7 +14935,7 @@ mod test {
 		let consumer = producer.consume();
 		let mut early = producer.subscribe(replay().with_ranges([Range::live()]));
 		let _fetching = consumer.fetch_group(5, None);
-		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		req.accept(None).unwrap().finish().unwrap();
 		producer
 			.create_group(group::Info { sequence: 0 })

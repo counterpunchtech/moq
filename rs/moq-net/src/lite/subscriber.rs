@@ -1953,12 +1953,12 @@ mod tests {
 	const VERSION: Version = Version::Lite05;
 
 	/// A pre-lite-05 relay's track, untimed, with a fetch of `sequence` queued on it.
-	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, group::Request) {
+	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::GroupFill) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.dynamic();
 		let fetching = track.consume().fetch_group(sequence, None);
-		let req = dynamic.requested_group().now_or_never().expect("queued").unwrap();
+		let req = dynamic.requested_fill_group().now_or_never().expect("queued").unwrap();
 		(track, fetching, req)
 	}
 
@@ -2127,7 +2127,7 @@ mod tests {
 	/// Many group fetches on one track share model state, but never share readiness.
 	fn feed_batch(
 		sequences: impl IntoIterator<Item = u64>,
-	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<group::Request>) {
+	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::GroupFill>) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.dynamic();
@@ -2135,7 +2135,7 @@ mod tests {
 		let mut requests = Vec::new();
 		for sequence in sequences {
 			callers.push(track.consume().fetch_group(sequence, None));
-			requests.push(dynamic.requested_group().now_or_never().expect("queued").unwrap());
+			requests.push(dynamic.requested_fill_group().now_or_never().expect("queued").unwrap());
 		}
 		(track, callers, requests)
 	}
@@ -2329,7 +2329,7 @@ mod tests {
 		drop(caller);
 		let next = track.consume().fetch_group(1, None);
 		let req = dynamic
-			.requested_group()
+			.requested_fill_group()
 			.now_or_never()
 			.expect("replacement queued")
 			.unwrap();
@@ -2346,7 +2346,7 @@ mod tests {
 	#[ignore = "release benchmark, run by nightly"]
 	async fn benchmark_feed_fetch_wakes() {
 		struct ScanFetches {
-			held: Vec<(group::Request, track::Consumer)>,
+			held: Vec<(track::GroupFill, track::Consumer)>,
 			/// Armed at the earliest instant the feed's ledger gives up on a held group, so one
 			/// that never arrives still fails.
 			fold: crate::time::Deadline,
@@ -2382,7 +2382,7 @@ mod tests {
 				let tail = active.tail.read();
 				let mut fold: Option<crate::time::Instant> = None;
 				for (req, feed) in std::mem::take(&mut self.held) {
-					if req.demand().poll_unused(waiter).is_ready() {
+					if req.poll_unused(waiter).is_ready() {
 						continue;
 					}
 					let sequence = req.sequence();
@@ -6922,15 +6922,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										active.served = Some(start.group);
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
-										// still arrives is delivered.
-										// Recorded as dropped too, so a reader asking for them
-										// later is told so rather than fetching what the publisher
-										// already gave up.
+										// still arrives is delivered, so they are not dropped.
 										if let Some(requested) = active.requested {
 											if let Ok(mut tail) = active.tail.write() {
 												tail.account(requested.group..start.group, serve.subscriber.runtime.now());
 											}
-											self.serving.drop_groups(requested.group..start.group);
 										}
 									}
 									// The publisher will never send these groups, so they
