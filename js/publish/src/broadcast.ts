@@ -133,8 +133,11 @@ export class Broadcast {
 	// The identity of each track name in the latest catalog fold, recorded when the catalog is first served.
 	#listed = new Map<string, Identity>();
 
-	// The last network broadcast if it ended cleanly, serving its tail until its media is stale.
-	#finished: Moq.Broadcast.Finish | undefined;
+	// The last network broadcast if it ended cleanly, serving its tail until its media is stale,
+	// with the identity it was published under.
+	#finished:
+		| { finish: Moq.Broadcast.Finish; origin: Moq.Origin.Table; name: Moq.Path.Valid; maxAge: Milli | undefined }
+		| undefined;
 
 	#signals = new Effect();
 
@@ -340,17 +343,22 @@ export class Broadcast {
 		const values = effect.getAll([this.in.enabled, this.in.origin]);
 
 		// A finished broadcast keeps its path until its linger ends. Announcing again replaces it,
-		// and anything else that reruns this (disabling, a new origin or name) ends it at once.
+		// and anything else that reruns this (disabling, a new origin or name) ends it at once. The
+		// identity is compared, not just watched, since it may change in the same tick it finished.
 		const finished = this.#finished;
-		if (finished && finished.closed.peek() === undefined) {
-			if (values && !effect.get(this.in.announce)) {
-				effect.get(this.in.name);
-				effect.get(this.in.maxAge);
-				effect.get(finished.closed);
-				effect.cleanup(() => finished.close());
+		if (finished && finished.finish.closed.peek() === undefined) {
+			if (
+				values &&
+				!effect.get(this.in.announce) &&
+				values[1] === finished.origin &&
+				effect.get(this.in.name) === finished.name &&
+				effect.get(this.in.maxAge) === finished.maxAge
+			) {
+				effect.get(finished.finish.closed);
+				effect.cleanup(() => finished.finish.close());
 				return;
 			}
-			finished.close();
+			finished.finish.close();
 		}
 		this.#finished = undefined;
 
@@ -374,9 +382,9 @@ export class Broadcast {
 		effect.cleanup(() => {
 			if (!ended.peek()) return broadcast.close();
 			// Cleanups run last-in first-out, so every track already closed cleanly.
-			const finished = broadcast.finish();
-			this.#finished = finished;
-			void finished.wait();
+			const finish = broadcast.finish();
+			this.#finished = { finish, origin, name, maxAge };
+			void finish.wait();
 		});
 		// One publisher instance per broadcast, kept across unannounce and announce, so a
 		// restart is a new broadcast rather than a resume into the old one.
@@ -496,7 +504,7 @@ export class Broadcast {
 	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
-		this.#finished?.close();
+		this.#finished?.finish.close();
 	}
 }
 

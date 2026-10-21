@@ -408,6 +408,40 @@ test("disabling, renaming, or closing ends a finished broadcast at once", async 
 	origin.close();
 });
 
+// Regression: a rename or maxAge change in the same tick the announce stopped coalesced with it, so
+// the old broadcast finished and kept its path instead of ending at once.
+test("a rename as the announce stops ends the old broadcast at once", async () => {
+	const announce = new Signal(true);
+	const name = new Signal(Path.from("test.hang"));
+	const maxAge = new Signal<Milli | undefined>(undefined);
+	const origin = new Origin.Producer();
+	const broadcast = new Broadcast({ enabled: true, origin, name, announce, maxAge, linger: true });
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+
+	const first = broadcast.net.peek();
+	if (!first) throw new Error("expected a network producer once connected");
+	announce.set(false);
+	name.set(Path.from("renamed.hang"));
+	await settle();
+	expect(first.closed.peek()).toBeNull();
+	const second = broadcast.net.peek();
+	if (!second) throw new Error("expected a network producer under the new name");
+	expect(second).not.toBe(first);
+
+	announce.set(true);
+	await settle();
+	announce.set(false);
+	maxAge.set(Milli(1_000));
+	await settle();
+	expect(second.closed.peek()).toBeNull();
+	expect(broadcast.net.peek()).toBeDefined();
+	expect(broadcast.net.peek()).not.toBe(second);
+
+	broadcast.close();
+	origin.close();
+});
+
 // Regression: any rendition change re-created every rendition's track, so the next append restarted
 // a live track's group sequence.
 test("a rendition keeps its track across rendition changes", async () => {
