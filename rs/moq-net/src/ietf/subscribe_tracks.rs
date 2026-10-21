@@ -57,13 +57,15 @@ impl Message for SubscribeTracks<'_> {
 		encode_namespace(w, &self.prefix)?;
 		// Absent means 1, so only a paused listing writes it.
 		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
+		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here.
+		let defaults = version != Version::Draft18;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x10 => (!self.forward).then_some(false),
-			0x20 => self.subscriber_priority,
-			0x21 => self.filter,
-			0x22 => self.group_order,
-			0x32 => self.new_group,
+			0x20 => self.subscriber_priority.filter(|_| defaults),
+			0x21 => self.filter.filter(|_| defaults),
+			0x22 => self.group_order.filter(|_| defaults),
+			0x32 => self.new_group.filter(|_| defaults),
 			0x35 => include_properties,
 			super::max_age::PARAMETER => self.max_age,
 		);
@@ -76,25 +78,27 @@ impl Message for SubscribeTracks<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let prefix = decode_namespace(r)?;
-		// Any parameter a SUBSCRIBE takes is legal here (draft-19 section 10.19.1). Those
-		// that only make sense on one subscription, such as RENDEZVOUS_TIMEOUT or a
-		// delivery timeout, are read and dropped.
+		// From draft-19 any parameter a SUBSCRIBE takes is legal here (section 10.19.1);
+		// draft-18 allows only AUTHORIZATION_TOKEN and FORWARD. Those that only make sense
+		// on one subscription, such as RENDEZVOUS_TIMEOUT or a delivery timeout, are read
+		// and dropped.
+		let defaults = version != Version::Draft18;
 		decode_params!(r, version,
-			0x02 => _object_delivery_timeout: Option<u64>,
+			0x02 => _object_delivery_timeout: Option<u64> where defaults,
 			0x03 => authorization_token: Vec<RequestToken>,
-			0x04 => _rendezvous_timeout: Option<u64>,
-			0x06 => _subgroup_delivery_timeout: Option<u64>,
+			0x04 => _rendezvous_timeout: Option<u64> where defaults,
+			0x06 => _subgroup_delivery_timeout: Option<u64> where defaults,
 			0x10 => forward: Option<bool>,
-			0x20 => subscriber_priority: Option<u8>,
-			0x21 => filter: Option<Filter>,
-			0x22 => group_order: Option<GroupOrder>,
+			0x20 => subscriber_priority: Option<u8> where defaults,
+			0x21 => filter: Option<Filter> where defaults,
+			0x22 => group_order: Option<GroupOrder> where defaults,
 			0x23 => _fill: Option<super::Fill> where Filter::is_draft20(version),
 			0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
 			0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 			0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
-			0x32 => new_group: Option<u64>,
+			0x32 => new_group: Option<u64> where defaults,
 			0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
@@ -241,6 +245,27 @@ mod tests {
 		let decoded: SubscribeTracks = decode(&bytes, Version::Draft19).unwrap();
 		assert!(decoded.track_filter);
 		// Draft-18 has no such parameter, and an unknown even type is malformed there.
+		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
+	}
+
+	/// Draft-18 carries no subscription parameters on SUBSCRIBE_TRACKS: one is not sent,
+	/// and one received is malformed.
+	#[test]
+	fn draft_18_carries_no_subscription_parameters() {
+		let listing = SubscribeTracks {
+			subscriber_priority: Some(7),
+			group_order: Some(GroupOrder::Ascending),
+			filter: Some(Filter::NextObject),
+			new_group: Some(0),
+			..paused()
+		};
+		assert_eq!(encode(&listing, Version::Draft18), encode(&paused(), Version::Draft18));
+		let decoded: SubscribeTracks = decode(&encode(&listing, Version::Draft19), Version::Draft19).unwrap();
+		assert_eq!(decoded.subscriber_priority, Some(7));
+		assert_eq!(decoded.new_group, Some(0));
+		// Request ID 4, prefix "room", one parameter: SUBSCRIBER_PRIORITY 7.
+		let bytes = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x01, 0x20, 0x07];
+		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft19).is_ok());
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
 	}
 
