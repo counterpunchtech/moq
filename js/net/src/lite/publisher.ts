@@ -1444,8 +1444,13 @@ export class Publisher {
 		// TRACKS is the requester's only message: its FIN or reset ends the listing.
 		void stream.reader.done().then(
 			(fin) => {
-				if (!fin) stream.abort(new ProtocolViolation("data after TRACKS"));
-				cancel.abort(new StreamError(StreamCode.Cancel, { message: "listing cancelled" }));
+				if (fin) {
+					cancel.abort(new StreamError(StreamCode.Cancel, { message: "listing cancelled" }));
+					return;
+				}
+				const violation = new ProtocolViolation("data after TRACKS");
+				closeViolation(this.#quic, violation);
+				cancel.abort(violation);
 			},
 			(err: unknown) => cancel.abort(error(err)),
 		);

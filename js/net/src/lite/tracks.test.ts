@@ -153,6 +153,8 @@ test("a session syncs at once and forwards the peer's tracks as live adds", asyn
 	peer.stream.writer.close();
 	expect(await next(tracks)).toBe("end");
 	expect(remote.closed.peek()).toBeUndefined();
+	// The requester FINs its half too, so the stream does not linger half-open.
+	expect(await peer.stream.reader.done()).toBe(true);
 });
 
 test("every listing of a broadcast shares one TRACKS stream, cancelled once unused", async () => {
@@ -281,6 +283,7 @@ test("a version without the Tracks Stream refuses the listing", async () => {
 /** A lite-07 publisher serving `origin`, answering TRACKS streams the test writes by hand. */
 function publisher(origin: OriginProducer) {
 	const pair = createMockTransportPair(ALPN_07_WIP);
+	const closing = spyOn(pair.server, "close");
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const list = async (broadcast: string) => {
 		const requester = await Stream.open(pair.client, { version });
@@ -309,8 +312,23 @@ function publisher(origin: OriginProducer) {
 			},
 		};
 	};
-	return { list };
+	return { list, closing };
 }
+
+test("data after a TRACKS request closes the session", async () => {
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	broadcast.createTrack("a");
+	const { list, closing } = publisher(origin);
+	const listing = await list("room");
+	expect(await listing.next()).toBe("+a");
+	expect(await listing.next()).toBe("synced");
+	await listing.requester.writer.u53(0);
+	expect(await listing.next()).toMatch(/^reset: /);
+	expect(closing).toHaveBeenCalledWith(expect.objectContaining({ closeCode: SessionCode.ProtocolViolation }));
+	broadcast.close();
+});
 
 test("a publisher lists its broadcast's own tracks, never one served on request", async () => {
 	const origin = new OriginProducer();

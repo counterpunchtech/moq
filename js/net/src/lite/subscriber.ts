@@ -714,7 +714,8 @@ export class Subscriber {
 				const event = await untilAborted(decodeTracksEventMaybe(stream.reader, this.version), stop);
 				if (!event) {
 					// The peer's broadcast ended, whether or not its retraction has arrived: end the
-					// listing and let go of what it listed.
+					// listing and let go of what it listed. FIN our half too, so the stream is done.
+					stream.writer.close();
 					lister.finish();
 					return;
 				}
