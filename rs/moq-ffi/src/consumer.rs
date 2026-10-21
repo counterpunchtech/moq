@@ -34,7 +34,7 @@ pub struct MoqSubscription {
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = 0)]
+	#[uniffi(default = Some(0))]
 	pub max_delay_us: Option<u64>,
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
