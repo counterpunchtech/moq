@@ -1821,7 +1821,10 @@ mod test {
 		let whole = [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
 		assert_eq!(read_cached(&b.consume(), 0), whole);
 		assert_eq!(read_cached(&logical.consume(), 0), whole);
-		assert!(dynamic.requested_fill_group().now_or_never().is_none(), "no second fetch");
+		assert!(
+			dynamic.requested_fill_group().now_or_never().is_none(),
+			"no second fetch"
+		);
 	}
 
 	/// A replaced route that only stalled lends the replacement its head the same way.

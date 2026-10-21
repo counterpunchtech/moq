@@ -60,6 +60,7 @@ pub(crate) struct Outcome {
 
 impl Outcome {
 	/// Why `sequence` was refused, if it was.
+	// private: capability gap
 	pub(crate) fn refused(&self, sequence: u64) -> Option<&Error> {
 		self.refused
 			.iter()
@@ -206,7 +207,10 @@ impl FillState {
 			.collect();
 		let gaps: Vec<ops::Range<u64>> = self.covers.gaps(&span).collect();
 		for (groups, id) in covered {
-			let pending = self.pending.get_mut(&id).expect("a covered sequence names a pending fill");
+			let pending = self
+				.pending
+				.get_mut(&id)
+				.expect("a covered sequence names a pending fill");
 			// Widened only while queued: once taken, the handler holds what it was asked.
 			if pending.queued {
 				pending.priority = pending.priority.max(ask.priority);
@@ -666,54 +670,64 @@ pub(crate) struct GroupFill {
 
 impl GroupFill {
 	/// The group sequence to fetch.
+	// private: capability gap
 	pub(crate) fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
 	/// The delivery priority the readers asked for.
+	// private: capability gap
 	pub(crate) fn priority(&self) -> u8 {
 		self.inner.priority
 	}
 
 	/// The widest budget among the readers, for a handler that forwards it.
+	// private: capability gap
 	pub(crate) fn max_delay(&self) -> Option<Duration> {
 		self.inner.max_delay
 	}
 
 	/// The first frame of the group the readers want; 0 is the whole group.
+	// private: capability gap
 	pub(crate) fn frame_start(&self) -> u64 {
 		self.frame_start
 	}
 
 	/// Poll until no reader waits on the fill.
+	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.result.poll_unused(waiter).map(|_| ())
 	}
 
 	/// Whether a reader still waits on the fill.
 	#[cfg(test)]
+	// private: capability gap
 	pub(crate) fn is_used(&self) -> bool {
 		self.inner.result.is_used()
 	}
 
 	/// The fill's readers, for a session keeping a group alive while any still wait.
+	// private: capability gap
 	pub(crate) fn joined(&self) -> kio::Producer<Outcome> {
 		self.inner.result.clone()
 	}
 
 	/// The track the fill serves.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: capability gap
 	pub(crate) fn track(&self) -> kio::Producer<TrackState> {
 		self.inner.state.clone()
 	}
 
 	/// Insert the group into the cache, as [`Fill::accept`].
+	// private: capability gap
 	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(self.sequence, info.into())
 	}
 
 	/// Refuse the group with the source's answer. A miss names it dropped, and
 	/// [`Error::Old`] every older group of the fill too.
+	// private: capability gap
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence, err);
 	}
@@ -721,6 +735,7 @@ impl GroupFill {
 	/// Declare the track's exclusive final sequence, as the source answering this group
 	/// reported it. A no-op once the track declared an end, or holds a later group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: capability gap
 	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.inner.state)
 			&& state.end.is_none()

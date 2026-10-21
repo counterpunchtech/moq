@@ -12818,7 +12818,10 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.max_delay, None, "no Max Age is the publisher's retention alone");
+		assert_eq!(
+			subscription.max_delay, None,
+			"no Max Age is the publisher's retention alone"
+		);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber

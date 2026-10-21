@@ -33,12 +33,15 @@ pub(super) struct Asking {
 	pub order: Order,
 }
 
+/// What a probe judges against: the span read, the feed's newest group, where the feed
+/// and readers start, and the drops revision.
+type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, Option<u64>, u64);
+
 /// The misses of one cursor, judged as what it reads or the feed moves.
 #[derive(Default)]
 pub(super) struct Misses {
-	/// What the last probe judged against: the span read, the feed's newest group, and
-	/// where the feed starts and readers start. A probe that sees the same skips judging.
-	at: Option<(u64, u64, Option<u64>, Option<u64>, Option<u64>, Option<u64>, u64)>,
+	/// What the last probe judged against. A probe that sees the same skips judging.
+	at: Option<JudgedAt>,
 	/// The sequences judged already, within what the reader reads up to the newest group.
 	judged: RangeSet<u64>,
 	/// Holes the live feed may still deliver, judged again on every probe.
@@ -240,7 +243,10 @@ impl Misses {
 		let judged: RangeSet<u64> = self
 			.judged
 			.iter()
-			.flat_map(|run| span.overlapping(run).map(move |s| s.start.max(run.start)..s.end.min(run.end)))
+			.flat_map(|run| {
+				span.overlapping(run)
+					.map(move |s| s.start.max(run.start)..s.end.min(run.end))
+			})
 			.collect();
 		let mut candidates: RangeSet<u64> = span.iter().flat_map(|run| judged.gaps(run)).collect();
 		for run in std::mem::take(&mut self.deferred).iter() {
@@ -406,7 +412,8 @@ impl TrackState {
 	/// deliver and the gaps it still waits for, with when each stops being waited for.
 	///
 	/// Never: accounted for by its arrivals (evicted, or a gap it skipped), or in a gap its
-	/// grace gave up on. A declared start is no promise: a group below it may still arrive.
+	/// grace gave up on, or anything once the feed is over. A declared start is no promise:
+	/// a group below it may still arrive.
 	#[allow(clippy::type_complexity)]
 	pub(super) fn unfed(
 		&self,
@@ -415,15 +422,18 @@ impl TrackState {
 	) -> (RangeSet<u64>, Vec<(ops::Range<u64>, Option<crate::time::Instant>)>) {
 		let mut unfed = RangeSet::new();
 		let mut awaited = Vec::new();
+		// Nothing more arrives after an abort, a seal, or a settled end.
+		if self.abort.is_some() || self.sealed || (self.end.is_some() && !self.tail_pending) {
+			unfed.insert(hole);
+			return (unfed, awaited);
+		}
 		let mut from = hole.start;
 		let grace = self.arrivals.grace();
-		let mut gap = |groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self
-			.arrivals
-			.folds_at(groups.start, grace)
-		{
-			Some(at) if at <= now => unfed.insert(groups),
-			folds => awaited.push((groups, folds)),
-		};
+		let mut gap =
+			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
+				Some(at) if at <= now => unfed.insert(groups),
+				folds => awaited.push((groups, folds)),
+			};
 		for arrived in self.arrivals.accounted(from..hole.end) {
 			if from < arrived.start {
 				gap(from..arrived.start, &mut unfed);

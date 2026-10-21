@@ -2127,7 +2127,11 @@ mod tests {
 	/// Many group fetches on one track share model state, but never share readiness.
 	fn feed_batch(
 		sequences: impl IntoIterator<Item = u64>,
-	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::GroupFill>) {
+	) -> (
+		track::Producer,
+		Vec<kio::Pending<track::Fetching>>,
+		Vec<track::GroupFill>,
+	) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.dynamic();
@@ -6923,10 +6927,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.
-										if let Some(requested) = active.requested {
-											if let Ok(mut tail) = active.tail.write() {
-												tail.account(requested.group..start.group, serve.subscriber.runtime.now());
-											}
+										if let Some(requested) = active.requested
+											&& let Ok(mut tail) = active.tail.write()
+										{
+											tail.account(requested.group..start.group, serve.subscriber.runtime.now());
 										}
 									}
 									// The publisher will never send these groups, so they
@@ -7087,11 +7091,11 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	},
 	Ingest {
 		stream: Stream<S, Version>,
-		producer: crate::recv::Group,
+		// Boxed, as is the ingest, so the other states stay small.
+		producer: Box<crate::recv::Group>,
 		// The accepted request's demand: fetches that joined it but have not yet
 		// picked the group up from the cache.
 		joined: kio::Producer<track::FillOutcome>,
-		// Boxed so the other states stay small; one allocation per fetch.
 		ingest: Box<FrameIngest>,
 	},
 	Done,
@@ -7340,7 +7344,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 					self.state = FetchRunState::Ingest {
 						stream,
-						producer: crate::recv::Group::new(producer),
+						producer: Box::new(crate::recv::Group::new(producer)),
 						joined,
 						ingest: Box::new(FrameIngest::new(
 							&self.serve.subscriber,

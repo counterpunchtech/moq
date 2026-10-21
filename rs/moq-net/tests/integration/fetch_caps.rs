@@ -83,10 +83,7 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 			matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
 			"{version}: {err}"
 		);
-		assert!(
-			request_b.is_used(),
-			"{version}: the other peer still holds its request"
-		);
+		assert!(request_b.is_used(), "{version}: the other peer still holds its request");
 		let mut group = request_b.accept(8, info).unwrap();
 		group.write_frame(None, &b"other peer"[..]).unwrap();
 		group.finish().unwrap();

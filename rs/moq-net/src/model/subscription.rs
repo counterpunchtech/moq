@@ -288,6 +288,7 @@ impl Subscription {
 	}
 
 	/// [`Self::max_delay`] as a budget: `None` waits as long as anything could.
+	// private: passthrough
 	pub(crate) fn budget(&self) -> Duration {
 		self.max_delay.unwrap_or(Duration::MAX)
 	}

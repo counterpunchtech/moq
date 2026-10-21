@@ -5432,8 +5432,9 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0, SUBSCRIBE_END at 3, and a DROP for the skipped group 1.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 1, 3, 2, 3, 1, 1, 0]);
+		// SUBSCRIBE_START at 0, a DROP for the skipped group 1, which the end gives up on at
+		// once, and SUBSCRIBE_END at 3.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 1, 1, 0, 1, 1, 3]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its

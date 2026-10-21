@@ -16,9 +16,9 @@
 use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
+use super::Datagram;
 use super::delivered::Delivered;
 use super::ledger::{self, Ledger};
-use super::Datagram;
 
 use super::Cap;
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
@@ -32,9 +32,10 @@ use demand::Subscriptions;
 mod fill;
 mod miss;
 pub use fill::Fill;
+use fill::FillState;
+
 // private: capability gap
 pub(crate) use fill::{GroupFill, Outcome as FillOutcome};
-use fill::FillState;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -3168,6 +3169,7 @@ impl Dynamic {
 
 	/// The next fill, which a test expects to name a single group.
 	#[cfg(test)]
+	// private: test
 	pub(crate) fn poll_requested_fill_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupFill>> {
 		self.poll_requested_fill(waiter).map_ok(|fill| {
 			assert_eq!(fill.end() - fill.start().group, 1, "a one-group fill");
@@ -3177,6 +3179,7 @@ impl Dynamic {
 
 	/// [`Self::poll_requested_fill_group`], awaited.
 	#[cfg(all(test, feature = "async"))]
+	// private: test
 	pub(crate) async fn requested_fill_group(&self) -> Result<GroupFill> {
 		kio::wait(|waiter| self.poll_requested_fill_group(waiter)).await
 	}
@@ -4543,11 +4546,13 @@ impl kio::Task for Fetching {
 
 		// An answered fill fails a joined fetch the cache cannot cover. The channel
 		// closing without an answer means its handlers went away.
-		let (err, asked) = match result.outcome().poll(waiter, |outcome| match outcome.refused(sequence) {
-			Some(err) => Poll::Ready((err.clone(), outcome.asked())),
-			None if outcome.is_accepted(sequence) => Poll::Ready((Error::NotFound, None)),
-			None => Poll::Pending,
-		}) {
+		let (err, asked) = match result
+			.outcome()
+			.poll(waiter, |outcome| match outcome.refused(sequence) {
+				Some(err) => Poll::Ready((err.clone(), outcome.asked())),
+				None if outcome.is_accepted(sequence) => Poll::Ready((Error::NotFound, None)),
+				None => Poll::Pending,
+			}) {
 			Poll::Ready(Ok(res)) => res,
 			Poll::Ready(Err(_closed)) => (Error::NotFound, None),
 			Poll::Pending => return Poll::Pending,
@@ -5426,7 +5431,14 @@ impl Cursor {
 		}
 		let asks = {
 			let state = self.state.read();
-			misses.judge(&state, (from, revision, cap), || admitted(window, from, cap), drift, &mut given_up, waiter)
+			misses.judge(
+				&state,
+				(from, revision, cap),
+				|| admitted(window, from, cap),
+				drift,
+				&mut given_up,
+				waiter,
+			)
 		};
 		misses.ask(&self.state, &fills, &asks, &asking, &mut given_up);
 		loop {
@@ -8755,7 +8767,10 @@ mod test {
 		subscriber
 			.update(Subscription::default().with_max_delay(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_delay, Some(Duration::from_millis(500)));
+		assert_eq!(
+			producer.subscription().unwrap().max_delay,
+			Some(Duration::from_millis(500))
+		);
 
 		subscriber
 			.update(Subscription::default().with_max_delay(Duration::ZERO))
@@ -13009,7 +13024,12 @@ mod test {
 		live.start_at(1).unwrap();
 		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
 		let fetch = consumer.fetch_group(0, None);
-		let mut head = dynamic.requested_fill_group().await.unwrap().accept(Info::timed()).unwrap();
+		let mut head = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
 		for _ in 0..3 {
 			head.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		}
@@ -13158,7 +13178,12 @@ mod test {
 			.unwrap();
 		live.finish().unwrap();
 		let fetch = consumer.fetch_group(0, None);
-		let mut head = dynamic.requested_fill_group().await.unwrap().accept(Info::timed()).unwrap();
+		let mut head = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
 			.unwrap();
 		head.finish().unwrap();
@@ -14579,14 +14604,16 @@ mod test {
 
 	fn write_filled(group: Result<group::Producer>, millis: u64) {
 		let mut group = group.unwrap();
-		group.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..]).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 	}
 
-	fn drained_drops(subscriber: &mut Subscriber) -> Vec<ops::Range<u64>> {
+	fn drained_drops(subscriber: &mut Subscriber) -> Vec<(u64, u64)> {
 		let mut dropped = Vec::new();
 		while let Poll::Ready(range) = subscriber.poll_drop(&kio::Waiter::noop()) {
-			dropped.push(range);
+			dropped.push((range.start, range.end));
 		}
 		dropped
 	}
@@ -14619,8 +14646,11 @@ mod test {
 		assert!(drained_drops(&mut subscriber).is_empty(), "group 1 may still arrive");
 
 		elapse(&producer, Duration::from_secs(31));
-		assert_eq!(drained_drops(&mut subscriber), [1..2]);
-		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "a refusal is not asked again");
+		assert_eq!(drained_drops(&mut subscriber), [(1, 2)]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"a refusal is not asked again"
+		);
 	}
 
 	/// A group the handler refused that still arrives live is delivered.
@@ -14641,7 +14671,29 @@ mod test {
 		};
 		assert_eq!(group.sequence, 1);
 		elapse(&producer, Duration::from_secs(31));
-		assert_eq!(drained_drops(&mut subscriber), [0..1]);
+		assert_eq!(drained_drops(&mut subscriber), [(0, 1)]);
+	}
+
+	/// A refused miss is named dropped as soon as the feed ends, since nothing more arrives,
+	/// and the read ends with it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_miss_is_dropped_once_the_feed_ends() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		fill.drop_groups(0..2);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(
+			drained_drops(&mut subscriber).is_empty(),
+			"the feed may still deliver them"
+		);
+		producer.finish().unwrap();
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	/// With no handler to fill it, a miss is named dropped once the feed gives up on it.
@@ -14659,7 +14711,7 @@ mod test {
 		assert_eq!(read, [2, 3]);
 		assert!(drained_drops(&mut subscriber).is_empty());
 		elapse(&producer, Duration::from_secs(31));
-		assert_eq!(drained_drops(&mut subscriber), [0..2]);
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.

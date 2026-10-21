@@ -1994,7 +1994,10 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!((request.start_group(), request.start_frame(), request.end_group()), (5, 0, 6));
+	assert_eq!(
+		(request.start_group(), request.start_frame(), request.end_group()),
+		(5, 0, 6)
+	);
 	assert_eq!(request.priority(), 11);
 	assert_eq!(request.next(), Some(5));
 

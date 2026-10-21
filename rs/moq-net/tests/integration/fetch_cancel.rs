@@ -75,12 +75,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	match stage {
 		Stage::Unanswered => {
 			drop(waiting);
-			moq_clock::timeout(
-				Duration::from_secs(5),
-				kio::wait(|waiter| request.poll_unused(waiter)),
-			)
-			.await
-			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
+			moq_clock::timeout(Duration::from_secs(5), kio::wait(|waiter| request.poll_unused(waiter)))
+				.await
+				.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
 			let mut group = request.accept(0, timed()).unwrap();
