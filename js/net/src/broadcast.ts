@@ -352,6 +352,8 @@ export class Producer {
 	#demand = makeDemand(this.#state);
 	#announcer?: Announcer;
 	#path = Path.empty();
+	// Set by `finish()`, which fixes the linger, so nothing may change the broadcast afterward.
+	#finished = false;
 
 	constructor() {
 		registerWire(this, {
@@ -403,12 +405,13 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name.
+	 * open track or a live request already holds the name, or once the broadcast is finished.
 	 */
 	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
+		this.#assertUnfinished();
 
 		const request = takeQueued(this.#state, name);
 		if (request) {
@@ -434,8 +437,12 @@ export class Producer {
 		return producer;
 	}
 
-	/** Remove a statically inserted track, including a finished cached one, and stop counting it toward {@link demand} at once. */
+	/**
+	 * Remove a statically inserted track, including a finished cached one, and stop counting it
+	 * toward {@link demand} at once. Throws once the broadcast is finished.
+	 */
 	removeTrack(name: string): void {
+		this.#assertUnfinished();
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
@@ -462,7 +469,8 @@ export class Producer {
 	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
 	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
-	 * origin, is a claim answer still being prepared, or if the broadcast is already closed.
+	 * origin, is a claim answer still being prepared, or if the broadcast is already closed or
+	 * finished.
 	 */
 	announce(
 		route:
@@ -477,15 +485,17 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
+		this.#assertUnfinished();
 		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
 		this.#announcer.announce(Route.normalize(route));
 	}
 
 	/**
 	 * Retract the advertisement of this broadcast's path, if any, from local consumers and
-	 * peers alike. {@link announce} brings it back.
+	 * peers alike. {@link announce} brings it back. Throws once the broadcast is finished.
 	 */
 	unannounce(): void {
+		this.#assertUnfinished();
 		this.#announcer?.unannounce();
 	}
 
@@ -503,12 +513,20 @@ export class Producer {
 	 * backlog, can still request and drain the tracks closed cleanly by now. The returned
 	 * {@link Finish} keeps the broadcast announced: keep it for its {@link Finish.linger}, then
 	 * {@link Finish.close} it, or let {@link Finish.wait} do both. Closing it early is the
-	 * interrupt. Close the tracks first; one still open, or created afterward, adds nothing.
+	 * interrupt. Close the tracks first; one still open adds nothing. From here the broadcast
+	 * takes no more changes: creating or removing a track, announcing, unannouncing, or finishing
+	 * again throws.
 	 */
 	finish(): Finish {
+		this.#assertUnfinished();
+		this.#finished = true;
 		let linger = Milli.zero;
 		for (const track of this.#state.tracks.values()) linger = Milli(Math.max(linger, hooks.linger(track)));
 		return makeFinish(this, linger);
+	}
+
+	#assertUnfinished(): void {
+		if (this.#finished) throw new Error("broadcast is finished");
 	}
 }
 

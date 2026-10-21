@@ -937,6 +937,23 @@ test("closing a finish closes the broadcast early", () => {
 	finish.close();
 });
 
+// The linger is fixed at finish, so the broadcast refuses any change that could outlast it.
+test("a finished broadcast refuses changes", () => {
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("finish"));
+	finishedTrack(broadcast, "video", 30).close();
+	broadcast.announce();
+	const finish = broadcast.finish();
+	expect(() => broadcast.createTrack("audio")).toThrow("broadcast is finished");
+	expect(() => broadcast.removeTrack("video")).toThrow("broadcast is finished");
+	expect(() => broadcast.announce()).toThrow("broadcast is finished");
+	expect(() => broadcast.unannounce()).toThrow("broadcast is finished");
+	expect(() => broadcast.finish()).toThrow("broadcast is finished");
+	expect(broadcast.route).toBeDefined();
+	finish.close();
+	origin.close();
+});
+
 // A close elsewhere ends the linger early.
 test("closing the broadcast elsewhere ends the linger", async () => {
 	const clock = new Manual();
