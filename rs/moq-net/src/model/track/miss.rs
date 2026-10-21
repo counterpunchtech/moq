@@ -7,6 +7,9 @@
 //! (evicted, or a gap the feed skipped). A hole the ledger still waits for is deferred and
 //! judged again as the feed moves.
 //!
+//! Each sequence is judged once, so a group evicted after the reader judged it cached is
+//! not a miss: judging it again would refill a group an arrival-order reader already took.
+//!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
 //! then the live feed may still deliver it.

@@ -249,10 +249,12 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A group they cover below the live feed that the cache lacks (evicted,
-skipped, or below where the feed starts) is asked of the track's dynamic handler
+served. A group they cover below the live feed that the cache lacks (evicted
+before the subscriber first looked for it, skipped, or below where the feed
+starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time; with
-no handler it is reported as dropped once the feed stops waiting for it. A relay merges its subscribers' ranges into one upstream request, which
+no handler it is reported as dropped once the feed stops waiting for it. One
+evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
 today's wire versions carry as the single span covering them. A time anchor is
 resolved from the groups the serving hop holds; upstream it asks for everything
 max delay allows, and an untimed track refuses it. At the live edge, a time end
