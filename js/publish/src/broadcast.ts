@@ -333,6 +333,8 @@ export class Broadcast {
 		const finished = this.#finished;
 		if (finished && finished.closed.peek() === undefined) {
 			if (values && !effect.get(this.in.announce)) {
+				effect.get(this.in.name);
+				effect.get(this.in.maxAge);
 				effect.get(finished.closed);
 				effect.cleanup(() => finished.close());
 				return;

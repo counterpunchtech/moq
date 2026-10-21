@@ -321,12 +321,13 @@ test("announcing again replaces a finished broadcast with a new one", async () =
 	broadcast.close();
 });
 
-// Disabling or closing the publisher is abrupt: it ends a finished broadcast's linger at once.
-test("disabling or closing ends a finished broadcast at once", async () => {
+// Disabling, renaming, or closing the publisher is abrupt: it ends a finished broadcast's linger at once.
+test("disabling, renaming, or closing ends a finished broadcast at once", async () => {
 	const enabled = new Signal(true);
 	const announce = new Signal(true);
+	const name = new Signal(Path.from("test.hang"));
 	const origin = new Origin.Producer();
-	const broadcast = new Broadcast({ enabled, origin, name: Path.from("test.hang"), announce });
+	const broadcast = new Broadcast({ enabled, origin, name, announce });
 	broadcast.video("video").config.set(videoConfig);
 	await settle();
 
@@ -347,8 +348,19 @@ test("disabling or closing ends a finished broadcast at once", async () => {
 	announce.set(false);
 	await settle();
 	expect(second.closed.peek()).toBeUndefined();
-	broadcast.close();
+	name.set(Path.from("renamed.hang"));
+	await settle();
 	expect(second.closed.peek()).toBeNull();
+
+	announce.set(true);
+	await settle();
+	const third = broadcast.net.peek();
+	if (!third) throw new Error("expected a network producer once announced again");
+	announce.set(false);
+	await settle();
+	expect(third.closed.peek()).toBeUndefined();
+	broadcast.close();
+	expect(third.closed.peek()).toBeNull();
 	origin.close();
 });
 
