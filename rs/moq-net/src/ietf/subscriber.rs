@@ -4144,6 +4144,7 @@ where
 				status,
 				properties,
 			})),
+			deflated: None,
 		})?;
 		Ok(())
 	}
@@ -4848,6 +4849,7 @@ where
 		let header = frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
+			inflated: None,
 		};
 		let mut frame = producer.create_frame_owned(header, &self.frames)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
@@ -5601,7 +5603,11 @@ impl GroupIngest {
 				properties: std::mem::take(&mut self.properties),
 			})
 		});
-		Ok(frame::Header { info, fields })
+		Ok(frame::Header {
+			info,
+			fields,
+			inflated: None,
+		})
 	}
 
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit

@@ -10,6 +10,10 @@ The ABI is unchanged. A track's dynamic handler now also gets group requests for
 `moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
 
+### `moq_track_info` gains `compress` (#5928)
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
 ### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.

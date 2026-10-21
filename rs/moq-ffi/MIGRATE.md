@@ -16,6 +16,10 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 
 `max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
 
+### `MoqTrackInfo` gains `compress` (#5928)
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
 ### Anchors can name a time (#6074)
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.

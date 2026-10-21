@@ -15,6 +15,10 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
 ### Anchors can name a time (#6074)
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
