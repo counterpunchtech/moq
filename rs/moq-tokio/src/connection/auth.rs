@@ -310,7 +310,7 @@ async fn present(
 			let attempt = async {
 				if opening.is_none() {
 					if let Some(delay) = delay {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 					let handle = session.auth();
 					let bytes = replay.bytes.clone();
@@ -389,6 +389,7 @@ async fn present(
 }
 
 #[cfg(all(test, feature = "tcp"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

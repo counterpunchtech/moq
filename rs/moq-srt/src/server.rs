@@ -20,7 +20,7 @@
 //! everything and routes by prefix, use [`crate::run`].
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use moq_mux::container::Frame;
@@ -598,8 +598,9 @@ pub(crate) async fn serve_subscribe(
 
 /// The std instant `at` names, since srt-tokio paces on std's clock. A late payload
 /// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
-fn host_instant(at: Instant) -> StdInstant {
-	let (now, host) = (moq_net::time::now(), StdInstant::now());
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+fn host_instant(at: Instant) -> std::time::Instant {
+	let (now, host) = (moq_net::time::now(), std::time::Instant::now());
 	match at.checked_duration_since(now) {
 		Some(ahead) => host + ahead,
 		None => host.checked_sub(now - at).unwrap_or(host),
@@ -661,7 +662,10 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
+	use std::time::Instant as StdInstant;
+
 	use super::*;
 	use bytes::Bytes;
 	use std::time::Duration;

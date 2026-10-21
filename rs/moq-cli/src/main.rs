@@ -287,13 +287,13 @@ struct Shutdown {
 
 /// Keep all stages and listener tasks alive while admitted sessions drain.
 async fn drain(shutdown: Shutdown, signals: &mut Signals) {
-	let deadline = tokio::time::Instant::now() + shutdown.observer.drain_timeout;
+	let deadline = moq_clock::now() + shutdown.observer.drain_timeout;
 	shutdown.trigger.start();
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
 		() = signals.recv() => {},
 		() = shutdown.observer.activity().close() => {},
-		() = tokio::time::sleep_until(deadline) => {},
+		() = moq_clock::sleep_until(deadline) => {},
 	}
 }
 
@@ -984,6 +984,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use std::cell::Cell;

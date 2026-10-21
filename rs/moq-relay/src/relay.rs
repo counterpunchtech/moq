@@ -771,10 +771,10 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 			return Ok(());
 		}
 		_ = shutdown.drained() => {}
-		_ = tokio::time::sleep_until(deadline) => {}
+		_ = moq_clock::sleep_until(deadline) => {}
 	}
 
-	let elapsed = tokio::time::Instant::now().saturating_duration_since(deadline - window);
+	let elapsed = moq_clock::now().saturating_duration_since(deadline - window);
 	match shutdown.tally() {
 		shutdown::Tally { live: 0, forced: 0, .. } => {
 			tracing::info!(?elapsed, "drain ended with no established sessions; exiting")
@@ -851,6 +851,7 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {

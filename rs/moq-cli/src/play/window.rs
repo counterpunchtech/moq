@@ -318,6 +318,7 @@ impl ApplicationHandler<Event> for App {
 				}
 			}
 			// winit waits on the host clock, so the deadline converts at this boundary.
+			#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 			Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(
 				std::time::Instant::now() + deadline.saturating_duration_since(now),
 			)),

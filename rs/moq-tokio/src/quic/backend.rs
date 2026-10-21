@@ -1036,6 +1036,7 @@ impl driver::ConnectionIdGenerator for ServerIdGenerator {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use url::Url;

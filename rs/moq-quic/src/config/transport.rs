@@ -651,6 +651,7 @@ impl QlogConfig {
 
         // The streamer's own epoch only times the events it stamps itself, which this
         // crate never asks it to; `QlogStream` stamps them on MoQ's clock instead.
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
         let mut streamer = QlogStreamer::new(
             self.title,
             self.description,

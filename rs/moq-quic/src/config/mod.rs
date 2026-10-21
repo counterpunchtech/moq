@@ -676,11 +676,11 @@ pub trait TimeSource: Send + Sync {
 
 /// Default implementation of [`TimeSource`]
 ///
-/// Implements `now` by calling [`SystemTime::now()`](SystemTime::now).
+/// Implements `now` by reading the ambient clock's wall time, [`moq_clock::wall()`].
 pub struct StdSystemTime;
 
 impl TimeSource for StdSystemTime {
     fn now(&self) -> SystemTime {
-        SystemTime::now()
+        moq_clock::wall().into()
     }
 }

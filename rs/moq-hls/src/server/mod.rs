@@ -113,14 +113,14 @@ impl Server {
 
 		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
 		// source resolves a rendition's sibling `broadcast` reference through the same origin.
-		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
+		moq_clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
 			.await
 			.ok()
 			.flatten()?;
 
 		let origin = self.inner.origin.consume();
 		// A covering dynamic route may never answer, so the request is bounded too.
-		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
+		let broadcast = moq_clock::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
 			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
 			.ok()?
