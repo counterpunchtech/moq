@@ -12,6 +12,13 @@ Every session now takes a `transport::poll::Boxable` transport, whose streams mu
 A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
 `Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
 
+### A dropped or cut group ends its reader with an error (#6143)
+
+A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
+A group already held fails the same way when the drop lands, even while its stream is still arriving.
+On lite-05 and lite-06 the error is always `Error::Stream(StreamError::NotFound)`.
+Treat a failed group read as the loss of that group and keep reading the track, rather than ending the subscription.
+
 ### A claim answers by publishing (#5678)
 
 `origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
