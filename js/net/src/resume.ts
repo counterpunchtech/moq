@@ -22,14 +22,20 @@
  * subscriber already handed out, the same record that keeps a direct reader from taking a
  * re-created group twice.
  *
+ * The logical track ends cleanly once its serving copy does. Its `closed` settles and the reader
+ * leaves the route, keeping each copy only while it holds something left to read, as a direct
+ * reader keeps its buffer. Its end is the first one any copy declared, which every later copy
+ * has to match.
+ *
  * @module
  */
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
-import type { Delivered } from "./delivered.ts";
+import { Delivered } from "./delivered.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
+	finalSequence,
 	type GroupRecover,
 	groupBounds,
 	hooks,
@@ -260,8 +266,16 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
-	/** The channels that ran out cleanly. */
-	#drained = new Set<"groups" | "datagrams">();
+	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
+	#ended = false;
+	/** The serving copy's largest when the track ended, kept once that copy goes. */
+	#last?: { largest?: track.Location; ended: true };
+	/** The first end any copy declared: the logical track's, whichever copy serves. */
+	#declared?: track.Location;
+	/** The record of groups handed out, once groups are read. */
+	#delivered?: Delivered;
+	/** Groups handed out and still open, which end with the reader. */
+	#out = new Set<GroupConsumer>();
 	/** Records the properties a copy committed, and which source it came from. */
 	#record: (info: track.Info, source: Source) => void;
 
@@ -299,7 +313,7 @@ class Reader implements ResumeSource {
 
 	/** Follow the route: subscribe to a new copy and mark the ones it replaced. */
 	sync(): void {
-		if (this.#closed) return;
+		if (this.#closed || this.#ended) return;
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
@@ -337,6 +351,19 @@ class Reader implements ResumeSource {
 			},
 			() => {},
 		);
+		copy.sub.finished().then(
+			// A copy already let go says nothing more about the track.
+			(end) => {
+				if (this.#copies.includes(copy)) this.#declare(end);
+			},
+			() => {},
+		);
+		void copy.sub.closed.then((closed) => {
+			// The serving copy closing cleanly is the logical track's end.
+			if (closed !== null) return;
+			this.sync();
+			if (this.#serving() === copy) this.#conclude();
+		});
 		this.#changed.update((n) => n + 1);
 	}
 
@@ -418,6 +445,8 @@ class Reader implements ResumeSource {
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered): Recv {
+		if (this.#closed) return { kind: "done" };
+		this.#delivered = delivered;
 		this.sync();
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
@@ -451,8 +480,8 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
-		this.#letGo(delivered);
-		return this.#end("groups", (copy) => copy.done);
+		this.#letGo();
+		return this.#end((copy) => copy.done);
 	}
 
 	// The copy whose next group is the lowest deliverable one, dropping any it holds next that
@@ -479,6 +508,8 @@ class Reader implements ResumeSource {
 	}
 
 	tryDatagram(delivered: Delivered | undefined): RecvDatagram {
+		if (this.#closed) return { kind: "done" };
+		if (delivered) this.#delivered = delivered;
 		this.sync();
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -497,8 +528,8 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
-		this.#letGo(delivered);
-		const end = this.#end("datagrams", (copy) => copy.datagramsDone);
+		this.#letGo();
+		const end = this.#end((copy) => copy.datagramsDone);
 		if (end.kind === "error" || end.kind === "done") return end;
 		return { kind: "idle" };
 	}
@@ -507,53 +538,71 @@ class Reader implements ResumeSource {
 	 * Whether the track ended, once the serving copy's channel (as `done` reads it) ran out:
 	 * cleanly, or with a verdict a route failure does not excuse.
 	 */
-	#end(
-		channel: "groups" | "datagrams",
-		done: (copy: Copy) => Error | null | undefined,
-	): Recv & { kind: "idle" | "done" | "error" } {
+	#end(done: (copy: Copy) => Error | null | undefined): Recv & { kind: "idle" | "done" | "error" } {
 		const route = this.route;
 		const last = this.#copies.at(-1);
 		const serving = last?.generation === this.#generation ? last : undefined;
 		const ended = serving ? done(serving) : undefined;
 		// The serving copy drained a complete track: that is its end, whichever route would
-		// serve it next.
-		if (serving && ended === null) return this.#finish({ kind: "done" }, channel);
+		// serve it next. Once the track ended, a copy let go held nothing more.
+		if (serving ? ended === null : this.#ended) return this.#finish({ kind: "done" });
 		if (ended instanceof Error) {
 			// A refusal from a route that still serves is the track's answer.
-			if (!routeFailed(ended)) return this.#finish({ kind: "error", error: ended }, channel);
-			if (route.refusal) return this.#finish({ kind: "error", error: route.refusal }, channel);
+			if (!routeFailed(ended)) return this.#finish({ kind: "error", error: ended });
+			if (route.refusal) return this.#finish({ kind: "error", error: route.refusal });
 		}
 		// Refused before any copy fed it: nothing will.
-		if (!last && route.refusal) return this.#finish({ kind: "error", error: route.refusal }, channel);
+		if (!last && route.refusal) return this.#finish({ kind: "error", error: route.refusal });
 		if (route.concluded) {
 			// No front is left to replace the copy: the track ends as it does.
-			if (!serving) return this.#finish({ kind: "error", error: dropped() }, channel);
-			if (ended instanceof Error) return this.#finish({ kind: "error", error: ended }, channel);
+			if (!serving) return this.#finish({ kind: "error", error: dropped() });
+			if (ended instanceof Error) return this.#finish({ kind: "error", error: ended });
 		}
 		return { kind: "idle" };
 	}
 
-	// End the logical track on a failure, or cleanly once both channels drained: groups and
-	// datagrams end apart, and one running out leaves the other's backlog readable.
-	#finish<T extends Recv & { kind: "done" | "error" }>(end: T, channel: "groups" | "datagrams"): T {
-		if (end.kind === "error") {
-			this.#shell.close(end.error);
-			return end;
-		}
-		this.#drained.add(channel);
-		if (this.#drained.size === 2) this.#shell.close();
+	// End the logical track: at once on a failure, or cleanly once a channel drained it. The
+	// other channel's backlog stays readable.
+	#finish<T extends Recv & { kind: "done" | "error" }>(end: T): T {
+		if (end.kind === "error") this.#shell.close(end.error);
+		else this.#conclude();
 		return end;
 	}
 
 	/**
-	 * Drop replaced copies only once neither a handed-out nor an unread group needs them. One not
-	 * yet replaced stays, even between routes: it is still the newest copy there is.
+	 * End the logical track cleanly: settle `closed` and leave the route, keeping each copy only
+	 * while it holds something left to read.
 	 */
-	#letGo(delivered?: Delivered): void {
+	#conclude(): void {
+		if (this.#closed || this.#ended) return;
+		this.#ended = true;
+		// Learned before any copy that knows them goes.
+		this.#learnEnd();
+		const serving = this.#serving();
+		this.#last = { largest: serving && hooks.peekLargest(serving.sub).largest, ended: true };
+		this.#shell.close();
+		this.route.leave(this);
+		this.#letGo();
+		this.wake();
+	}
+
+	/**
+	 * Drop replaced copies only once neither a handed-out nor an unread group needs them. One not
+	 * yet replaced stays, even between routes: it is still the newest copy there is, until the
+	 * track ended and it holds nothing left to read.
+	 */
+	#letGo(): void {
+		const delivered = this.#delivered;
 		const cursor = this.#shell.cursor.peek();
 		this.#copies = this.#copies.filter((copy) => {
+			if (copy.lease > 0) return true;
 			// The serving copy, or one between routes with nothing replacing it yet.
-			if (!copy.replaced || copy.lease > 0) return true;
+			if (!copy.replaced) {
+				const start = Math.max(cursor.start, copy.floor ?? 0);
+				if (!this.#ended || !hooks.spent(copy.sub, start, undefined, delivered ?? new Delivered())) return true;
+				this.#drop(copy);
+				return false;
+			}
 			// Its group channel ran out, or nobody reads groups at all: it feeds nothing more.
 			if (copy.done !== undefined || !delivered) {
 				this.#drop(copy);
@@ -567,8 +616,8 @@ class Reader implements ResumeSource {
 		});
 	}
 
-	#drop(copy: Copy): void {
-		copy.sub.close();
+	#drop(copy: Copy, abort?: Error): void {
+		copy.sub.close(abort);
 		copy.source.release();
 	}
 
@@ -580,7 +629,24 @@ class Reader implements ResumeSource {
 		const recover = new Recover(this, group, copy, backups);
 		hooks.recoverGroup(group, recover);
 		recover.watch(group);
+		// Closed with the reader, as a direct reader's close reaches the groups it handed out.
+		this.#out.add(group);
+		void group.closed.then(() => this.#out.delete(group));
 		return group;
+	}
+
+	/** The logical track ended cleanly, so no route continues it. */
+	get ended(): boolean {
+		return this.#ended;
+	}
+
+	/** `copy`'s last lease ended: let go of it once nothing else needs it. */
+	freed(copy: Copy): void {
+		// Once the track ended, no read may come to let go of it.
+		if (this.#ended) this.#letGo();
+		else if (!copy.replaced) return;
+		// A parked read lets go of a replaced copy nothing needs any more.
+		this.wake();
 	}
 
 	changed(fn: () => void): Dispose {
@@ -620,17 +686,44 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
+	// The logical track's end, learning it from any copy that declared one.
+	#learnEnd(): track.Location | undefined {
+		for (const copy of this.#copies) {
+			const end = copy.sub.end();
+			if (end) this.#declare(end);
+		}
+		return this.#declared;
+	}
+
+	// Record `end` as the logical track's end. One logical track has one end, as it has one set
+	// of properties: a copy declaring another is refused. A mid-group end refines the group
+	// boundary it falls just before, as a wire end may.
+	#declare(end: track.Location): void {
+		if (this.#closed) return;
+		const declared = this.#declared;
+		if (!declared) {
+			this.#declared = end;
+			this.wake();
+		} else if (declared.group === end.group && declared.frame === end.frame) {
+			return;
+		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
+			if (declared.frame === 0) this.#declared = end;
+		} else {
+			this.#shell.close(new Incompatible(this.route.name));
+		}
+	}
+
 	end(): track.Location | undefined {
 		this.sync();
-		return this.#serving()?.sub.end();
+		return this.#learnEnd();
 	}
 
 	async finished(): Promise<track.Location> {
 		for (;;) {
 			this.sync();
-			const serving = this.#serving();
-			const end = serving?.sub.end();
+			const end = this.#learnEnd();
 			if (end) return end;
+			const serving = this.#serving();
 			const failed = serving?.sub.closed.peek();
 			// A copy that failed is only the end of the track if no front replaces it, and a
 			// refused replacement leaves the refusal as the answer.
@@ -661,14 +754,14 @@ class Reader implements ResumeSource {
 	peekLargest(): { largest?: track.Location; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
-		return serving ? hooks.peekLargest(serving.sub) : { ended: false };
+		return serving ? hooks.peekLargest(serving.sub) : (this.#last ?? { ended: false });
 	}
 
 	async largest(seen: track.Location | undefined): Promise<track.Location | undefined> {
 		for (;;) {
 			this.sync();
 			const serving = this.#serving();
-			const view = serving && hooks.peekLargest(serving.sub);
+			const view = serving ? hooks.peekLargest(serving.sub) : this.#last;
 			const largest = view?.largest;
 			const { start, end } = this.#shell.cursor.peek();
 			// A replacement copy can start below what an earlier one reported.
@@ -679,8 +772,10 @@ class Reader implements ResumeSource {
 				(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
 			)
 				return largest;
-			// A copy ending is its route failing: the logical track's stream ends only with the route.
+			// A copy failing is its route failing: the logical track's stream ends only with the
+			// route, or once the serving copy reaches its end cleanly.
 			if (this.#shell.closed.peek() !== undefined) return undefined;
+			if (view?.ended && !(serving?.sub.closed.peek() instanceof Error)) return undefined;
 			if ((this.route.concluded || this.route.refusal) && (!serving || view?.ended)) return undefined;
 			await new Promise<void>((resolve) => {
 				const disposes: Dispose[] = [];
@@ -710,12 +805,15 @@ class Reader implements ResumeSource {
 		);
 	}
 
-	close(): void {
+	close(abort?: Error): void {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
-		for (const copy of this.#copies) this.#drop(copy);
+		// A recovery in flight settles with the group rather than adopting a replacement.
+		for (const group of this.#out) group.close(abort);
+		this.#out.clear();
+		for (const copy of this.#copies) this.#drop(copy, abort);
 		this.#copies = [];
 		this.route.leave(this);
 	}
@@ -831,10 +929,7 @@ class Recover implements GroupRecover {
 		const released = this.#copy ? [this.#copy, ...this.#backups] : this.#backups;
 		this.#copy = undefined;
 		this.#backups = [];
-		let freed = false;
-		for (const copy of released) if (--copy.lease === 0 && copy.replaced) freed = true;
-		// A parked read lets go of a replaced copy nothing needs any more.
-		if (freed) this.#reader.wake();
+		for (const copy of released) if (--copy.lease === 0) this.#reader.freed(copy);
 	}
 
 	get changed(): Getter<unknown> {
@@ -894,6 +989,8 @@ class Recover implements GroupRecover {
 				const held = reader.holding(this.#sequence, current)[0];
 				const cached = held && hooks.cachedGroup(held.sub, this.#sequence);
 				if (cached) return this.#replacement(cached, held);
+				// Once the track ended, no route continues it: only a copy holding it could.
+				if (reader.ended) throw failed;
 			}
 			if (!serving) {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
@@ -930,10 +1027,11 @@ class Recover implements GroupRecover {
 			expiry: hooks.staleAt(copy.sub, this.#sequence),
 			adopt: () => {
 				// A later switch must keep this copy subscribed while the recovered group still
-				// reads it, just like a group handed out from that copy directly.
+				// reads it, just like a group handed out from that copy directly. Leased first, so
+				// letting go of the copies it leaves never drops it.
+				copy.lease++;
 				this.#release();
 				this.#copy = copy;
-				copy.lease++;
 			},
 			discard: () => group.close(),
 		};

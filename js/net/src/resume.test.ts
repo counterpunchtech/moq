@@ -1354,3 +1354,162 @@ test("the largest follows the serving copy across a swap without moving back, an
 	a.close();
 	b.close();
 });
+
+test("a group-only reader of a finite track settles closed and lets go of its copy", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	// Declared but still open, so the copy's subscription is what holds the demand.
+	ta.producer.finishAt({ group: 1, frame: 0 });
+	expect(drain(sub)).toEqual([0]);
+	expect(await sub.recvGroup()).toBeUndefined();
+	await settle();
+	expect(sub.closed.peek()).toBeNull();
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("a group-only fork of a finite track settles closed and lets go of its copy", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe();
+	const fork = parent.fork();
+	parent.close();
+	ta.write(0);
+	ta.producer.finishAt({ group: 1, frame: 0 });
+	expect(drain(fork)).toEqual([0]);
+	expect(await fork.recvGroup()).toBeUndefined();
+	await settle();
+	expect(fork.closed.peek()).toBeNull();
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+
+	fork.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("the serving copy closing cleanly settles closed and leaves its datagrams readable", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.close();
+	await settle();
+	expect(sub.closed.peek()).toBeNull();
+	expect(drain(sub)).toEqual([0]);
+	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
+	expect(await sub.recvDatagram()).toBeUndefined();
+	expect(await sub.recvGroup()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("an end a replaced copy declared holds across a swap", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.producer.finishAt({ group: 2, frame: 0 });
+	await settle();
+
+	// b serves before its subscription learns the end.
+	front.serve(b.consume());
+	await settle();
+	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(await sub.finished()).toEqual({ group: 2, frame: 0 });
+
+	// A copy declaring another end claims different content.
+	tb.producer.finishAt({ group: 3, frame: 0 });
+	await settle();
+	expect(sub.closed.peek()).toBeInstanceOf(Error);
+	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("largest ends once the serving copy reaches its end, with the front still open", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.producer.finishAt({ group: 1, frame: 0 });
+	expect(await sub.largest()).toEqual({ group: 0, frame: 0 });
+	const next = sub.largest();
+	expect(await isPending(next)).toBe(false);
+	expect(await next).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("closing with an abort rejects a pending frame read of a group handed out", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0, 1, false);
+	const group = await sub.recvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	const read = group.readFrame();
+	const abort = new Error("aborted");
+	sub.close(abort);
+	await expect(read).rejects.toBe(abort);
+
+	front.consumer.close();
+	a.close();
+});
+
+test("closing with an abort settles a recovery in flight with it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const stalled = ta.write(0, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	// The next route does not have the group yet: recovery fetches it there and waits.
+	front.serve(b.consume());
+	await settle();
+	stalled.close(new StreamError(StreamCode.SessionClosed));
+	const read = group.readFrame();
+	await settle();
+	const abort = new Error("aborted");
+	sub.close(abort);
+	// A replacement arriving afterwards is not adopted.
+	tb.write(0, 2);
+	await expect(read).rejects.toBe(abort);
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});

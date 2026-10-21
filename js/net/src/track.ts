@@ -1820,6 +1820,14 @@ export class Subscriber {
 						!delivered.has(group.sequence) &&
 						!(group.closed.peek() instanceof Error),
 				);
+		hooks.spent = (subscriber, start, end, delivered) => {
+			const state = subscriber.#state;
+			return (
+				(state.closed.peek() !== undefined || subscriber.#complete()) &&
+				state.datagrams.peek().length === 0 &&
+				!hooks.hasUnreadGroup(subscriber, start, end, delivered)
+			);
+		};
 		hooks.staleAt = (subscriber, sequence) => ({
 			expired: () => subscriber.#staleAt(sequence, subscriber.#drift(), true),
 			changed: subscriber.#expiryChanged(),
@@ -2211,9 +2219,9 @@ export class Subscriber {
 	#tryResumed(ordered: boolean): Recv {
 		const resume = this.#resume as ResumeSource;
 		this.#groupsRead = true;
+		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed !== undefined) return { kind: "done" };
 		const recv = resume.tryGroup(ordered, this.#delivered);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
 		return recv;
@@ -2312,10 +2320,7 @@ export class Subscriber {
 	// The synchronous half of #recvDatagram.
 	#tryDatagram(): RecvDatagram {
 		const closed = this.#state.closed.peek();
-		if (this.#resume) {
-			if (closed instanceof Error) return { kind: "error", error: closed };
-			if (closed !== undefined) return { kind: "done" };
-		}
+		if (this.#resume && closed instanceof Error) return { kind: "error", error: closed };
 		// The group range bounds datagrams too, judged when each is read. One outside it is
 		// gone for good: nothing holds it for a later raise, unlike a group past the cap.
 		const { start, end } = this.#cursor.peek();
