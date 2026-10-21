@@ -14266,6 +14266,7 @@ mod tests {
 			auth: false,
 			active_count: false,
 			epoch: false,
+			flate: false,
 		});
 		slot
 	}

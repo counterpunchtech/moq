@@ -758,6 +758,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
+		flate: super::flate::from_setup(params, version)?,
 	})
 }
 

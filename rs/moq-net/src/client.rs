@@ -462,6 +462,7 @@ impl Client {
 					hidden: ietf::hidden::from_setup(&parameters, v),
 					max_age: ietf::max_age::from_setup(&parameters, v),
 					active_count: ietf::active_count::from_setup(&parameters, v),
+					flate: ietf::flate::from_setup(&parameters, v)?,
 					..Default::default()
 				};
 

@@ -446,6 +446,7 @@ impl Server {
 					hidden: ietf::hidden::from_setup(&params, v),
 					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
+					flate: ietf::flate::from_setup(&params, v)?,
 					..Default::default()
 				};
 				(path, token, request_id_max, peer_declared)
