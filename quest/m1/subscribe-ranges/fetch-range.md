@@ -10,8 +10,8 @@ filling over range count and span as separate axes.
 
 ## Plan
 
-Split out of [dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)
-by the maintainer on 2026-10-20
+Split out of dynamic range requests, which replaced `requested_group` with
+`requested_fill`, by the maintainer on 2026-10-20
 ([moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so each PR
 breaks one API once.
 
@@ -34,5 +34,4 @@ breaks one API once.
 
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `requested_fill` and subscriptions filling their misses
 - [Frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) - head fills for a range starting mid-group

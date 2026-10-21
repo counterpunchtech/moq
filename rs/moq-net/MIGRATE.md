@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Dynamic` serves fills, not group requests
+
+`track::Dynamic::requested_group` and `poll_requested_group` are replaced by `requested_fill` and `poll_requested_fill`, which yield a `track::Fill`: a run from `start()` (group and frame) to the exclusive `end()`, with `priority()`, `max_delay()`, and `order()`.
+Call `accept(sequence, info)` for each group you have (the first starts at `start().frame`) and `drop_groups(range)` for the rest; `next()` names the next group still owed, in the fill's order.
+`group::Request` is removed, and its `demand()` with it: watch the fill's `is_used()` and `unused()` instead.
+A fill also arrives for history a subscriber's ranges cover below the live feed that the cache lacks, not only for `fetch_group`.
+Dropping a fill with groups unanswered names them dropped, where the live feed won't deliver them, while a reader still waits; a fill nobody waits on is withdrawn and records nothing.
+
+### `Subscription::max_delay` is optional
+
+`Subscription::max_delay` is an `Option<Duration>`, where `None` leaves the publisher's max age alone to bound delivery.
+The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
+A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
+
 ### Anchors can name a time (#6074)
 
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.

@@ -31,7 +31,3 @@ shape in `js/net/src/lite/publisher.ts`).
 
 Regression test: a start at frame 5 and an end at frame 3 of a cached group, each read
 through `recv_group` and `ordered()`.
-
-## Related
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the per-subscriber ranges this extends to frames

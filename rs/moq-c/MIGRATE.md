@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Group requests come from fills
+
+The ABI is unchanged. A track's dynamic handler now also gets group requests for history a subscription covers that the cache lacks, not only for fetches; each run arrives one group at a time, the next once the previous is accepted, aborted, or freed.
+`moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
+`moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
+
 ### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.

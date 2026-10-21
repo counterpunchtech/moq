@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.requested_group()` is now `requested_fill()`, returning a `Fill` (`start_group`, `start_frame`, `end_group`, `priority`, `max_delay`, `order`, `next()`, `accept(sequence)`, `drop_groups(start, end)`, `is_used()`, `unused()`), and iterating a `TrackDynamic` yields fills.
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `is_used()` or `unused()` on the fill.
+A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
+`Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains a `TIME` variant, the group containing a presentation time.

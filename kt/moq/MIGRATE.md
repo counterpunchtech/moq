@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence)`, `dropGroups(start, end)`, `isUsed()`, `unused()`), and `requestedGroups()` is now `requestedFills()`.
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
+A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
+`Subscription.maxDelayUs` is a `ULong?` and `maxDelay` a `Duration?`, where null leaves the publisher's max age alone to bound delivery.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
