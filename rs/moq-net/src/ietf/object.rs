@@ -103,13 +103,13 @@ pub(crate) fn max_block(timescale: Option<Timescale>) -> usize {
 	if timescale.is_none() {
 		return MAX_BLOCK;
 	}
-	// A Timestamp's value is at most MAX_TIMESTAMP, and its key, a delta of at most 0x10,
+	// A Timestamp's value is a QUIC varint at most, and its key, a delta of at most 0x10,
 	// only shrinks the key of the property after it.
 	let largest = [Version::Draft14, Version::Draft16, Version::Draft17, Version::Draft18]
 		.into_iter()
 		.map(|version| {
 			let form = version.into();
-			crate::coding::varint::size(0x10, form).unwrap() + crate::coding::varint::size(crate::model::MAX_TIMESTAMP, form).unwrap()
+			crate::coding::varint::size(0x10, form).unwrap() + crate::coding::varint::size((1 << 62) - 1, form).unwrap()
 		})
 		.max()
 		.unwrap();
@@ -609,7 +609,7 @@ mod tests {
 		let decoded = read(&list(limit), Version::Draft22, milli).unwrap();
 		assert_eq!(decoded.properties.heap(), limit as u64);
 		assert!(check_frame(&decoded.properties, milli).is_ok());
-		let latest = Timestamp::new(crate::model::MAX_TIMESTAMP, Timescale::MILLI).unwrap();
+		let latest = Timestamp::new((1 << 61) - 1, Timescale::MILLI).unwrap();
 		let written = write(&decoded.properties, Some(latest), Version::Draft22, milli).unwrap();
 		assert_eq!(written.len(), MAX_BLOCK);
 

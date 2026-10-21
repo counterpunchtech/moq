@@ -7,15 +7,11 @@ use crate::coding::varint::MAX_QUIC;
 /// lite-05/06 zigzag a group's first timestamp from zero into a QUIC varint, which halves
 /// its positive range. Bounding every timestamp here keeps each one encodable on every
 /// version, including after a relay forwards it from lite-07 or moq-transport.
-pub(crate) const MAX_TIMESTAMP: u64 = (1 << 61) - 1;
+const MAX_TIMESTAMP: u64 = (1 << 61) - 1;
 
 /// `value`, or `None` past `max`.
 const fn bounded(value: u128, max: u64) -> Option<u64> {
-	if value <= max as u128 {
-		Some(value as u64)
-	} else {
-		None
-	}
+	if value <= max as u128 { Some(value as u64) } else { None }
 }
 
 /// Returned when a [`Timestamp`] operation would exceed its range (`2^61 - 1`), a

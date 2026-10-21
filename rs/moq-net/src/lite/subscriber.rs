@@ -2941,7 +2941,7 @@ mod tests {
 	/// it with a second delta, lite-07 with a first frame its 64-bit varint can encode.
 	#[moq_clock::test]
 	async fn a_received_timestamp_past_2_61_is_refused() {
-		let max = crate::model::MAX_TIMESTAMP as i64;
+		let max: i64 = (1 << 61) - 1;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let (res, track) = receive_group(version, &[max]).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
