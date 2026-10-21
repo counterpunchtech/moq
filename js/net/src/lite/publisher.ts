@@ -1095,6 +1095,9 @@ export class Publisher {
 		const skipped: { start: number; end: number; error: Error }[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
+		// The first group and the edge seen before it was popped, held until the source
+		// resolves where its feed starts.
+		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1224,9 +1227,12 @@ export class Publisher {
 				// answered past, so the source's largest says where the live feed is.
 				const largest =
 					!startSent && hasLargest(this.version)
-						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
+						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
-				const recv = hooks.tryRecvGroup(track, emitRange);
+				const recv = first
+					? ({ kind: "group", group: first.group } as const)
+					: hooks.tryRecvGroup(track, emitRange);
+				first = undefined;
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
@@ -1306,8 +1312,15 @@ export class Publisher {
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
-					startSent = true;
 					const source = hooks.sourceStart(track);
+					// A group stream can beat the upstream START on its own stream, and resolving
+					// from the group alone would give up the backlog that START still promises.
+					if (source === "pending") {
+						first = { group, largest };
+						await waitForSubscription(controls, track, drops);
+						continue;
+					}
+					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
 					startSequence = Math.min(group.sequence, source ?? group.sequence);

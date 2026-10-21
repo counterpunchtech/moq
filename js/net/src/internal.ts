@@ -347,8 +347,8 @@ export interface ResumeSource {
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
 	latest(): number | undefined;
-	/** The serving copy's declared start, raised to its cursor floor. */
-	start(): number | undefined;
+	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
+	start(): number | "pending" | undefined;
 	/** The serving copy's declared exclusive end. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -413,9 +413,10 @@ export const hooks: {
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
-	 * `track.ts`.
+	 * `track.ts`. Without `start`, the SUBSCRIBE is still waiting on the START that resolves it,
+	 * as the Rust `request_start`.
 	 */
-	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
+	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md
 	/**
 	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
@@ -438,8 +439,11 @@ export const hooks: {
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	// pending: /quest/m1/public-model/serve.md
-	/** The source's declared start, raised to the subscriber's cursor floor; assigned by `track.ts`. */
-	sourceStart: (subscriber: Subscriber) => number | undefined;
+	/**
+	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
+	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
+	 */
+	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
 	// pending: /quest/m1/public-model/serve.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;

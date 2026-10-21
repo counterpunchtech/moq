@@ -748,7 +748,7 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
-	start(): number | undefined {
+	start(): number | "pending" | undefined {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.sourceStart(serving.sub);

@@ -1009,6 +1009,42 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+// A relay's group stream can beat the upstream START on its own stream. Resolving from that
+// group would give up the backlog the START still promises, so the first group waits for it.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(3);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A track that closes never gets its START, so the held group must not wait for it.
+	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			sub.track.close();
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
 for (const skipped of ["failed", "stale"] as const) {
 	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
 		const sub = await servedSubscription({
