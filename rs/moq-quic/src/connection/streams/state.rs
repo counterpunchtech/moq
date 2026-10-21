@@ -3454,6 +3454,46 @@ mod tests {
         assert!(!client.leased(ids[0]).unwrap().evicted);
     }
 
+    /// A consume whose credit only pays a shrunk window's debt reruns the stuck pass: the
+    /// readers that would have rerun it are already waiting, and the peer is still blocked.
+    #[test]
+    fn consume_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+        }
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+        assert_eq!(lease(&mut client, ids[2]), WINDOW as usize);
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+
+        // The first stream has data its reader has not looked at, so nothing is evicted yet.
+        for id in [ids[1], ids[2]] {
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        assert_eq!(client.credit_stats().evicted, 0);
+        readable(&mut client);
+
+        // Its reader finishes a unit and parks; the credit only pays the debt.
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        consume(&mut client, ids[0], WINDOW as usize);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]]);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
     /// Bytes a reader took outlive an eviction until it stops the stream, so their credit
     /// returns only then, and nothing else is evicted meanwhile.
     #[test]

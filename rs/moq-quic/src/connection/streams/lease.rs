@@ -212,7 +212,8 @@ impl RecvStream<'_> {
             return ShouldTransmit(false);
         };
         let freed = lease.consume(n);
-        self.release(freed)
+        let transmit = self.release(freed);
+        ShouldTransmit(transmit.should_transmit() || self.unstick())
     }
 
     /// Rank this stream for eviction: when the connection window is stuck, the stream with the
@@ -273,6 +274,18 @@ impl RecvStream<'_> {
         transmit
     }
 
+    /// Rerun the stuck-window pass after returning credit, which may only have paid a shrunk
+    /// window's debt: the peer stays blocked, and the readers that would rerun it may all be
+    /// waiting already. Returns whether it evicted anything.
+    pub(super) fn unstick(&mut self) -> bool {
+        let Some(transmit) = self.state.evict_if_stuck() else {
+            return false;
+        };
+        self.pending.max_data |= transmit.should_transmit();
+        self.state.queue_max_stream_id(self.pending);
+        true
+    }
+
     /// Drop the stream's lease, returning its credit, ahead of a stop.
     ///
     /// Returns whether the stream had been evicted, which already discarded its receive buffer
@@ -286,10 +299,7 @@ impl RecvStream<'_> {
             return false;
         }
         // Eviction paused for this stop; what it returned may only have paid debt.
-        if let Some(transmit) = self.state.evict_if_stuck() {
-            self.pending.max_data |= transmit.should_transmit();
-            self.state.queue_max_stream_id(self.pending);
-        }
+        self.unstick();
         let receiving = self
             .state
             .recv

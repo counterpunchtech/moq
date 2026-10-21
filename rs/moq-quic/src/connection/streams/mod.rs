@@ -182,6 +182,7 @@ impl RecvStream<'_> {
         if self.state.add_read_credits(read_credits).should_transmit() {
             self.pending.max_data = true;
         }
+        self.unstick();
 
         Ok(())
     }
