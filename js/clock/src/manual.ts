@@ -5,7 +5,10 @@ import { Instant, Nano, Wall } from "./types.ts";
 
 type Timer = { at: number; order: number; index: number; ready: () => void };
 
-/** A clock that starts at zero and advances only when a test moves it. */
+/**
+ * A clock that starts at zero and advances only when a test moves it.
+ * Drive it serially: overlapping advance, jump, or fire calls fail immediately.
+ */
 export class Manual {
 	/** The reproducible starting wall time, 2025-01-01T00:00:00Z. */
 	static readonly WALL_START = Wall(1_735_689_600_000);
@@ -17,8 +20,8 @@ export class Manual {
 	#order = 0;
 	#revision = 0;
 	#fired = 0;
-	#firing = false;
-	#advancing = 0;
+	#driving = false;
+	#advancing = false;
 	#armed?: () => void;
 	#backend: Backend = {
 		now: () => this.#now,
@@ -29,7 +32,7 @@ export class Manual {
 			this.#timers.push(timer);
 			this.#up(timer.index);
 			this.#revision++;
-			if (at <= this.#now && this.#advancing === 0) this.#ready(timer);
+			if (at <= this.#now && !this.#advancing) this.#ready(timer);
 			this.#armed?.();
 			return () => {
 				this.#remove(timer);
@@ -54,15 +57,66 @@ export class Manual {
 
 	/** Jump forward without draining tasks, firing due timers late as a stalled event loop would. */
 	jump(duration: Nano): void {
-		this.#now = Instant.add(this.#now, duration);
-		this.#fire();
+		if (this.#driving) throw new Error("time driver already pending");
+		this.#driving = true;
+		try {
+			this.#now = Instant.add(this.#now, duration);
+			this.#fire();
+		} finally {
+			this.#driving = false;
+		}
 	}
 
 	/** Advance through each due deadline, draining tasks before continuing to the target. */
 	async advance(duration: Nano): Promise<void> {
+		if (this.#driving) throw new Error("time driver already pending");
+		this.#driving = true;
+		try {
+			await this.#advance(duration);
+		} finally {
+			this.#driving = false;
+		}
+	}
+
+	/**
+	 * Wait until a timer is armed, advance exactly to the earliest deadline, then drain like
+	 * `advance` and return the instant reached. Awaits forever if no timer is ever armed.
+	 */
+	async fire(): Promise<Instant> {
+		if (this.#driving) throw new Error("time driver already pending");
+		this.#driving = true;
+		const fired = this.#fired;
+		try {
+			for (;;) {
+				// Lets a pending microtask chain arm an earlier timer before choosing the deadline.
+				await drain();
+				// arm() runs an already-due timer at once, so it never waits in the heap.
+				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
+				if (at !== undefined) {
+					await this.#advance(Instant.durationSince(Instant(at), this.#now));
+					return this.#now;
+				}
+				// A host task, such as I/O, may arm the timer later than any drain can wait for.
+				await new Promise<void>((resolve) => {
+					this.#armed = resolve;
+				});
+				this.#armed = undefined;
+			}
+		} finally {
+			this.#driving = false;
+		}
+	}
+
+	/** Set wall time forward or backward without passing monotonic time. */
+	stepWall(wall: Wall): void {
+		this.#wallAnchor = Wall(wall);
+		this.#wallAnchorAt = this.#now;
+	}
+
+	async #advance(duration: Nano): Promise<void> {
 		const target = Instant.add(this.#now, duration);
 		// Reached timers armed while draining join the heap, behind existing peers.
-		this.#advancing++;
+		this.#advancing = true;
 		try {
 			for (;;) {
 				const revision = this.#revision;
@@ -78,43 +132,8 @@ export class Manual {
 				}
 			}
 		} finally {
-			this.#advancing--;
+			this.#advancing = false;
 		}
-	}
-
-	/**
-	 * Wait until a timer is armed, advance exactly to the earliest deadline, then drain like
-	 * `advance` and return the instant reached. Awaits forever if no timer is ever armed.
-	 */
-	async fire(): Promise<Instant> {
-		if (this.#firing) throw new Error("fire already pending");
-		this.#firing = true;
-		const fired = this.#fired;
-		try {
-			for (;;) {
-				// Lets a pending microtask chain arm an earlier timer before choosing the deadline.
-				await drain();
-				// arm() runs an already-due timer at once, so it never waits in the heap.
-				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
-				if (at !== undefined) {
-					await this.advance(Instant.durationSince(Instant(at), this.#now));
-					return this.#now;
-				}
-				// A host task, such as I/O, may arm the timer later than any drain can wait for.
-				await new Promise<void>((resolve) => {
-					this.#armed = resolve;
-				});
-				this.#armed = undefined;
-			}
-		} finally {
-			this.#firing = false;
-		}
-	}
-
-	/** Set wall time forward or backward without passing monotonic time. */
-	stepWall(wall: Wall): void {
-		this.#wallAnchor = Wall(wall);
-		this.#wallAnchorAt = this.#now;
 	}
 
 	#before(a: Timer, b: Timer): boolean {

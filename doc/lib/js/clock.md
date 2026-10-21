@@ -48,6 +48,9 @@ timers late without draining, modeling a stalled event loop. `stepWall()` change
 only wall time. `fire()` waits for a timer
 to be armed, even by a later host task such as I/O, then advances exactly to the
 earliest deadline the same way; it never resolves if nothing arms one.
+Drive each clock serially: until `advance()` or `fire()` settles, another
+`advance()` or `fire()` rejects and `jump()` throws without moving time.
+Timer callbacks may arm timers, but must leave driving that clock to their caller.
 
 `origin()` reads the wall time at instant zero, which maps an instant onto
 wall time without the jitter of subtracting two live reads. On the host it is

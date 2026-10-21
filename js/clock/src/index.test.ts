@@ -349,3 +349,41 @@ test("a past deadline armed while draining observes the current instant", async 
 	expect(at).toEqual([10, 10]);
 	expect<number>(clock.now()).toBe(10);
 });
+
+for (const driver of ["advance", "fire"] as const) {
+	test(`${driver} rejects overlapping time drivers without releasing its ownership`, async () => {
+		const clock = manual();
+		const pending = driver === "advance" ? clock.advance(Nano(10)) : clock.fire();
+		try {
+			await expect(clock.advance(Nano(100))).rejects.toThrow("already pending");
+			expect(() => clock.jump(Nano(100))).toThrow("already pending");
+			await expect(clock.fire()).rejects.toThrow("already pending");
+			expect<number>(clock.now()).toBe(0);
+		} finally {
+			// Let fire finish even if an assertion fails before it has a timer.
+			void sleepUntil(Instant(10));
+			await pending;
+		}
+		expect<number>(clock.now()).toBe(10);
+		clock.jump(Nano(1));
+		await clock.advance(Nano(1));
+		void sleep(Nano(1));
+		expect<number>(await clock.fire()).toBe(13);
+	});
+}
+
+test("a timer callback cannot move time beyond the active advance target", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	const callback = sleep(Nano(5)).then(async () => {
+		await expect(clock.advance(Nano(100))).rejects.toThrow("already pending");
+		expect(() => clock.jump(Nano(100))).toThrow("already pending");
+		await expect(clock.fire()).rejects.toThrow("already pending");
+		await sleepUntil(Instant(7));
+		at.push(now());
+	});
+	await clock.advance(Nano(10));
+	await callback;
+	expect(at).toEqual([7]);
+	expect<number>(clock.now()).toBe(10);
+});
