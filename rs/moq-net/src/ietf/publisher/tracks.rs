@@ -643,10 +643,10 @@ where
 		let _slot = slot;
 		let absolute = self.origin.absolute(&namespace).to_owned();
 
-		// Waits on the peer's stream credit, then its request credit, for as long as the
-		// track is listed and the request stands; a peer that grants none holds only this
-		// task and its slot. The stream comes first since opening one spends no ID, while an
-		// allocated ID is always sent.
+		// Every wait on the peer's credit, for the stream, a Request ID, or the PUBLISH's
+		// bytes, lasts only while the track is listed and the request stands; a peer that
+		// grants none holds only this task and its slot. A Request ID abandoned unsent leaves
+		// a gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
 		let mut session = self.session.clone();
 		let opened = {
 			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
@@ -682,18 +682,30 @@ where
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
 		stream.writer.buffer_varint(ietf::Publish::ID)?;
-		stream
-			.writer
-			.encode(&ietf::Publish {
-				request_id,
-				track_namespace: namespace.clone(),
-				track_name: name.as_ref().into(),
-				track_alias: request_id.0,
-				largest_location: live_edge(&track).largest,
-				forward: false,
-				properties,
+		let publish = ietf::Publish {
+			request_id,
+			track_namespace: namespace.clone(),
+			track_name: name.as_ref().into(),
+			track_alias: request_id.0,
+			largest_location: live_edge(&track).largest,
+			forward: false,
+			properties,
+		};
+		let written = {
+			let mut writing = std::pin::pin!(stream.writer.encode(&publish));
+			kio::wait(|waiter| {
+				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
+					return Poll::Ready(None);
+				}
+				waiter.poll_future(writing.as_mut()).map(Some)
 			})
-			.await?;
+			.await
+		};
+		// Cut short, the stream is reset before its header is whole, which the peer ignores.
+		let Some(written) = written else {
+			return Ok(());
+		};
+		written?;
 
 		let mut gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
 		let mut finished = false;
