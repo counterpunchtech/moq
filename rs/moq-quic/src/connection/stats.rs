@@ -196,4 +196,7 @@ pub struct CreditStats {
     /// Streams evicted so far because incomplete leases filled the window; see
     /// [`RecvStream::lease()`](crate::RecvStream::lease)
     pub evicted: u64,
+    /// The most credit the peer has had spent at once, leased or not yet read: how close the
+    /// connection came to filling its receive window
+    pub peak_spent: u64,
 }

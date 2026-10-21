@@ -42,6 +42,13 @@ pub struct Leased {
 /// An eviction candidate, ordered so a max-heap pops the lowest priority, then the newest.
 type Victim = Reverse<(i64, Reverse<StreamId>)>;
 
+/// Whether a stream has data its reader has not looked at: it never leased what arrived, or
+/// data arrived while it waited. Its reader may be about to free the window, so nothing is
+/// evicted meanwhile.
+fn unlooked(unread: u64, lease: Option<&Leased>) -> bool {
+    (unread > 0 && lease.is_none_or(|lease| !lease.filled)) || lease.is_some_and(|lease| lease.ready)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum End {
     Fin,
@@ -258,6 +265,9 @@ impl RecvStream<'_> {
             return ShouldTransmit(false);
         };
         let freed = lease.release();
+        if lease.evicted {
+            self.state.evicted_held -= freed;
+        }
         let transmit = self.return_credit(freed);
         ShouldTransmit(transmit.should_transmit() || self.unstick())
     }
@@ -277,6 +287,7 @@ impl RecvStream<'_> {
         lease.ready = false;
         lease.want = None;
         lease.filled = true;
+        self.state.unlooked.remove(&self.id);
         if lease.end.is_some() {
             return Ok(ShouldTransmit(false));
         }
@@ -338,9 +349,13 @@ impl RecvStream<'_> {
     /// Returns whether the stream had been evicted, which already discarded its receive buffer
     /// but left the peer to be told.
     pub(super) fn drop_lease(&mut self, error_code: VarInt) -> bool {
+        self.state.unlooked.remove(&self.id);
         let Some(lease) = self.state.leases.remove(&self.id) else {
             return false;
         };
+        if lease.evicted {
+            self.state.evicted_held -= lease.held;
+        }
         let _ = self.return_credit(lease.held);
         if !lease.evicted {
             return false;
@@ -421,11 +436,23 @@ impl StreamsState {
 
     /// The streams to evict, lowest rank on top, if the window is stuck; see
     /// [`Self::evict_if_stuck()`].
-    fn stuck_victims(&self) -> Option<BinaryHeap<Victim>> {
+    fn stuck_victims(&mut self) -> Option<BinaryHeap<Victim>> {
         if self.local_max_data > self.data_recvd {
             return None;
         }
+        // An evicted reader has yet to stop its stream, which returns the credit of what it took.
+        if self.evicted_held > 0 {
+            return None;
+        }
+        // Checked before the scan, so every waiting reader on a stuck window does not pay for one.
+        if self.trim_unlooked() {
+            return None;
+        }
 
+        #[cfg(test)]
+        {
+            self.scans += self.recv.len();
+        }
         // Newest first among equals: the stream with the higher index arrived later.
         let rank = |priority: i64, id: StreamId| Reverse((priority, Reverse(id)));
         let mut victims = Vec::new();
@@ -439,17 +466,10 @@ impl StreamsState {
             if recv.stopped || held == 0 || lease.is_some_and(|lease| lease.evicted) {
                 continue;
             }
-            let fresh = unread > 0 && lease.is_none_or(|lease| !lease.filled);
-            if fresh || lease.is_some_and(|lease| lease.ready) {
-                return None;
-            }
+            debug_assert!(!unlooked(unread, lease), "{id} has data its reader has not looked at");
             victims.push(rank(lease.map_or(0, |lease| lease.priority), id));
         }
         for (&id, lease) in &self.leases {
-            // Its reader has yet to stop the stream, which returns the credit of what it took.
-            if lease.evicted && lease.held > 0 {
-                return None;
-            }
             // A lease outlives its stream state once the last byte is read.
             if lease.held > 0 && !lease.evicted && !self.recv.contains_key(&id) {
                 victims.push(rank(lease.priority, id));
@@ -457,6 +477,34 @@ impl StreamsState {
         }
 
         Some(BinaryHeap::from(victims))
+    }
+
+    /// Whether any stream has data its reader has not looked at yet, which holds eviction off,
+    /// dropping the listed streams that no longer do.
+    fn trim_unlooked(&mut self) -> bool {
+        let mut stale = Vec::new();
+        let mut found = false;
+        for &id in &self.unlooked {
+            #[cfg(test)]
+            {
+                self.scans += 1;
+            }
+            let recv = self.recv.get(&id).and_then(|slot| slot.as_ref()?.as_open_recv());
+            let lease = self.leases.get(&id);
+            let waiting = recv.is_some_and(|recv| {
+                let unread = recv.end - recv.assembler.bytes_read();
+                !recv.stopped && !lease.is_some_and(|lease| lease.evicted) && unlooked(unread, lease)
+            });
+            if waiting {
+                found = true;
+                break;
+            }
+            stale.push(id);
+        }
+        for id in stale {
+            self.unlooked.remove(&id);
+        }
+        found
     }
 
     /// Discard everything `id` buffers, returning its credit, and fail its next lease.
@@ -473,6 +521,8 @@ impl StreamsState {
         lease.want = None;
         lease.ready = false;
         lease.evicted = true;
+        self.evicted_held += lease.held;
+        self.unlooked.remove(&id);
         self.held -= held;
         self.evicted += 1;
 

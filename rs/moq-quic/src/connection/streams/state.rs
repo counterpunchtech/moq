@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::BufMut;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
@@ -139,6 +139,17 @@ pub(crate) struct StreamsState {
     pub(super) leases: FxHashMap<StreamId, Leased>,
     /// Streams evicted to free a stuck receive window, ever
     pub(super) evicted: u64,
+    /// The most credit the peer has had spent at once
+    pub(super) peak_spent: u64,
+    /// Receive streams that may have data their reader has not looked at, which holds eviction
+    /// off: every such stream, and possibly some that no longer are, trimmed by the stuck pass
+    pub(super) unlooked: FxHashSet<StreamId>,
+    /// Credit still held by evicted readers that have not stopped their streams, which holds
+    /// further eviction off
+    pub(super) evicted_held: u64,
+    /// Streams the stuck pass has looked at, to prove it stays linear
+    #[cfg(test)]
+    pub(super) scans: usize,
     /// Which connection the send groups handed out here belong to
     pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
@@ -205,6 +216,11 @@ impl StreamsState {
             data_recvd: 0,
             held: 0,
             evicted: 0,
+            peak_spent: 0,
+            unlooked: FxHashSet::default(),
+            evicted_held: 0,
+            #[cfg(test)]
+            scans: 0,
             leases: FxHashMap::default(),
             tag: ConnectionTag::next(),
             buffered_data: 0,
@@ -283,6 +299,7 @@ impl StreamsState {
                     self.recv.remove(&id).unwrap();
                     // A rejected stream never received anything, so its lease holds no credit.
                     self.leases.remove(&id);
+                    self.unlooked.remove(&id);
                 }
             }
             self.next[dir as usize] = 0;
@@ -333,10 +350,14 @@ impl StreamsState {
         let (new_bytes, closed) =
             rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);
+        // Credit only returns between arrivals, so an arrival is when the most is spent.
+        let spent = (self.data_recvd + self.receive_window).saturating_sub(self.local_max_data);
+        self.peak_spent = self.peak_spent.max(spent);
 
         if !rs.stopped {
             self.events.push_back(StreamEvent::Readable { id });
             self.lease_readable(id);
+            self.unlooked.insert(id);
             // The frame that spends the last of the window is when every reader may be stuck.
             let evicted = self.evict_if_stuck();
             // Credit released while the peer still had room may not have been worth a frame
@@ -1124,6 +1145,7 @@ impl StreamsState {
             leased: self.held,
             available: self.local_max_data.saturating_sub(self.data_recvd),
             evicted: self.evicted,
+            peak_spent: self.peak_spent,
         }
     }
 
@@ -1146,6 +1168,7 @@ impl StreamsState {
     }
 
     pub(super) fn stream_recv_freed(&mut self, id: StreamId, recv: StreamRecv) {
+        self.unlooked.remove(&id);
         self.free_recv.push(recv.free(self.stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
     }
@@ -3295,10 +3318,11 @@ mod tests {
         release(&mut client, id, 2);
         assert_eq!(client.local_max_data, initial + 12);
         assert_eq!(client.credit_stats().leased, 20);
+        assert_eq!(client.credit_stats().peak_spent, 80, "the gap counts, and the peak outlives the release");
     }
 
     /// A finished stream's state is reclaimed once its last byte is leased, but the lease and its
-    /// credit stay until consumed.
+    /// credit stay until released.
     #[test]
     fn lease_outlives_its_stream() {
         let mut client = make(Side::Client);
@@ -3486,6 +3510,37 @@ mod tests {
         let leased = client.leased(id).unwrap();
         assert_eq!(leased.len(), 8);
         assert!(leased.chunks().count() <= 4, "merged as they arrive");
+    }
+
+    /// A peer can spend the window across many streams before any reader looks, so every reader
+    /// then waits on a stuck window. Each wait checks it in constant time, and only the last
+    /// pays one scan of every stream, so a hostile peer cannot make the stuck check quadratic.
+    #[test]
+    fn stuck_check_stays_linear() {
+        const STREAMS: u64 = 512;
+        let mut client = StreamsState::new(
+            Side::Client,
+            1024u32.into(),
+            1024u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(STREAMS).unwrap(),
+            VarInt::from_u64(STREAMS).unwrap(),
+        );
+        let ids: Vec<_> = (0..STREAMS)
+            .map(|index| StreamId::new(Side::Server, Dir::Uni, index))
+            .collect();
+        for &id in &ids {
+            data(&mut client, id, 0, 1, false);
+        }
+        for &id in &ids {
+            assert!(matches!(wait(&mut client, id, 2), Err(LeaseError::Blocked(_))));
+        }
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert!(
+            client.scans <= 4 * STREAMS as usize,
+            "{} streams looked at for {STREAMS} waits",
+            client.scans
+        );
     }
 
     /// A consume whose credit only pays a shrunk window's debt reruns the stuck pass: the
