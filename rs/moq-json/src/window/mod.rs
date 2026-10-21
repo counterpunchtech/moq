@@ -461,7 +461,7 @@ mod test {
 			.flatten()
 			.map(|position| position.group)
 			.unwrap();
-		subscriber.set_groups(largest..);
+		subscriber = subscriber.with_range(largest..);
 		let mut fresh = consumer(subscriber, false);
 		producer.finish().unwrap();
 

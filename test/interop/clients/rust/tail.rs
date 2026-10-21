@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 			let broadcast = consumer.routed_broadcast(&args[3]).await?;
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
-				.with_groups(0..);
+				.with_range(0..);
 			let mut track = broadcast.track("tail")?.subscribe(Some(options)).await?;
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {

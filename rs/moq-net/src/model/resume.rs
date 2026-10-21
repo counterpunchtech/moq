@@ -21,13 +21,14 @@
 //! sequence its [`track::Subscriber`] already handed out, the same record that keeps a
 //! direct reader from taking a re-created group twice.
 
+use std::ops::Bound;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, ready};
 
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use super::subscription::{Anchor, Cap, Position, Resolved, Subscription, Window};
+use super::subscription::{Anchor, Position, Resolved, Subscription, Window};
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
@@ -188,7 +189,7 @@ impl Consumer {
 				newest: None,
 				window,
 				datagram: None,
-				groups: (floor, Cap::from(..)),
+				groups: (floor, None),
 				groups_read: false,
 				peeked: None,
 			})
@@ -351,16 +352,24 @@ impl Copy {
 	}
 
 	/// The subscription, once the copy answered. `Err` once it refused.
-	fn poll_ready(&mut self, groups: (u64, Cap), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
+	fn poll_ready(&mut self, groups: (u64, Option<u64>), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
 		if let Sub::Pending(pending) = &self.sub {
-			let mut sub = ready!(pending.poll_ok(waiter))?;
+			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
-			sub.raise_start_to(self.floor.map_or(groups.0, |floor| groups.0.max(floor.group)));
-			sub.end_at(groups.1);
+			let sub = sub.with_range((
+				Bound::Included(self.start(groups.0)),
+				groups.1.map_or(Bound::Unbounded, Bound::Excluded),
+			));
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
+	}
+
+	/// The local floor `start` as this copy applies it: never below its own resume point,
+	/// since groups under it were handed out by an earlier route, or never owed.
+	fn start(&self, start: u64) -> u64 {
+		self.floor.map_or(start, |floor| start.max(floor.group))
 	}
 
 	/// Whether this copy is still needed: it serves, or a group read from or backed by it is
@@ -483,21 +492,9 @@ impl Subscriber {
 		}
 	}
 
-	/// Raise the local read floor; see [`track::Subscriber::set_groups`].
-	pub(super) fn raise_start_to(&mut self, start: u64) {
-		self.reader().raise_start_to(start)
-	}
-
-	/// Move the local read floor to `start`, including downward.
-	/// See [`track::Subscriber::start_at`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(super) fn start_at(&mut self, start: u64) {
-		self.reader().start_at(start)
-	}
-
-	/// Cap local reads at `end`; see [`track::Subscriber::set_groups`].
-	pub(super) fn end_at(&mut self, end: Cap) {
-		self.reader().end_at(end)
+	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
+	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>) {
+		self.reader().set_range(start, end)
 	}
 
 	/// Whether any subscribed copy still has a group matching `unread`.
@@ -528,10 +525,7 @@ impl Subscriber {
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
 		let (start, end) = self.reader().groups;
-		track::Bounds {
-			start,
-			end: end.exclusive(),
-		}
+		track::Bounds { start, end }
 	}
 
 	/// The groups the copies' drift budget skipped since the last call, counted against
@@ -585,8 +579,8 @@ struct Reader {
 	window: Window,
 	/// The newest datagram handed out, by Group and Object ID.
 	datagram: Option<(u64, u64)>,
-	/// The local group filter; see [`track::Subscriber::set_groups`].
-	groups: (u64, Cap),
+	/// The local floor and exclusive cap; see [`track::Subscriber::with_range`].
+	groups: (u64, Option<u64>),
 	/// Whether groups were read, so a datagram read keeps the copies they still need.
 	groups_read: bool,
 }
@@ -1127,37 +1121,15 @@ impl Reader {
 		}
 	}
 
-	fn raise_start_to(&mut self, start: u64) {
+	/// Assign the local floor and cap. A copy still waiting on its info takes them when it
+	/// resolves; one already reading has to be moved, or a group it skipped stays skipped.
+	fn set_range(&mut self, start: u64, end: Option<u64>) {
 		self.peeked = None;
-		self.groups.0 = self.groups.0.max(start);
+		self.groups = (start, end);
 		for copy in &mut self.copies {
+			let start = copy.start(start);
 			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.raise_start_to(start);
-			}
-		}
-	}
-
-	/// Assign the local floor. A copy still waiting on its info takes the floor
-	/// from the mirrored subscription when it resolves; one already reading has
-	/// to be moved, or a group it skipped stays skipped. Never below a copy's own
-	/// resume point: groups under it were handed out by an earlier route, or never owed.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn start_at(&mut self, start: u64) {
-		self.peeked = None;
-		self.groups.0 = start;
-		for copy in &mut self.copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.start_at(copy.floor.map_or(start, |floor| start.max(floor.group)));
-			}
-		}
-	}
-
-	fn end_at(&mut self, end: Cap) {
-		self.peeked = None;
-		self.groups.1 = end;
-		for copy in &mut self.copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.end_at(end);
+				sub.set_range((Bound::Included(start), end.map_or(Bound::Unbounded, Bound::Excluded)));
 			}
 		}
 	}
@@ -1325,9 +1297,9 @@ impl Recover {
 			if copy.generation == self.generation {
 				return None;
 			}
-			let mut group = copy.track.peek_group(self.sequence)?;
+			let group = copy.track.peek_group(self.sequence)?;
 			lend_head(&self.handoff, self.sequence, &copy.track, &group);
-			group.start_at(index);
+			let group = group.with_range(index..);
 			(group.index() == index).then(|| Replacement {
 				group,
 				generation: copy.generation,
@@ -1348,9 +1320,9 @@ impl Recover {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
+		if !same && let Poll::Ready(Some(group)) = serving.poll_group(self.sequence, waiter) {
 			lend_head(&self.handoff, self.sequence, serving, &group);
-			group.start_at(index);
+			let group = group.with_range(index..);
 			if group.index() == index {
 				return Poll::Ready(Ok(Replacement {
 					group,
@@ -1377,9 +1349,9 @@ impl Recover {
 			Fetch::Refused(err) if route_failed(err) || copy_failed(serving) => return Poll::Pending,
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
-				Ok(mut group) => {
+				Ok(group) => {
 					lend_head(&self.handoff, self.sequence, serving, &group);
-					group.start_at(index);
+					let group = group.with_range(index..);
 					if group.index() == index {
 						return Poll::Ready(Ok(Replacement {
 							group,
@@ -1952,9 +1924,9 @@ mod test {
 		for sequence in 0..5 {
 			write(&a, sequence);
 		}
-		sub.set_groups(..3);
+		sub.set_range(..3);
 		assert!(sub.largest().now_or_never().is_none(), "the largest is past the cap");
-		sub.set_groups(..);
+		sub.set_range(..);
 		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
 	}
 
@@ -1967,7 +1939,7 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let subscription = Subscription::default().with_max_delay(HOUR).with_groups(8..);
+		let subscription = Subscription::default().with_max_delay(HOUR).with_range(8..);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -2051,6 +2023,27 @@ mod test {
 			};
 			sequences.push(group.sequence);
 		}
+	}
+
+	/// Lowering a front reader's local floor offers the cached groups below the old one it
+	/// passed over, as a plain reader does.
+	#[test]
+	fn a_lowered_range_reoffers_the_unread_cached_groups() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).with_range(4..);
+		for sequence in 0..6 {
+			write(&a, sequence);
+		}
+		assert_eq!(drain(&mut sub, false), vec![4, 5]);
+
+		let mut sub = sub.with_range(1..);
+		assert_eq!(drain(&mut sub, false), vec![1, 2, 3], "passed below the floor");
+		let mut sub = sub.with_range(..);
+		assert_eq!(drain(&mut sub, false), vec![0]);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing goes out twice");
 	}
 
 	/// A replaced copy is bounded only once the new copy delivers its first group: a group
@@ -2423,7 +2416,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		sub.end_at(Cap::from(..=0));
+		sub.set_range(..=0);
 		let mut held = a.create_group(group::Info { sequence: 0 }).unwrap();
 		held.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let Poll::Ready(Ok(Some(reading))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
@@ -2441,11 +2434,11 @@ mod test {
 		}
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 
-		sub.end_at(Cap::from(..));
+		sub.set_range(..);
 		let mut seen = drain(&mut sub, false);
 		seen.sort_unstable();
 		assert_eq!(seen, [1, 2, 3]);
-		sub.start_at(0);
+		sub.set_range(..);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 
 		// The replaced copy finishes with the held group.
@@ -2520,7 +2513,7 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		sub.start_at(0);
+		sub.set_range(..);
 		assert_eq!(recv(&mut sub).sequence, 6);
 	}
 
@@ -2591,7 +2584,7 @@ mod test {
 		assert!(matches!(copy.sub, Sub::Pending(_)));
 		copy.update(&updated);
 		assert_eq!(copy.wire(&updated).ranges, ranges);
-		assert!(copy.poll_ready((0, Cap::from(..)), &kio::Waiter::noop()).is_ready());
+		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
 		assert_eq!(copy.wire(&updated).ranges, ranges);
 	}
 
@@ -3640,9 +3633,9 @@ mod test {
 				routes.serve(b.consume());
 				assert!(sub.recv_datagram().now_or_never().is_none());
 				if raise_floor {
-					sub.set_groups(1..);
+					sub.set_range(1..);
 				} else {
-					sub.set_groups(..0);
+					sub.set_range(..0);
 				}
 				assert!(
 					if ordered {
@@ -3653,7 +3646,7 @@ mod test {
 					.is_pending()
 				);
 				if !raise_floor {
-					sub.set_groups(..);
+					sub.set_range(..);
 					let next = if ordered {
 						sub.poll_next_group(&kio::Waiter::noop())
 					} else {

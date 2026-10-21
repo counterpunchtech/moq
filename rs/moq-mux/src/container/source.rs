@@ -369,7 +369,7 @@ impl ExportSource {
 			};
 			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			if let Some(start) = self.start {
-				subscription = subscription.with_groups(start..);
+				subscription = subscription.with_range(start..);
 			}
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}

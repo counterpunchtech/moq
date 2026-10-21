@@ -4148,21 +4148,18 @@ struct TrackServe<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> TrackServe<S> {
 	fn new(
 		session: S,
-		mut track: track::Subscriber,
+		track: track::Subscriber,
 		request_id: RequestId,
 		version: Version,
 		range: ServeRange,
 		timescale: Option<Timescale>,
 	) -> Self {
-		match range.start {
-			Some(start) => track.start_at(start.group),
-			None => {
-				if let Some(latest) = track.latest_sequence() {
-					track.start_at(latest);
-				}
-			}
-		}
-		track.end_at(range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group)));
+		let floor = match range.start {
+			Some(start) => start.group,
+			None => track.latest_sequence().unwrap_or(0),
+		};
+		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
+		let track = track.with_range((Bound::Included(floor), end));
 		let datagrams = session.max_datagram_size() > 0;
 		// A Timestamp whose units were not declared is worse than none. Drafts 14-16
 		// never write TIMESCALE, whatever the caller passed in, so datagrams and group
@@ -4786,7 +4783,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	) -> Self {
 		if group.wire().is_none() {
 			group.skip_to(slice.skip);
-			group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
+			group = group.with_range((Bound::Unbounded, slice.until.map_or(Bound::Unbounded, Bound::Excluded)));
 		}
 		Self {
 			session,
@@ -4881,7 +4878,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								// flow control must not pin a stream that has gone stale. `true`
 								// because the transport still owns bytes the cursor has released.
 								Poll::Pending => {
-									if self.group.poll_expired_while_pending(waiter, true) {
+									if self.group.poll_expired(waiter) {
 										break 'serve Err(Error::Old);
 									}
 									return Poll::Pending;
@@ -4900,7 +4897,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									// flow control must not pin a stream that has gone stale. `true`
 									// because the transport still owns bytes the cursor has released.
 									Poll::Pending => {
-										if self.group.poll_expired_while_pending(waiter, true) {
+										if self.group.poll_expired(waiter) {
 											break 'serve Err(Error::Old);
 										}
 										return Poll::Pending;
@@ -5079,7 +5076,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						// Those bytes still hold the connection until acknowledged, so a
 						// group gone stale meanwhile releases them like one still serving:
 						// dropping the writer resets the stream.
-						Poll::Pending if self.group.poll_expired_while_pending(waiter, true) => {
+						Poll::Pending if self.group.poll_expired(waiter) => {
 							self.state = GroupState::Done;
 							return Poll::Ready(Err(Error::Old));
 						}
@@ -15419,16 +15416,15 @@ struct ServeRange {
 impl ServeRange {
 	/// Bound `subscription` to this range.
 	fn apply(&self, subscription: &mut Subscription) {
-		subscription.set_bounds(
-			self.start.map(|start| track::Position {
+		*subscription = std::mem::take(subscription)
+			.with_start(self.start.map(|start| track::Position {
 				group: start.group,
 				frame: start.object,
-			}),
-			self.end.and_then(|end| match end.object {
+			}))
+			.with_end(self.end.and_then(|end| match end.object {
 				Some(object) => track::Position::after(end.group, object),
 				None => track::Position::after_group(end.group),
-			}),
-		);
+			}));
 	}
 }
 
@@ -15622,7 +15618,7 @@ mod range_tests {
 
 		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
 		let mut subscriber = track.subscribe(None);
-		subscriber.start_at(9);
+		subscriber.set_range(9..);
 		assert!(
 			futures::poll!(std::pin::pin!(subscriber.recv_group())).is_pending(),
 			"a future start must wait for its group rather than serving the live edge"
