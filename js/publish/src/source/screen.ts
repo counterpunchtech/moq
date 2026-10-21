@@ -73,11 +73,11 @@ export class Screen {
 		const audio = effect.get(this.audio);
 
 		// TODO Expose these to the application.
-		// @ts-expect-error Chrome only
+		// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 		let controller: CaptureController | undefined;
-		// @ts-expect-error Chrome only
+		// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 		if (typeof self.CaptureController !== "undefined") {
-			// @ts-expect-error Chrome only
+			// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 			controller = new CaptureController();
 			controller.setFocusBehavior("no-focus-change");
 		}
@@ -88,7 +88,7 @@ export class Screen {
 					.getDisplayMedia({
 						video,
 						audio,
-						// @ts-expect-error Chrome only
+						// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 						controller,
 						preferCurrentTab: false,
 						selfBrowserSurface: "exclude",
