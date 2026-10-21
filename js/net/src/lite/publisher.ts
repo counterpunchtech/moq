@@ -1605,6 +1605,12 @@ export class Publisher {
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		// The subscription's budget may give up on the group mid-write, which abandons the stream.
+		// A group already past it never starts the write.
+		const write = async (op: () => Promise<unknown>) => {
+			const expired = group.expired.peek() ?? (await race([op().then(() => undefined), group.expired]));
+			if (expired) throw expired;
+		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -1612,7 +1618,7 @@ export class Publisher {
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence, startFrame);
 
-			await hooks.guardGroup(group, async () => {
+			await write(async () => {
 				await stream.u53(0); // stream type
 				await msg.encode(stream, this.version);
 			});
@@ -1623,7 +1629,7 @@ export class Publisher {
 			let reached = startFrame === 0;
 
 			for (;;) {
-				const read = await race([hooks.readGroupFrame(group), stream.closed]);
+				const read = await race([group.readFrameSequence(), stream.closed]);
 				if (!read) {
 					// The group ended before the frame the subscriber asked to start
 					// at, so this publisher can't serve the range at all. FINning here
@@ -1633,26 +1639,22 @@ export class Publisher {
 					break;
 				}
 
-				try {
-					// A group that ends exactly at the start is a valid, empty range.
-					if (read.sequence + 1 >= startFrame) reached = true;
-					// Frames below the requested start were excluded, and the receiver
-					// numbers what it gets from `startFrame`.
-					if (read.sequence < startFrame) continue;
-					if (endFrame !== undefined && read.sequence > endFrame) break;
+				// A group that ends exactly at the start is a valid, empty range.
+				if (read.sequence + 1 >= startFrame) reached = true;
+				// Frames below the requested start were excluded, and the receiver
+				// numbers what it gets from `startFrame`.
+				if (read.sequence < startFrame) continue;
+				if (endFrame !== undefined && read.sequence > endFrame) break;
 
-					if (timescale !== undefined) {
-						// Convert each frame to the track's wire timescale.
-						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
-						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
-						prevTs = ts;
-					}
-
-					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
-					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
-				} finally {
-					read.complete();
+				if (timescale !== undefined) {
+					// Convert each frame to the track's wire timescale.
+					const ts = BigInt(wireTime(read.timestamp, timescale));
+					await write(() => stream.u62(zigzag(ts - prevTs)));
+					prevTs = ts;
 				}
+
+				await write(() => stream.u53(read.payload.byteLength));
+				await write(() => stream.write(read.payload));
 			}
 
 			stream.close();
@@ -1660,7 +1662,7 @@ export class Publisher {
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
 			// Its bytes still hold the connection until acknowledged, so a group gone stale
 			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
-			await hooks.guardGroup(group, () => stream.closed);
+			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);

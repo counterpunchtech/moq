@@ -1,5 +1,6 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import { race } from "@moq/signals";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
@@ -1020,7 +1021,7 @@ test("committing track info wakes a group newly outside the retention window", a
 	await expect(waiting).rejects.toMatchObject({ code: StreamCode.Old });
 });
 
-test("a handed-out frame cancels its in-flight operation when it expires", async () => {
+test("a handed-out group reports its expiry to a writer racing it", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	const track = producer.subscribe();
 	producer.writeFrame(textFrame("old"));
@@ -1029,18 +1030,15 @@ test("a handed-out frame cancels its in-flight operation when it expires", async
 	if (!group) throw new Error("missing group");
 	expect(await group.readString()).toBe("old");
 
-	let release!: () => void;
-	const operation = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const guarded = hooks.guardGroup(group, () => operation);
+	const write = new Promise<void>(() => {});
+	const raced = race([write, group.expired]);
 	producer.writeFrame(textFrame("new"));
 
-	await expect(guarded).rejects.toThrow("max delay budget");
-	release();
+	expect(await raced).toMatchObject({ code: StreamCode.Old, message: expect.stringContaining("max delay budget") });
+	expect(group.expired.peek()).toMatchObject({ code: StreamCode.Old });
 });
 
-test("a guarded write keeps the position of the frame removed from the buffer", async () => {
+test("a frame still being written is judged against the budget", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 	const track = producer.subscribe({ maxDelay: Milli(100) });
 	const source = producer.appendGroup();
@@ -1049,54 +1047,49 @@ test("a guarded write keeps the position of the frame removed from the buffer", 
 
 	const group = await track.recvGroup();
 	if (!group) throw new Error("missing group");
-	const read = await hooks.readGroupFrame(group);
-	if (!read) throw new Error("missing frame");
-
-	let release!: () => void;
-	const operation = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const guarded = hooks.guardGroup(group, () => operation);
+	expect(await group.readFrame()).toBeDefined();
+	const raced = race([new Promise<void>(() => {}), group.expired]);
 
 	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
 	// A group beyond the edge, so group 0's reach (1s) is provably behind it: a group is
 	// bounded by where its successor begins, so the successor alone never convicts it.
 	producer.writeFrame({ payload: enc.encode("later"), timestamp: Timestamp.fromMillis(2_000) });
-	await expect(guarded).rejects.toThrow("max delay budget");
-	read.complete();
-	release();
+	expect(await raced).toMatchObject({ code: StreamCode.Old });
 });
 
-test("clean source closure stays provisional while a frame write can expire", async () => {
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
-	const track = producer.subscribe({ maxDelay: Milli(100) });
-	const source = producer.appendGroup();
-	source.writeFrame({ payload: enc.encode("old"), timestamp: Timestamp.fromMillis(0) });
-	source.close();
+// Mirrors the Rust `a_fully_read_group_still_reports_its_expiry`: a publisher still draining a
+// group it read whole abandons the stream once the budget gives up on the group.
+test("a fully read group still reports its expiry", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	try {
+		const track = producer.subscribe({ maxDelay: Milli(1000) });
+		const source = producer.appendGroup();
+		source.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.fromMillis(0) });
+		source.close();
 
-	const group = await track.recvGroup();
-	if (!group) throw new Error("missing group");
-	const closed = group.closed;
-	expect(closed.peek()).toBeUndefined();
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readFrame()).toBeDefined();
+		expect(await group.readFrame()).toBeUndefined();
+		expect(await group.closed).toBeNull();
+		expect(group.expired.peek()).toBeUndefined();
 
-	const read = await hooks.readGroupFrame(group);
-	if (!read) throw new Error("missing frame");
-	let release!: () => void;
-	const operation = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const guarded = hooks.guardGroup(group, () => operation);
+		// Frozen media time, so only the wall clock since the successor arrived convicts it.
+		producer.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.fromMillis(0) });
+		const raced = race([new Promise<void>(() => {}), group.expired]);
+		await settle();
+		clock.set(10_999);
+		await settle();
+		expect(group.expired.peek()).toBeUndefined();
 
-	const edge = producer.appendGroup();
-	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
-	// See above: a group is bounded by where its successor begins, so convicting group 0
-	// needs a group beyond that successor.
-	producer.writeFrame({ payload: enc.encode("later"), timestamp: Timestamp.fromMillis(2_000) });
-	await expect(guarded).rejects.toThrow("max delay budget");
-	expect(await closed).toBeInstanceOf(Error);
-
-	read.complete();
-	release();
+		clock.set(11_000);
+		expect(await raced).toMatchObject({ code: StreamCode.Old });
+		expect(group.expired.peek()).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		producer.close();
+		clock.restore();
+	}
 });
 
 test("a drained group finishes cleanly after the live edge advances", async () => {

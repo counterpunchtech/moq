@@ -939,8 +939,15 @@ export class Publisher {
 				},
 			});
 
+			// The subscription's budget may give up on the group mid-write, which abandons the stream.
+			// A group already past it never starts the write.
+			const write = async (op: () => Promise<unknown>) => {
+				const expired = group.expired.peek() ?? (await race([op().then(() => undefined), group.expired]));
+				if (expired) throw expired;
+			};
+
 			try {
-				await hooks.guardGroup(group, () => header.encode(stream, this.#session.version));
+				await write(() => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -957,24 +964,15 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
+					const read = await race([group.readFrameSequence({ from: slice.skip }), stream.closed]);
 					if (!read) break;
 					next = read.sequence + 1;
-					if (slice.until !== undefined && read.sequence >= slice.until) {
-						read.complete();
-						break;
-					}
+					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
-					try {
-						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
-						const delta = first ? read.sequence : 0;
-						first = false;
-						await hooks.guardGroup(group, () =>
-							obj.encode(stream, header.flags, timescale, this.#session.version, delta),
-						);
-					} finally {
-						read.complete();
-					}
+					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
+					const delta = first ? read.sequence : 0;
+					first = false;
+					await write(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this
@@ -997,7 +995,7 @@ export class Publisher {
 				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
 				// timeline judges the budget, stays open until the stream settles.
 				const delivered = await race([
-					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					write(() => stream.closed).then(() => true),
 					unsubscribed.then(() => false),
 				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN

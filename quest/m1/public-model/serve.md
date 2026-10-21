@@ -1,10 +1,12 @@
-# [S] Public group expiry in JS
+# [XS] Public group abandonment in Rust
 
 ## Goal
 
-A custom `@moq/net` publisher learns, through public calls, when a group it is
-still writing has expired, as the Rust `group::Consumer::poll_expired` already
-lets it. The built-in lite and IETF publishers use the same call.
+A custom `moq-net` publisher waiting on its transport, for stream credit or to
+drain, learns through a public call when to give up on a group: the budget
+expired it, or its copy was aborted before the publisher read it all and no
+route will continue it. The built-in lite and IETF publishers use the same
+call.
 
 ## Plan
 
@@ -12,28 +14,27 @@ The rest of public serving landed: the `with_range`/`withRange` cursor, public
 `poll_start`, `poll_drop`, `poll_expired`, `Position::final_sequence`,
 `Subscription::{start, end, with_start, with_end}`, and in JS the `Recv` union
 from `tryRecvGroup`, `groupChanged`, `Ordered.tryNextGroup`, `finalSequence`,
-and `Track.Consumer.info({ hold })`. The live-edge answers moved to
-[track-live](/quest/m1/track-live.md), and `track::Consumer::final_sequence`
-to [the deferred quest](/quest/m1/public-model/deferred.md).
+`Track.Consumer.info({ hold })`, and `Group.Consumer.expired`. The live-edge
+answers moved to [track-live](/quest/m1/track-live.md), and
+`track::Consumer::final_sequence` to
+[the deferred quest](/quest/m1/public-model/deferred.md).
 
-Left: `hooks.guardGroup` and `hooks.readGroupFrame` with `ReadGroupFrame`
-(both publishers, `js/net/src/group.ts`). A publisher that already read frames
-off a group must still abandon its stream once the subscription's max delay
-expires the group. Reading a frame the publisher `complete()`s holds the
-group's `closed` until it is written. **Decision** on the public shape:
+Left: the crate-private `group::Consumer::poll_abandoned(waiter, held)`,
+which [#6140](https://github.com/moq-dev/moq/pull/6140) added so a group
+parked on stream credit gives up. It answers `poll_expired` plus the aborted
+copy. **Decision** on the public shape:
 
-- A public `expired` promise on `Group.Consumer`, resolving with the `Old`
-  error once the budget gives up on the group, which a publisher races its
-  writes against; the pending hold folds into `readFrame` (a read holds
-  `closed` until the next read or close). Recommended: it mirrors
-  `poll_expired` and adds no second read method.
-- A public `guard(operation)` taking a thunk, as the hook does today. Shorter
-  call sites, but a callback parameter.
-- Keep both hooks private as plumbing, on the grounds that a JS publisher
-  needs the wire stream types anyway.
+- Make `poll_abandoned` public and `poll_expired` private, dropping the
+  `held` flag the way `poll_expired` did (`poll_open` passes `false` today, so
+  an empty finished group parked on credit would then expire). Recommended:
+  one call answers "stop writing this group".
+- Keep both public, with `held` exposed. A bool parameter callers must reason
+  about.
+- Keep `poll_abandoned` private: a custom publisher reads the abort on its
+  next frame read instead, but holds the credit it waited for until then.
 
-Tests: a mock-time test that a fully read, unfinished group still reports its
-expiry, mirroring the Rust `a_fully_read_group_still_reports_its_expiry`.
+Check whether the JS publishers need the same: `Group.Consumer.expired`
+covers the budget, not an aborted copy parked on credit.
 
 ## Related
 

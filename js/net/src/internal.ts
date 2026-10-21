@@ -11,7 +11,7 @@ import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import type * as Epoch from "./epoch.ts";
-import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -141,16 +141,6 @@ export function runGaps(runs: readonly Run[], start: number, end: number): Run[]
 	}
 	if (next < end) gaps.push({ start: next, end });
 	return gaps;
-}
-
-/** A package-internal frame read the wire publisher completes once written. */
-export interface ReadGroupFrame {
-	/** Frame sequence within the group. */
-	sequence: number;
-	/** Frame returned to the publisher. */
-	frame: Frame;
-	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
-	complete(): void;
 }
 
 /** One past the highest sequence written under a broadcast track's name, by any of its producers. */
@@ -456,12 +446,6 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
-	// pending: /quest/m1/public-model/serve.md
-	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
-	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
-	// pending: /quest/m1/public-model/serve.md
-	/** Read a frame the wire publisher completes (or skips) once written. */
-	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -602,12 +586,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	guardGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	readGroupFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

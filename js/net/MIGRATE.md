@@ -31,7 +31,7 @@ const recv = subscriber.tryRecvGroup();
 const group = recv.kind === "group" ? recv.group : undefined;
 ```
 
-`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, and `Track.Consumer.info({ hold })` are new.
+`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new; a custom publisher races its writes against `expired` and resets the stream once it settles.
 
 ### A claim answers by publishing (#5678)
 

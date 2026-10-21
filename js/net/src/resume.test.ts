@@ -1571,7 +1571,7 @@ test.each([false, true])(
 		copy(b);
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(10_000) });
-		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(sub.tryRecvGroup().kind).toBe("idle");
 		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
 		ta.write(0);
 		front.serve(b.consume());

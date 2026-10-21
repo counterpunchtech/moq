@@ -14,7 +14,7 @@ import {
 	TimestampMismatch,
 	TooFarBehind,
 } from "./error.ts";
-import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
+import { type Expiry, type GroupRecover, hooks, type Replacement } from "./internal.ts";
 import type { Timestamp } from "./time.ts";
 
 /** Maximum bytes of frames in a group. A write that would exceed this aborts with {@link GroupTooLarge}. */
@@ -374,6 +374,86 @@ interface Attempt {
 	replacement?: Replacement;
 }
 
+// `Consumer.expired`: judges the drift budget only while something listens, so racing it once
+// per write leaks nothing, and a group nobody watches pays nothing. The verdict latches.
+class Expired implements GetPromise<Error> {
+	#judge: () => Error | undefined;
+	#changed: () => readonly Getter<unknown>[];
+	#listeners = new Set<(value: Error | undefined) => void>();
+	// The drift inputs watched while anything listens.
+	#unwatch?: Dispose[];
+
+	constructor(judge: () => Error | undefined, changed: () => readonly Getter<unknown>[]) {
+		this.#judge = judge;
+		this.#changed = changed;
+	}
+
+	peek(): Error | undefined {
+		return this.#judge();
+	}
+
+	subscribe(fn: (value: Error | undefined) => void): Dispose {
+		this.#listeners.add(fn);
+		this.#watch();
+		return () => {
+			this.#listeners.delete(fn);
+			if (this.#listeners.size === 0) this.#stop();
+		};
+	}
+
+	changed(): Promise<Error | undefined>;
+	changed(fn: (value: Error | undefined) => void): Dispose;
+	changed(fn?: (value: Error | undefined) => void): Promise<Error | undefined> | Dispose {
+		if (!fn) return new Promise((resolve) => this.changed(resolve));
+		const dispose = this.subscribe((value) => {
+			dispose();
+			fn(value);
+		});
+		return dispose;
+	}
+
+	// biome-ignore lint/suspicious/noThenProperty: Expired is intentionally awaitable.
+	then<R1 = Error, R2 = never>(
+		onFulfilled?: ((value: Error) => R1 | PromiseLike<R1>) | null,
+		onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+	): PromiseLike<R1 | R2> {
+		return new Promise<Error>((resolve) => {
+			const value = this.peek();
+			if (value) resolve(value);
+			else this.changed((value) => value && resolve(value));
+		}).then(onFulfilled, onRejected);
+	}
+
+	// Watch the current drift inputs again, since an adopted copy brings its own.
+	refresh(): void {
+		if (!this.#unwatch) return;
+		this.#stop();
+		this.#watch();
+	}
+
+	#watch(): void {
+		if (this.#unwatch) return;
+		this.#unwatch = this.#changed().map((changed) => changed.subscribe(() => this.#check()));
+		// Judging arms the wall-clock wakeup; a verdict already reached notifies after `subscribe`
+		// returns, as a signal would.
+		if (this.peek()) queueMicrotask(() => this.#check());
+	}
+
+	#check(): void {
+		const value = this.peek();
+		if (!value) return;
+		this.#stop();
+		const listeners = [...this.#listeners];
+		this.#listeners.clear();
+		for (const fn of listeners) fn(value);
+	}
+
+	#stop(): void {
+		for (const dispose of this.#unwatch ?? []) dispose();
+		this.#unwatch = undefined;
+	}
+}
+
 // A consumer can finish from its own expiry verdict or from the shared group state. Keep
 // one stable public handle while letting peek() observe either source synchronously, before
 // signal subscribers run in the next microtask. The source is re-read on every check, since a
@@ -481,7 +561,7 @@ export class Consumer {
 	#terminal?: Error;
 	#verdict = new Once<Error | null>();
 	#closed?: CombinedClosed;
-	#pendingFrames = 0;
+	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
 
@@ -502,9 +582,29 @@ export class Consumer {
 			(value) =>
 				value instanceof Error
 					? !this.#recovers(value)
-					: this.#released || (this.#bufferedFrames().length === 0 && this.#pendingFrames === 0),
+					: this.#released || this.#bufferedFrames().length === 0,
 		);
 		return this.#closed;
+	}
+
+	/**
+	 * Settles with a `StreamError` of code `Old` once the subscription's `maxDelay` gives up
+	 * on this group, even after every frame was read or the group closed: a publisher still
+	 * writing or draining it races its writes against this and abandons the stream once it
+	 * settles. Peek it synchronously (`undefined` while within budget), or race it, which
+	 * stops watching the budget once the race ends.
+	 */
+	get expired(): GetPromise<Error> {
+		this.#expired ??= new Expired(
+			() => {
+				this.#expire();
+				return this.#terminal instanceof StreamError && this.#terminal.code === StreamCode.Old
+					? this.#terminal
+					: undefined;
+			},
+			() => this.#expiry?.changed ?? [],
+		);
+		return this.#expired;
 	}
 
 	// Whether a failure of the copy being read may still be continued from another route.
@@ -533,8 +633,6 @@ export class Consumer {
 			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
 				group.#closed = undefined;
 		};
-		hooks.guardGroup = (group, operation) => group.#guard(operation);
-		hooks.readGroupFrame = (group, from) => group.#readFramePosition(true, from);
 		hooks.evictGroup = (group) => {
 			group.#evict();
 		};
@@ -557,40 +655,6 @@ export class Consumer {
 		});
 		if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 		return true;
-	}
-
-	// Takes a thunk rather than a started promise, so a group already past its budget
-	// never begins the write: an abandoned write would reject later with no handler.
-	#guard<T>(operation: () => Promise<T>): Promise<T> {
-		this.#expire();
-		if (this.#terminal) return Promise.reject(this.#terminal);
-		const expiry = this.#expiry;
-		if (!expiry) return operation();
-
-		return new Promise<T>((resolve, reject) => {
-			let settled = false;
-			const disposes: Dispose[] = [];
-			const finish = (fn: () => void) => {
-				if (settled) return;
-				settled = true;
-				for (const dispose of disposes) dispose();
-				fn();
-			};
-			const check = () => {
-				this.#expire();
-				if (this.#terminal) {
-					const error = this.#terminal;
-					finish(() => reject(error));
-				}
-			};
-
-			for (const changed of expiry.changed) disposes.push(changed.subscribe(check));
-			operation().then(
-				(value) => finish(() => resolve(value)),
-				(error: unknown) => finish(() => reject(error)),
-			);
-			check();
-		});
 	}
 
 	#evict() {
@@ -699,6 +763,7 @@ export class Consumer {
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
 		this.#closed?.refresh();
+		this.#expired?.refresh();
 	}
 
 	// The unread frames. Every look at the buffer goes through here, so readiness, reads and
@@ -713,24 +778,12 @@ export class Consumer {
 		return frames;
 	}
 
-	#readBufferedFrame(pending = false): ReadGroupFrame | undefined {
-		const frames = this.#bufferedFrames();
-		const buffered = frames.shift();
-		if (!buffered) return undefined;
-
+	#readBufferedFrame(): { sequence: number; frame: Frame } | undefined {
+		const frame = this.#bufferedFrames().shift();
+		if (!frame) return undefined;
 		const sequence = this.#state.start++;
-		if (pending) this.#pendingFrames++;
-		let completed = false;
-		return {
-			sequence,
-			frame: buffered,
-			complete: () => {
-				if (completed) return;
-				completed = true;
-				if (pending) this.#pendingFrames--;
-				this.#closed?.refresh();
-			},
-		};
+		this.#closed?.refresh();
+		return { sequence, frame };
 	}
 
 	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
@@ -768,9 +821,7 @@ export class Consumer {
 	 */
 	tryReadFrame(): Frame | undefined {
 		if (this.#terminal) return undefined;
-		const read = this.#readBufferedFrame();
-		read?.complete();
-		return read?.frame;
+		return this.#readBufferedFrame()?.frame;
 	}
 
 	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
@@ -778,7 +829,6 @@ export class Consumer {
 		if (this.#terminal) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		read.complete();
 		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 	}
 
@@ -811,23 +861,29 @@ export class Consumer {
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
 	async readFrame(): Promise<Frame | undefined> {
-		return (await this.#readFramePosition())?.frame;
+		return (await this.#readFrame(0))?.frame;
 	}
 
-	async #readFramePosition(pending = false, from = 0): Promise<ReadGroupFrame | undefined> {
+	/**
+	 * Reads the next frame along with its sequence number within the group.
+	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 */
+	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
+		const read = await this.#readFrame(options?.from ?? 0);
+		if (!read) return undefined;
+		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+	}
+
+	async #readFrame(from: number): Promise<{ sequence: number; frame: Frame } | undefined> {
 		for (;;) {
 			if (this.#terminal) {
 				this.#abandon();
 				throw this.#terminal;
 			}
 
-			const read = this.#readBufferedFrame(pending);
+			const read = this.#readBufferedFrame();
 			if (read) {
-				if (read.sequence < from) {
-					read.complete();
-					continue;
-				}
-				if (!pending) read.complete();
+				if (read.sequence < from) continue;
 				return read;
 			}
 
@@ -854,16 +910,6 @@ export class Consumer {
 			}
 			await this.#changed();
 		}
-	}
-
-	/**
-	 * Reads the next frame along with its sequence number within the group.
-	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
-	 */
-	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
-		const read = await this.#readFramePosition(false, options?.from ?? 0);
-		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 	}
 
 	/** Reads the next frame and decodes its payload as a UTF-8 string. */
