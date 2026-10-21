@@ -130,6 +130,7 @@ lands before the cut.
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
 - [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
+- [Lint override and deprecation audit](/quest/m1/audit-lints.md) - repeat the suppression and deprecation audit, starting with the conditional allows and the lanes clippy never runs
 
 ## Related
 
