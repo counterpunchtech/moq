@@ -349,6 +349,13 @@ pub(super) struct Update {
 	pub(super) authorization_token: Option<super::token::RequestToken>,
 	/// NEW_GROUP_REQUEST (draft-15+), which only a track advertising DYNAMIC_GROUPS takes.
 	pub(super) new_group: Option<u64>,
+	/// FORWARD, `None` when unchanged. Only a subscription we initiated with PUBLISH may
+	/// pause; the rest serve forwarding subscriptions only.
+	pub(super) forward: Option<bool>,
+	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
+	pub(super) filter: Option<super::Filter>,
+	/// FILL_PARAMETERS (draft-20+), which only a paused PUBLISH subscription resuming takes.
+	pub(super) fill: Option<super::Fill>,
 }
 
 impl Update {
@@ -383,7 +390,7 @@ impl Update {
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
-				let (refused, authorization_token) = Self::refused(tokens, !forward);
+				let (refused, authorization_token) = Self::refused(tokens, false);
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
@@ -391,6 +398,9 @@ impl Update {
 					refused,
 					authorization_token,
 					new_group: None,
+					forward: Some(forward),
+					filter: None,
+					fill: None,
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -425,10 +435,7 @@ impl Update {
 		if !track_filter.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
-		let unsupported = forward == Some(false)
-			|| filter.is_some()
-			|| fill.is_some()
-			|| !subgroup_filter.is_empty()
+		let unsupported = !subgroup_filter.is_empty()
 			|| !object_filter.is_empty()
 			|| !priority_filter.is_empty()
 			|| !property_filter.is_empty();
@@ -440,6 +447,9 @@ impl Update {
 			refused,
 			authorization_token,
 			new_group,
+			forward,
+			filter,
+			fill,
 		})
 	}
 
