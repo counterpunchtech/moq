@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
@@ -100,6 +100,48 @@ async function setup() {
 		},
 	};
 }
+
+test("returning to a route reuses its subscription and held group", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const tracks = sources.map(copy);
+	const open = tracks[0].write(0, 1, false);
+	const mirrored = spyOn(open, "mirror");
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	try {
+		await clock.advanceAsync(Nano.zero);
+		const held = sub.tryRecvGroup();
+		if (!held) throw new Error("expected the held group");
+		expect(dec.decode((await held.readFrame())?.payload)).toBe("0.0");
+		for (let round = 0; round < 32; round++) {
+			front.serve(handles[round % 2]);
+			await clock.advanceAsync(Nano.zero);
+			expect(sub.tryRecvGroup()).toBeUndefined();
+			expect(mirrored.mock.calls.length).toBe(1);
+		}
+		tracks[1].write(1);
+		expect(drain(sub)).toEqual([1]);
+		front.serve(handles[0]);
+		await clock.advanceAsync(Nano.zero);
+		open.writeFrame({ payload: enc.encode("0.1") });
+		expect(dec.decode((await held.readFrame())?.payload)).toBe("0.1");
+		tracks[0].write(2);
+		expect(drain(sub)).toEqual([2]);
+		held.close();
+	} finally {
+		mirrored.mockRestore();
+		open.close();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		restore();
+	}
+});
 
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
