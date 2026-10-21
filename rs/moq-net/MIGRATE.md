@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Stage a requested track before subscribers see it (#6111)
 
 `track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF SUBSCRIBE_OK's Largest Location) sees them.
+A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
 Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
 
 ```rust
