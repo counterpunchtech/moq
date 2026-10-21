@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Call `with_deltas(false)` where you called `with_delta_ratio(0)`.
 Snapshot groups roll on joiner demand: create the track with `Info::refresh` and drive `json::Snapshot::refresh` (or `poll_refresh`) beside your updates.
 
+### `ts::stats::Export`'s release counters move into `release` (#5849)
+
+`dropped`, `trimmed`, `gaps`, `drift`, and `out_of_tolerance` are now fields of `Export::release`, a `ts::stats::Release`, which `ts::Release::stats` also returns on its own.
+Read `export.release.dropped` where you read `export.dropped`, and likewise for the rest.
+
 ### Catalog read errors use `hang`'s variants (#6114)
 
 `catalog::hang::Consumer` reports a lost catalog track as `Error::Moq` instead of `Error::Json(moq_json::Error::Net(_))`, and any other catalog decode failure (such as a bad DEFLATE stream) as `Error::Hang(hang::Error::Json(_))` instead of `Error::Json(_)`.
