@@ -22,6 +22,20 @@ updates:
         patterns:
           - "*"
 
+  # The smoke suite's own toolchain flake, kept apart so its PR can carry the
+  # matching npm playwright pin (test/smoke/freshness.sh fails until it does)
+  # without holding up the root flake.
+  - package-ecosystem: "nix"
+    directory: "/test/smoke"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      smoke-nix:
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
