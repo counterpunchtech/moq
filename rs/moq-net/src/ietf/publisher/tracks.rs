@@ -796,6 +796,8 @@ where
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
 		// the resume.
 		let mut new_group: Option<u64>;
+		// A PUBLISH_OK breaking a rule ends the PUBLISH, as a refused update does.
+		let mut refused = None;
 		let resume = match answer {
 			None => {
 				stream.writer.abort(&Error::Cancel);
@@ -824,7 +826,13 @@ where
 					}
 					params.order = ok.group_order.or(params.order);
 					params.filter = ok.filter.unwrap_or(params.filter);
-					new_group = ok.new_group.or(params.new_group);
+					// The answer may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS
+					// (draft-18 section 10.2.13). The listing's own asked without knowing, as a
+					// SUBSCRIBE may, so it is ignored where it does not apply.
+					if ok.new_group.is_some() && !dynamic {
+						refused = Some(Served::UpdateFailed(Error::Unsupported));
+					}
+					new_group = ok.new_group.or(params.new_group.filter(|_| dynamic));
 					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
@@ -834,6 +842,11 @@ where
 				_ => return Err(goaways.failed(Error::UnexpectedMessage)),
 			},
 		};
+
+		if let Some(done) = refused {
+			drop(join);
+			return self.write_publish_done(stream, request_id, done, 0).await;
+		}
 
 		// Group streams opened over every time the subscription forwarded, which
 		// PUBLISH_DONE counts.
@@ -1016,11 +1029,39 @@ where
 			}
 			.apply(&mut subscription);
 		}
-		let mut subscriber = match track.subscribe(subscription.clone()).await {
-			Ok(subscriber) => subscriber,
-			Err(err) => return Ok(Served::Track(Err(err))),
+		// Setting up lasts only while the track is listed and the subscriber stays: a cold
+		// route may take a while to say where its live edge is.
+		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
+		let subscribed = kio::wait(|waiter| {
+			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+				return Poll::Ready(Err(()));
+			}
+			if listed.poll_closed(waiter).is_ready() {
+				return Poll::Ready(Ok(None));
+			}
+			waiter
+				.poll_future(subscribing.as_mut())
+				.map(|subscribed| Ok(Some(subscribed)))
+		})
+		.await?;
+		let mut subscriber = match subscribed {
+			Some(Ok(subscriber)) => subscriber,
+			Some(Err(err)) => return Ok(Served::Track(Err(err))),
+			None => return Ok(unlisted()),
 		};
-		kio::wait(|waiter| subscriber.poll_live(waiter)).await;
+		let live = kio::wait(|waiter| {
+			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+				return Poll::Ready(Err(()));
+			}
+			if listed.poll_closed(waiter).is_ready() {
+				return Poll::Ready(Ok(false));
+			}
+			subscriber.poll_live(waiter).map(|_| Ok(true))
+		})
+		.await?;
+		if !live {
+			return Ok(unlisted());
+		}
 
 		let edge = live_edge(track);
 		let range = subscribe_range(params.filter, edge, self.version);
@@ -1572,6 +1613,35 @@ mod tests {
 			} else {
 				let _publishes = [h.publish().await, h.publish().await];
 			}
+		}
+	}
+
+	/// On drafts 18 and 19 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
+	/// DYNAMIC_GROUPS; one that asks anyway ends the PUBLISH in error.
+	#[moq_clock::test]
+	async fn a_publish_ok_new_group_needs_dynamic_groups() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let (mut stream, ..) = h.publish().await;
+			stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
+			stream
+				.writer
+				.encode(&ietf::PublishOk {
+					request_id: None,
+					forward: true,
+					subscriber_priority: None,
+					group_order: None,
+					filter: Some(Filter::NextObject),
+					new_group: Some(0),
+				})
+				.await
+				.unwrap();
+			let (id, body) = next(&mut stream).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert!(done.end(version).is_err(), "{version}: ended cleanly");
 		}
 	}
 
