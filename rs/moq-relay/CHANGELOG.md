@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.7...moq-relay-v0.17.8) - 2026-10-21
+
+### Other
+
+- updated the following local packages: moq-net, moq-uring, moq-stats, moq-tokio, moq-auth
+
 ## [0.17.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.6...moq-relay-v0.17.7) - 2026-10-16
 
 ### Other

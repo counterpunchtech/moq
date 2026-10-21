@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.16](https://github.com/moq-dev/moq/compare/moq-net-v0.3.15...moq-net-v0.3.16) - 2026-10-21
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
 ## [0.3.15](https://github.com/moq-dev/moq/compare/moq-net-v0.3.14...moq-net-v0.3.15) - 2026-10-16
 
 ### Fixed

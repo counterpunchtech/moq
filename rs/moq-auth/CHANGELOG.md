@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/moq-dev/moq/compare/moq-auth-v0.2.1...moq-auth-v0.2.2) - 2026-10-21
+
+### Other
+
+- updated the following local packages: kio, moq-pattern
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.2.0...moq-auth-v0.2.1) - 2026-10-03
 
 ### Fixed

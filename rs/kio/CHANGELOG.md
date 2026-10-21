@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/moq-dev/moq/compare/kio-v0.6.2...kio-v0.6.3) - 2026-10-21
+
+### Fixed
+
+- *(bench)* keep kio's contended bench beside its other bench targets
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
 ## [0.6.2](https://github.com/moq-dev/moq/compare/kio-v0.6.1...kio-v0.6.2) - 2026-09-30
 
 ### Fixed

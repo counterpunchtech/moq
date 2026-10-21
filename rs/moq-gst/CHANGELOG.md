@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.18](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.17...moq-gst-v0.4.18) - 2026-10-21
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
 ## [0.4.17](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.16...moq-gst-v0.4.17) - 2026-10-16
 
 ### Other

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.18](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.17...moq-ffi-v0.4.18) - 2026-10-21
+
+### Other
+
+- updated the following local packages: kio, moq-net, moq-mux, moq-json, hang, moq-tokio, moq-audio, moq-video
+
 ## [0.4.17](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.16...moq-ffi-v0.4.17) - 2026-10-16
 
 ### Other

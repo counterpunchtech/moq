@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.17...moq-stats-v0.2.18) - 2026-10-21
+
+### Fixed
+
+- *(bench)* drop moq-stats' unused criterion and run the tracked effect
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
 ## [0.2.17](https://github.com/moq-dev/moq/compare/moq-stats-v0.2.16...moq-stats-v0.2.17) - 2026-10-16
 
 ### Other
