@@ -280,10 +280,12 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
-A publisher refuses a group that starts before a lower one. A receiver checks
-received groups the same way only when every hop could vouch for them: a timed
-track received over moq-lite 05 or 06, or over moq-transport, is unverified, and
-the work-in-progress 07 says so as it passes through relays.
+A publisher refuses a group that starts before a lower one, and so does a
+receiver. Since moq-lite 05 and 06 send times look like media time, a receiver
+drops every timestamp it gets over them and the track arrives untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked and are only passed on over moq-transport: a relay serves that
+track to moq-lite untimed.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

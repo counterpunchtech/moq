@@ -70,10 +70,6 @@ pub struct TrackInfo {
 	/// Lite07 encodes `None` as zero; Lite05/06 have no untimed encoding, so `None`
 	/// goes out as milliseconds (see [`Version::wire_timescale`]).
 	pub timescale: Option<Timescale>,
-	/// Whether a timed track's timestamps may rewind, so receivers don't check them (see
-	/// [`crate::track::Info::unverified`]). Carried on lite-07; every timed track received
-	/// over lite-05/06 is unverified.
-	pub unverified: bool,
 }
 
 impl From<&crate::track::Info> for TrackInfo {
@@ -82,21 +78,19 @@ impl From<&crate::track::Info> for TrackInfo {
 			refresh: info.refresh,
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale,
-			unverified: info.unverified,
+			// Unchecked timestamps never enter moq-lite, whose receivers check them.
+			timescale: info.lite_timescale(),
 		}
 	}
 }
 
 impl From<TrackInfo> for crate::track::Info {
 	fn from(info: TrackInfo) -> Self {
-		let mut model = Self::default()
+		Self::default()
 			.with_timescale(info.timescale)
 			.with_max_age(info.max_age)
 			.with_priority(info.priority)
-			.with_refresh(info.refresh);
-		model.unverified = info.unverified;
-		model
+			.with_refresh(info.refresh)
 	}
 }
 
@@ -129,24 +123,11 @@ impl Message for TrackInfo {
 			false => None,
 		};
 
-		let unverified = match version.has_unverified() {
-			true => match r.u8()? {
-				0 => false,
-				// Only a timed track has timestamps to doubt.
-				1 if timescale.is_some() => true,
-				_ => return Err(DecodeError::InvalidValue),
-			},
-			// lite-05/06 always carry a timescale, and an untimed track's send times can't be
-			// told from media time.
-			false => timescale.is_some(),
-		};
-
 		Ok(Self {
 			priority,
 			refresh,
 			max_age,
 			timescale,
-			unverified,
 		})
 	}
 
@@ -168,12 +149,6 @@ impl Message for TrackInfo {
 		if version.has_refresh() {
 			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
 		}
-		if version.has_unverified() {
-			if self.unverified && self.timescale.is_none() {
-				return Err(EncodeError::InvalidState);
-			}
-			w.u8(self.unverified.into());
-		}
 		Ok(())
 	}
 }
@@ -188,7 +163,6 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
-			unverified: false,
 		}
 	}
 
@@ -311,77 +285,6 @@ mod test {
 	}
 
 	#[test]
-	fn lite07_carries_unverified() {
-		for unverified in [false, true] {
-			let info = TrackInfo {
-				unverified,
-				..info_sample()
-			};
-			let buf = info.encode_bytes(Version::Lite07).unwrap();
-			assert_eq!(buf.last(), Some(&u8::from(unverified)));
-			assert_eq!(info_roundtrip(Version::Lite07, &info).unverified, unverified);
-		}
-	}
-
-	#[test]
-	fn unverified_matches_cross_language_wire_bytes_on_lite07() {
-		let info = TrackInfo {
-			refresh: None,
-			priority: 1,
-			max_age: None,
-			timescale: Some(Timescale::MILLI),
-			unverified: true,
-		};
-		let buf = info.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(buf.as_ref(), [0x06, 0x01, 0x00, 0x83, 0xe8, 0x00, 0x01]);
-	}
-
-	/// lite-05/06 can't say, and an untimed track's send times look like media time there.
-	#[test]
-	fn lite06_timed_tracks_arrive_unverified() {
-		for version in [Version::Lite05, Version::Lite06] {
-			for timescale in [None, Some(Timescale::MICRO)] {
-				let info = TrackInfo {
-					timescale,
-					..info_sample()
-				};
-				assert!(info_roundtrip(version, &info).unverified, "{version}");
-			}
-		}
-	}
-
-	#[test]
-	fn lite07_refuses_unverified_on_an_untimed_track() {
-		let info = TrackInfo {
-			timescale: None,
-			unverified: true,
-			..info_sample()
-		};
-		assert!(matches!(
-			info.encode_bytes(Version::Lite07),
-			Err(EncodeError::InvalidState)
-		));
-
-		let mut raw = TrackInfo {
-			timescale: None,
-			..info_sample()
-		}
-		.encode_bytes(Version::Lite07)
-		.unwrap()
-		.to_vec();
-		*raw.last_mut().unwrap() = 1;
-		assert!(matches!(
-			TrackInfo::decode_slice(&raw, Version::Lite07),
-			Err(DecodeError::InvalidValue)
-		));
-		*raw.last_mut().unwrap() = 2;
-		assert!(matches!(
-			TrackInfo::decode_slice(&raw, Version::Lite07),
-			Err(DecodeError::InvalidValue)
-		));
-	}
-
-	#[test]
 	fn lite06_declares_an_untimed_track_as_milliseconds() {
 		for version in [Version::Lite05, Version::Lite06] {
 			let info = TrackInfo {
@@ -425,7 +328,6 @@ mod test {
 			priority: 255,
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
-			unverified: false,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.priority, 255);
@@ -440,7 +342,6 @@ mod test {
 			priority: 0,
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
-			unverified: false,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.max_age, Some(Duration::ZERO));
@@ -454,7 +355,6 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),
-			unverified: false,
 		};
 		// The partial bytes are the Writer's to drop; see `a_failed_encode_leaves_no_partial_bytes`.
 		assert!(matches!(

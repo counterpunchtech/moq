@@ -4,7 +4,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, hasRefresh, hasTrackStream, hasUnverified, Version, wireTimescale } from "./version.ts";
+import { hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
 
 function guardTrack(version: Version) {
 	if (!hasTrackStream(version)) throw new Error("track stream not supported for this version");
@@ -71,24 +71,17 @@ export class TrackInfo {
 	 * out as milliseconds (see {@link wireTimescale}).
 	 */
 	timescale?: Timescale;
-	/**
-	 * Whether a timed track's timestamps may rewind, so receivers don't check them. Carried on
-	 * lite-07; every timed track received over lite-05/06 is unverified.
-	 */
-	unverified: boolean;
 
 	constructor({
 		priority = 0,
 		maxAge,
 		timescale,
 		refresh,
-		unverified = false,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
 		refresh?: number;
-		unverified?: boolean;
 	}) {
 		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
 			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
@@ -102,7 +95,6 @@ export class TrackInfo {
 		this.priority = priority;
 		this.maxAge = maxAge;
 		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
-		this.unverified = unverified;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -114,7 +106,6 @@ export class TrackInfo {
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
 		if (hasRefresh(version)) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
-		if (hasUnverified(version)) await w.bool(this.unverified);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -136,25 +127,7 @@ export class TrackInfo {
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
 		const refresh = hasRefresh(version) ? (await r.u53()) - 1 : undefined;
-		let unverified: boolean;
-		if (hasUnverified(version)) {
-			const flag = await r.u8();
-			// Only a timed track has timestamps to doubt.
-			if (flag > 1 || (flag === 1 && timescale === undefined))
-				throw new RangeError(`invalid unverified flag: ${flag}`);
-			unverified = flag === 1;
-		} else {
-			// Lite-05/06 always carry a timescale, and an untimed track's send times can't be told
-			// from media time.
-			unverified = timescale !== undefined;
-		}
-		return new TrackInfo({
-			priority,
-			maxAge,
-			timescale,
-			refresh: refresh === -1 ? undefined : refresh,
-			unverified,
-		});
+		return new TrackInfo({ priority, maxAge, timescale, refresh: refresh === -1 ? undefined : refresh });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -173,8 +146,6 @@ export class TrackInfo {
 		)
 			throw new RangeError("refresh exceeds u32");
 		if (this.timescale !== undefined) Timescale(this.timescale);
-		if (this.unverified && this.timescale === undefined)
-			throw new RangeError("an untimed track can't be unverified");
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 

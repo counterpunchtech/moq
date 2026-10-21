@@ -174,7 +174,6 @@ fn lite_varint_interop() {
 			priority: 1,
 			max_age: None,
 			timescale: None,
-			unverified: false,
 		}
 		.encode_bytes(version)
 		.unwrap();

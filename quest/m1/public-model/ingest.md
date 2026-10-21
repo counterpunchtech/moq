@@ -170,12 +170,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `track::TrackState`, `track::FetchOutcome`, `finish_track_at`,
   `poll_landed`): moved to [the deferred quest](/quest/m1/public-model/deferred.md),
   which waits on Model ranges.
-- `track::Info::unverified` (JS `Info.unverified`, `@internal`) marks a
-  track whose timestamps may rewind, so no group is checked. Sessions set
-  it on ingress over moq-lite-05/06 and moq-transport, and lite-07 carries
-  it in TRACK_INFO. A custom session's copies stay verified, so they are
-  checked; expose it with the other ingest calls only if one must ingest
-  send or arrival times.
+- `track::Info::unchecked` (JS `Info.unchecked`, `@internal`) marks a
+  track whose timestamps arrived over moq-transport, so no group is checked
+  and moq-lite serves it untimed. A custom session's copies stay checked;
+  expose it with the other ingest calls only if one must ingest arrival
+  times.
 - Passthrough, stay private and marked: `group::Producer::wire`,
   `set_wire`, `mark_gap`, `set_end_object`, `group::Wire`, the `object` and
   `datagram` modules, `track::Producer::insert_wire_datagram`,

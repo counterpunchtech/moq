@@ -645,7 +645,6 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
-				unverified: false,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,

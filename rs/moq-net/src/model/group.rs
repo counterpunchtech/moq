@@ -2228,6 +2228,14 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The timescale a moq-lite hop serves the parent track at (see
+	/// [`track::Info::lite_timescale`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
+		self.track.lite_timescale()
+	}
+
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has

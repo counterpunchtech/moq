@@ -212,35 +212,3 @@ test("refresh ratio survives lite-07 and disappears on legacy wires", async () =
 		}
 	}
 });
-
-test("unverified survives lite-07, and every timed track arrives unverified before it", async () => {
-	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
-		for (const unverified of [false, true]) {
-			const info = new TrackInfo({ priority: 7, timescale: 1000, unverified });
-			const encoded = await bytes((w) => info.encode(w, version), version);
-			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
-			expect(decoded.unverified).toBe(version === Version.DRAFT_07 ? unverified : true);
-		}
-	}
-});
-
-test("an unverified timed TrackInfo matches cross-language wire bytes on lite-07", async () => {
-	const info = new TrackInfo({ priority: 1, timescale: 1000, unverified: true });
-	expect(await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07)).toEqual(
-		new Uint8Array([0x06, 0x01, 0x00, 0x83, 0xe8, 0x00, 0x01]),
-	);
-});
-
-test("an untimed track can't be unverified", async () => {
-	expect(() => infoDefaults({ unverified: true })).toThrow(RangeError);
-	const info = new TrackInfo({ priority: 1, unverified: true });
-	await expect(bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(RangeError);
-
-	const encoded = await bytes((w) => new TrackInfo({ priority: 1 }).encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	for (const flag of [1, 2]) {
-		encoded[encoded.length - 1] = flag;
-		await expect(
-			TrackInfo.decode(new Reader(undefined, encoded, Version.DRAFT_07), Version.DRAFT_07),
-		).rejects.toThrow(RangeError);
-	}
-});

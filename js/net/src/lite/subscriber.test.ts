@@ -956,14 +956,13 @@ async function answerTrackInfo(
 	stream: FakeStream,
 	version: Version = Version.DRAFT_05,
 	timescale?: number,
-	unverified = false,
 ): Promise<void> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 		version,
 	);
-	await new TrackInfo({ timescale, unverified }).encode(writer, version);
+	await new TrackInfo({ timescale }).encode(writer, version);
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
@@ -1728,14 +1727,10 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 	);
 }
 
-// A received group that rewinds or lands out of order is accepted wherever its timestamps are
-// unverified: always on lite-05/06, which stamp an untimed track's frames with their send time, and
-// on lite-07 when the publisher says so.
-test.each([
-	[Version.DRAFT_05, false],
-	[Version.DRAFT_06, false],
-	[Version.DRAFT_07, true],
-])("version %p accepts an unverified rewind", async (version, unverified) => {
+// Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
+// from media time, so it drops every timestamp there: a group that rewinds or lands out of order is
+// accepted untimed.
+test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received timestamps", async (version) => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -1743,7 +1738,7 @@ test.each([
 	const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
 	try {
 		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000, unverified);
+		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
 		// Starts before the group below it.
@@ -1753,13 +1748,15 @@ test.each([
 		const got = [];
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
-			got.push([group?.sequence, (await group?.readFrame())?.payload.length]);
+			const frame = await group?.readFrame();
+			got.push([group?.sequence, frame?.payload.length, frame?.timestamp]);
 		}
 		expect(got).toEqual([
-			[3, 1],
-			[4, 1],
-			[5, 1],
+			[3, 1, undefined],
+			[4, 1, undefined],
+			[5, 1, undefined],
 		]);
+		expect((await track.info()).timescale).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
 	} finally {
 		track.close();
@@ -1768,8 +1765,8 @@ test.each([
 	}
 });
 
-// A lite-07 track whose publisher vouches for its timestamps is checked like a local write.
-test("a verified rewind is refused", async () => {
+// Lite-07 timestamps are media time, so a received group is checked like a local write.
+test("a lite-07 rewind is refused", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));

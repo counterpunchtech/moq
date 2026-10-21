@@ -320,11 +320,11 @@ impl Version {
 		}
 	}
 
-	/// Whether TRACK_INFO says if a timed track's timestamps are unverified. Added in
-	/// lite-07; earlier, a receiver cannot tell an untimed track's send times from media
-	/// time, so it treats every timed track as unverified.
+	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
+	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
+	/// so it drops every timestamp received on them and the track arrives untimed.
 	#[allow(clippy::match_like_matches_macro)]
-	pub(crate) fn has_unverified(self) -> bool {
+	pub(crate) fn has_media_time(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,

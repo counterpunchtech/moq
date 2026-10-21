@@ -524,7 +524,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			.zip(entry.timescale)
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
+			// Dropped where it may be a send time, like a frame's.
+			.filter(|_| self.version.has_media_time());
 
 		// A datagram is never owed a stream, so it never holds the subscription's end open.
 		if let Ok(mut tail) = entry.tail.write() {
@@ -1202,8 +1204,9 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					// Read to stay in step, but dropped where it may be a send time.
 					self.phase = IngestPhase::Size {
-						timestamp: Some(timestamp),
+						timestamp: self.version.has_media_time().then_some(timestamp),
 					};
 				}
 				IngestPhase::Size { timestamp } => {
@@ -2563,10 +2566,11 @@ mod tests {
 					going_away: Default::default(),
 					auth: crate::auth::Handle::new(false),
 				});
+				// The track is untimed where the subscriber drops received timestamps.
 				let track = track::Producer::new(
 					std::sync::Arc::new(crate::broadcast::Info::default()),
 					"video",
-					crate::track::Info::timed(),
+					crate::track::Info::default().with_timescale(version.has_media_time().then_some(Timescale::MILLI)),
 				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
@@ -2822,10 +2826,9 @@ mod tests {
 		);
 	}
 
-	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
-	/// group 4 starts at 1000ms and whose publisher's TRACK_INFO said `unverified`, returning
-	/// the stream's result and the track.
-	async fn receive_rewind(version: Version, unverified: bool) -> (Result<(), Error>, track::Producer) {
+	/// Receive group 5 stamped 500ms over `version` into the copy a subscriber makes there,
+	/// whose group 4 started at 1000ms, returning the stream's result and the track.
+	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
@@ -2854,21 +2857,16 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 
-		let sent = lite::TrackInfo {
-			unverified,
-			..lite::TrackInfo::from(&crate::track::Info::timed())
-		}
-		.encode_bytes(version)
-		.unwrap();
-		let info = lite::TrackInfo::decode_slice(&sent, version).unwrap().0;
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			track::Info::from(info),
-		);
+		// The copy is untimed where the wire's timestamps may be send times.
+		let timed = version.has_media_time();
+		let info = match timed {
+			true => crate::track::Info::timed(),
+			false => crate::track::Info::default(),
+		};
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let mut before = track.create_group(4u64.into()).unwrap();
 		before
-			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
+			.write_frame(timed.then(|| Timestamp::from_millis(1000).unwrap()), &b"before"[..])
 			.unwrap();
 		before.finish().unwrap();
 		subscriber.subscribes.lock().insert(
@@ -2886,27 +2884,28 @@ mod tests {
 		(res, track)
 	}
 
-	/// A received group that rewinds is accepted, and the track stays open, wherever its
-	/// timestamps are unverified: always on lite-05/06, whose untimed tracks carry send times,
-	/// and on lite-07 when the publisher says so.
+	/// Lite-05/06 timestamps may be send times, so a received frame is read past its
+	/// timestamp and lands untimed: nothing rewinds, and the track stays open.
 	#[moq_clock::test]
-	async fn an_unverified_rewind_is_accepted() {
-		for (version, unverified) in [
-			(Version::Lite05, false),
-			(Version::Lite06, false),
-			(Version::Lite07, true),
-		] {
-			let (res, track) = receive_rewind(version, unverified).await;
+	async fn lite06_timestamps_are_dropped() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let (res, track) = receive_rewind(version).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			assert!(track.closed().now_or_never().is_none(), "{version}");
+			let mut consumer = track.subscribe(None);
+			let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(group.sequence, 5, "{version}");
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload.as_ref(), b"rewound", "{version}");
+			assert_eq!(frame.timestamp, None, "{version}");
 		}
 	}
 
-	/// A lite-07 track whose publisher vouches for its timestamps is checked like a local
-	/// write, so a received group that rewinds is refused.
+	/// Lite-07 timestamps are media time, so a received group is checked like a local
+	/// write and one that rewinds is refused.
 	#[moq_clock::test]
-	async fn a_verified_rewind_is_refused() {
-		let (res, _track) = receive_rewind(Version::Lite07, false).await;
+	async fn a_lite07_rewind_is_refused() {
+		let (res, _track) = receive_rewind(Version::Lite07).await;
 		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 	}
 
@@ -3227,8 +3226,9 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
+		// Untimed, as the subscriber drops lite-05 timestamps.
 		let producer = broadcast
-			.create_track("datagrams", crate::track::Info::timed())
+			.create_track("datagrams", crate::track::Info::default())
 			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
@@ -6237,10 +6237,15 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {
-						Ok((info, held)) => {
+						Ok((mut info, held)) => {
 							// Lite05 carries per-frame timestamps on the wire at this scale;
 							// `Some` tells the ingest to decode them.
 							let timescale = info.timescale;
+							// Lite05/06 timestamps may be send times, so the copy is untimed
+							// and the ingest drops them.
+							if !self.serve.subscriber.version.has_media_time() {
+								info.timescale = None;
+							}
 							let mut serve_loop = ServeLoop::new(&self.serve, request, info, timescale);
 							serve_loop.held = Some(held);
 							self.state = TrackRunState::Serve(serve_loop);
@@ -7258,7 +7263,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
 					// accepted timescale.
-					let group_info = track::Info::default().with_timescale(self.timescale);
+					let group_info = track::Info::default().with_timescale(
+						self.timescale
+							.filter(|_| self.serve.subscriber.version.has_media_time()),
+					);
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
 					let joined = request.result.clone();

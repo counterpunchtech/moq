@@ -176,8 +176,9 @@ Each frame of a timed Track carries a presentation timestamp expressed in the Tr
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
 A publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
-A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it treats every timed Track received on those versions as unverified (see `Unverified` in [TRACK_INFO](#track-info)).
-A receiver MAY check a Group of a verified Track against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH, and MUST NOT check one of an unverified Track.
+A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it discards every timestamp received on those versions and treats the Track as untimed.
+On later versions a receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
+A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -358,7 +359,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x38  | FRAME_TOO_LARGE | A frame declared a payload larger than the receiver accepts. |
 | ------- | ------------- | ----------- |
-|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it is present on an untimed track, absent on a timed one, or starts a verified Group before a lower-sequence one. |
+|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it is present on an untimed track, absent on a timed one, or starts a Group before a lower-sequence one. |
 | ------- | ------------- | ----------- |
 |  0x3A  | NOT_FETCHABLE | The FETCH named a group delivered only as a datagram, which is never cached (see [Datagrams](#datagrams)). It has no moq-transport value; a bridge refuses the FETCH with DOES_NOT_EXIST. |
 | ------- | ------------- | ----------- |
@@ -1307,7 +1308,6 @@ TRACK_INFO Message {
   Publisher Max Age (i)
   Timescale (i)
   Refresh (i)
-  Unverified (8)
 }
 ~~~
 
@@ -1346,13 +1346,6 @@ On a live-edge join, a publisher asks for a group beyond every sequence already 
 Joins coalesce until the requested group arrives.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
 Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
-
-**Unverified**:
-1 when the Track's timestamps may break the rule that no Group starts before a lower-sequence one (see [Frame](#frame)), 0 otherwise.
-A publisher sets it when a hop stamped the timestamps (a send or arrival time) or it received the Track on a wire that cannot say otherwise: a timed Track received over lite-05, lite-06, or MoqTransport, or with `Unverified` set to 1.
-A relay preserves it, so a receiver checks a Track only when every hop since its publisher could.
-It MUST be 0 on an untimed Track; a receiver MUST treat any other value as a protocol violation.
-Versions before lite-07 omit Unverified.
 
 ## TRACKS {#tracks}
 TRACKS is sent by a subscriber to list a Broadcast's Tracks.
@@ -1740,7 +1733,7 @@ The `Message Length` describes the payload size on the wire.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Added TRACK_INFO `Unverified`, set when a hop stamped the timestamps or received them over lite-05/06 or MoqTransport, which cannot say they weren't. A receiver may check only a verified Track.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A receiver discards the timestamps it receives over lite-05/06, which may be send times, and a relay serves a Track whose timestamps it cannot vouch for untimed.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.

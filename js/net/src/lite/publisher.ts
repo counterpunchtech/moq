@@ -17,6 +17,7 @@ import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
@@ -867,7 +868,7 @@ export class Publisher {
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
 				const info = await untilAborted(track.info(), left.signal);
-				timescale = wireTimescale(this.version, info.timescale);
+				timescale = wireTimescale(this.version, liteTimescale(info));
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -1440,9 +1441,9 @@ export class Publisher {
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,
-					// `#serveGroup` emits each frame converted to it.
-					timescale: info.timescale ?? undefined,
-					unverified: info.unverified,
+					// `#serveGroup` emits each frame converted to it. Unchecked timestamps never
+					// enter moq-lite, whose receivers check them.
+					timescale: liteTimescale(info),
 				});
 			})();
 

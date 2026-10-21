@@ -106,15 +106,15 @@ export interface Info {
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
-	// pending: /quest/m1/public-model/ingest.md
 	/**
-	 * Whether a hop stamped this timed track's timestamps, or received them over a wire that
-	 * cannot say it didn't, so they may rewind and no group is checked for it. A local
-	 * publisher's writes are always checked. Mirrors the Rust `track::Info::unverified`.
+	 * Whether this timed track's timestamps arrived over moq-transport, whose peers may stamp
+	 * arrival times, so no group is checked for a rewind. A moq-lite hop serves the track
+	 * untimed, since its receivers check every timestamp. Mirrors the Rust
+	 * `track::Info::unchecked`.
 	 *
 	 * @internal
 	 */
-	unverified?: boolean;
+	unchecked?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -141,17 +141,23 @@ function priorityByte(value: number): number {
 	return value;
 }
 
+// private: passthrough
+/** The timescale a moq-lite hop serves a track at: none for an {@link Info.unchecked} one. @internal */
+export function liteTimescale(info: Info): Timescale | undefined {
+	return info.unchecked ? undefined : (info.timescale ?? undefined);
+}
+
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
 	// Only a timed track has timestamps to doubt.
-	if (info.unverified && timescale === undefined) throw new RangeError("an untimed track can't be unverified");
+	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.unverified ? { unverified: true } : {}),
+		...(info.unchecked ? { unchecked: true } : {}),
 	};
 }
 
@@ -1206,7 +1212,7 @@ export class Producer {
 			this.#drop(group.sequence, group.sequence + 1);
 		});
 		const sequence = group.sequence;
-		if (this.#unverified()) {
+		if (this.#unchecked()) {
 			// Its timestamps may rewind, so they are not checked.
 		} else if (start) {
 			this.#record(entry, start, late);
@@ -1340,15 +1346,15 @@ export class Producer {
 		}
 
 		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#unverified() ? undefined : hooks.groupStart(group);
+		const start = this.#unchecked() ? undefined : hooks.groupStart(group);
 		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		this.#publish(group, start, late);
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.unverified}).
-	#unverified(): boolean {
-		return this.#state.info.peek()?.unverified === true;
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
+	#unchecked(): boolean {
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

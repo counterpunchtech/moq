@@ -2127,7 +2127,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let timescale = shared.version.wire_timescale(track.info().timescale);
+					let timescale = shared.version.wire_timescale(track.info().lite_timescale());
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2301,7 +2301,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let timescale = shared.version.wire_timescale(group.timescale());
+					let timescale = shared.version.wire_timescale(group.lite_timescale());
 					let capped = msg.end_frame.is_some();
 					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
@@ -3354,20 +3354,18 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 /// A frame or datagram timestamp as its raw value at the wire `timescale`.
 ///
 /// Lite05/06 cannot encode an untimed track, so its payloads carry their send time on
-/// `runtime` instead, at the millisecond scale its TRACK_INFO declares. A timed payload
-/// is already at the track's timescale.
+/// `runtime` instead, at the millisecond scale its TRACK_INFO declares. An unchecked track
+/// declares milliseconds there too, so its timestamps are converted to it.
 fn wire_timestamp(
 	timestamp: Option<crate::Timestamp>,
 	timescale: crate::Timescale,
 	runtime: &crate::time::Deadlines,
 ) -> Result<u64, Error> {
-	match timestamp {
-		Some(timestamp) => Ok(timestamp.value()),
-		None => crate::Timestamp::from(runtime.now())
-			.convert(timescale)
-			.map(|now| now.value())
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded)),
-	}
+	timestamp
+		.unwrap_or_else(|| crate::Timestamp::from(runtime.now()))
+		.convert(timescale)
+		.map(|time| time.value())
+		.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))
 }
 
 /// Buffer `curr` as a zigzag-mapped varint delta against `*prev`, then advance
