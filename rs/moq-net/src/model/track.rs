@@ -2135,6 +2135,7 @@ impl TrackState {
 	}
 
 	/// Abort shared track state without extending its publisher lifetime.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
 		commit_abort(Self::modify(producer)?, err);
