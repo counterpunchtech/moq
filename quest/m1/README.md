@@ -116,8 +116,6 @@ lands before the cut.
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - queue nextest at 24 threads, stale Pages artifacts cleared, the actionlint ignore dropped
 - [Smoke flake bumps](/quest/m1/smoke-dependabot.md) - `test/smoke/flake.lock` bumps with its Playwright pin, automated or documented
 
-- [Playwright browsers from Nix](/quest/m1/playwright-nix.md) - every Playwright check runs on Nix's Chromium locally and in CI, with npm pinned to match
-
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
 
