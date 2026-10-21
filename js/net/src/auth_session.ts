@@ -885,9 +885,15 @@ export class AuthSession {
 		this.#ended.update((n) => n + 1);
 		// Only the peer's verdict ends one of the handle's tokens on every session: a refusal,
 		// Unsupported, or a clean close after a grant. Anything else leaves it for the next.
+		// A draining session's verdict is stale once another session granted the token.
+		const superseded =
+			!this.active &&
+			owner !== undefined &&
+			this.#state.sessions.some((session) => session !== this && session.grantOf(owner) !== undefined);
 		const verdict =
 			!this.#closed &&
 			!presented.withdrawn &&
+			!superseded &&
 			(refused || result instanceof Unsupported || (result === null && granted));
 		if (owner && verdict) this.#state.verdict(owner, result);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.

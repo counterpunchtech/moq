@@ -1046,12 +1046,18 @@ impl Link {
 	/// leaves it for the next session to present.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn ended(&self, id: u64, err: Error) {
-		self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
+		self.with_state(|state, link_id| {
+			// A draining session's verdict is stale once another session granted the token.
+			let superseded = !attached(&mut state.links, link_id).active()
+				&& state.links.iter().any(|(other, link)| {
+					*other != link_id && link.slots.get(&id).is_some_and(|slot| slot.grant.is_some())
+				});
+			let link = attached(&mut state.links, link_id);
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
 			let verdict = !slot.setup
+				&& !superseded
 				&& link.closed.is_none()
 				&& !slot.withdrawn
 				&& slot.ended.is_none()
@@ -2809,6 +2815,27 @@ mod tests {
 		let id = opened(&successor);
 		successor.granted(id, Grant::all());
 		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+	}
+
+	/// A draining session's late refusal ends the token there alone once its successor
+	/// granted it, so a stale verdict never withdraws a live grant.
+	#[test]
+	fn a_draining_refusal_leaves_the_successors_grant() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, true, false).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let id = opened(&draining);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+
+		let successor = Link::attach(&handle, true, false).unwrap();
+		assert_eq!(opened(&successor), id);
+		successor.granted(id, Grant::all());
+		draining.refused(id);
+		draining.ended(id, Error::Session(SessionError::Unauthorized));
+		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
+		assert_eq!(auth.grant().peek(), Some(Grant::all()));
 	}
 
 	/// A retry that wakes after this side sent a GOAWAY opens nothing: the successor presents it.

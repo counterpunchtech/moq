@@ -754,6 +754,53 @@ test("lite-07 presents a token added after a GOAWAY only on the successor", asyn
 	successor.server.abort();
 });
 
+test("lite-07 ignores a draining session's late refusal once its successor granted", async () => {
+	const protocol = Lite.ALPN_07_WIP;
+	const handle = new Handle();
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume(), auth: handle }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const issued = [setup.accept(grant([], []))];
+	const adding = handle.add("token");
+	const unanswered = await requests.next();
+	expect(unanswered && new TextDecoder().decode(unanswered.token)).toBe("token");
+
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	const successor = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	answer(successor.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
+	const token = await adding;
+	await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
+
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	let ended = false;
+	void token.closed.then(() => {
+		ended = true;
+	});
+	unanswered?.reject(SessionCode.Unauthorized, "stale");
+	try {
+		await settles(() => warned.mock.calls.some(([line]) => line === "auth token refused"));
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(ended).toBe(false);
+		expect(token.grant.peek()?.publish.equals(patterns("second"))).toBe(true);
+	} finally {
+		warned.mockRestore();
+		for (const grant of issued) grant.close();
+		client.abort();
+		server.abort();
+		successor.client.abort();
+		successor.server.abort();
+	}
+});
+
 // moq-lite carries patterns, so every grant arrives exactly as issued.
 test("a fetch abandoned while its token waits never reaches the wire", async () => {
 	const logged = spyOn(console, "debug");
