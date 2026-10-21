@@ -133,7 +133,7 @@ impl Source {
 			return Binding::new(pinned.clone());
 		}
 		Binding(Bound::Requested {
-			lookup: Mutex::new(Lookup::new(&self.origin, path)),
+			lookup: Box::new(Mutex::new(Lookup::new(&self.origin, path))),
 			pins: self.pins.clone(),
 			path: path.clone(),
 		})
@@ -282,7 +282,7 @@ enum Bound {
 	Ready(moq_net::broadcast::Consumer),
 	/// A lookup started when the binding was made.
 	Requested {
-		lookup: Mutex<Lookup>,
+		lookup: Box<Mutex<Lookup>>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
 		path: moq_net::PathOwned,
