@@ -190,12 +190,10 @@ pub mod poll {
 	/// operations release retained resources; shared resources must not be held
 	/// across a wait. Implementations register the supplied waker before Pending.
 	pub trait Session: Clone + 'static {
-		/// The outgoing stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The outgoing stream type.
 		type SendStream: SendStream;
 
-		/// The incoming stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The incoming stream type.
 		type RecvStream: RecvStream;
 
 		/// The error type for every operation on this session.

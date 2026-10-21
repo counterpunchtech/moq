@@ -5,6 +5,10 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `Accepted` takes any transport's handshake
+
+`Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
+
 ### `cluster.lan.secret` is a file path only (#5910)
 
 `--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
