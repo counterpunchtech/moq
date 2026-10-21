@@ -114,6 +114,10 @@ ffi *args:
 benchmark-publish *args:
     sh/gh/bench-publish.sh "$@"
 
+# Commit a built report to gh-pages under one directory, leaving the branch checked out for the deploy.
+pages-publish directory report site:
+    sh/gh/pages-publish.sh {{ quote(directory) }} {{ quote(report) }} {{ quote(site) }}
+
 # Delete this run's Pages artifact before uploading a replacement on a rerun.
 pages-clean:
     sh/gh/pages-clean.sh
