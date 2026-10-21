@@ -19,15 +19,15 @@ import type * as track from "./track.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
-	// pending: /quest/m1/public-model/serve.md
+	// private: plumbing
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
-	// pending: /quest/m1/public-model/serve.md
+	// private: plumbing
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
-	// pending: /quest/m1/public-model/serve.md
+	// pending: /quest/m1/track-live.md
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Location | undefined;
-	// pending: /quest/m1/public-model/serve.md
+	// private: plumbing
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	// pending: /quest/m1/public-model/answer.md
 	requested(): Promise<track.Request | undefined>;

@@ -15,7 +15,7 @@ import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Groups, Info, Location, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type { Groups, Info, Location, Producer, Recv, Request, Subscriber, Subscription } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 // private: plumbing
@@ -142,24 +142,6 @@ export function runGaps(runs: readonly Run[], start: number, end: number): Run[]
 	if (next < end) gaps.push({ start: next, end });
 	return gaps;
 }
-
-/**
- * What a non-blocking group read found, which is everything the caller needs to decide what
- * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
- */
-export type Recv =
-	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
-	| { kind: "group"; group: GroupConsumer }
-	/** Sequences `[start, end)` this cursor gave up without serving. */
-	| { kind: "drop"; start: number; end: number }
-	/** Nothing readable, but the track is live and may produce more. */
-	| { kind: "idle" }
-	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
-	| { kind: "boundary" }
-	/** The producer finished and the buffer is drained. Nothing can follow. */
-	| { kind: "done" }
-	/** The track aborted. */
-	| { kind: "error"; error: Error };
 
 /** A package-internal frame read the wire publisher completes once written. */
 export interface ReadGroupFrame {
@@ -329,12 +311,6 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
-// pending: /quest/m1/public-model/serve.md
-/** The first group an exclusive track end excludes whole: one past the last group that may exist. */
-export function finalSequence(end: Location): number {
-	return end.group + (end.frame === 0 ? 0 : 1);
-}
-
 // private: plumbing
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
@@ -383,10 +359,10 @@ export const hooks: {
 	// private: capability gap
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
 	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
-	// pending: /quest/m1/public-model/serve.md
+	// pending: /quest/m1/track-live.md
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
-	// pending: /quest/m1/public-model/serve.md
+	// pending: /quest/m1/track-live.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
@@ -394,18 +370,9 @@ export const hooks: {
 	// pending: /quest/m1/public-model/ingest.md
 	/** Record sequences `[start, end)` an upstream publisher explicitly gave up. */
 	dropTrackGroups: (producer: Producer, start: number, end: number) => void;
-	// pending: /quest/m1/public-model/serve.md
-	/**
-	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
-	 *
-	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
-	 * {@link groupChanged} when it reports `idle` or `boundary`. With `dispositions`, what
-	 * the cursor gives up is reported once as a `drop`.
-	 */
-	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
-	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
+	/** The sequence {@link tryNextGroup} (`ordered`) or `tryRecvGroup` would take next, without taking it. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
-	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
+	/** Take the next group in sequence order without waiting, as `tryRecvGroup` does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
 	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
@@ -434,18 +401,8 @@ export const hooks: {
 		subscription: Subscription | undefined,
 		source: (shell: ResumeShell) => ResumeSource,
 	) => Subscriber;
-	// pending: /quest/m1/public-model/serve.md
-	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
-	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
-	// pending: /quest/m1/public-model/serve.md
-	/**
-	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
-	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
-	 * `setGroups`, which never rewinds.
-	 */
-	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
 	/**
 	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
@@ -542,9 +499,6 @@ export const hooks: {
 	dropTrackGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
-	tryRecvGroup: () => {
-		throw new Error("track.ts not loaded");
-	},
 	tryNextGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -584,13 +538,7 @@ export const hooks: {
 	resumeSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
-	groupChanged: () => {
-		throw new Error("track.ts not loaded");
-	},
 	fetchBudget: () => {
-		throw new Error("track.ts not loaded");
-	},
-	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindGroupTimed: () => {

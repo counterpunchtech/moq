@@ -513,7 +513,7 @@ export class Publisher {
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the refresh ratio never judges it.
 		const fixed = subscribeRange(msg, {}, version);
-		const track = wireOf(broadcast).subscribe(msg.trackName, {
+		const track = broadcast.track(msg.trackName).subscribe({
 			priority,
 			order,
 			// An absent budget preserves everything retained by the producer.
@@ -572,7 +572,7 @@ export class Publisher {
 				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
-			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
+			if (startGroup !== undefined) track.withRange({ start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor. Forked from this subscriber rather than resolved through
@@ -730,7 +730,7 @@ export class Publisher {
 					const group = await track.recvGroup();
 					if (!group) return;
 
-					// Past the filter's end. Dropped here rather than through `setGroups`, which
+					// Past the filter's end. Dropped here rather than through `withRange`, which
 					// parks a capped group instead: this range is fixed for the life of the
 					// subscription, so a group above it is never coming back in, and holding
 					// one keeps the loop from ever ending. A producer that publishes beyond
@@ -2058,7 +2058,7 @@ export class Publisher {
 			let answer: TrackStatusOk;
 			try {
 				const broadcast = await this.#resolve(name, hold.signal, msg.epoch);
-				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
+				const info = await broadcast.track(msg.trackName).info({ hold: hold.signal });
 				const largest = wireOf(broadcast).largest(msg.trackName);
 				answer = new TrackStatusOk({
 					requestId:
@@ -2283,8 +2283,10 @@ type FillServe =
  */
 function takeGroup(cache: TrackSubscriber, sequence: number): group.Consumer {
 	for (;;) {
-		const group = cache.tryRecvGroup();
-		if (!group) throw new Error(`group not found: ${sequence}`);
+		const recv = cache.tryRecvGroup();
+		if (recv.kind === "error") throw recv.error;
+		if (recv.kind !== "group") throw new Error(`group not found: ${sequence}`);
+		const group = recv.group;
 		if (group.sequence === sequence) return group;
 
 		group.close();

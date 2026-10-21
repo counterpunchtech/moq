@@ -21,7 +21,7 @@ subscription (`position_group` in `rs/moq-net/src/lite/publisher.rs`, and the sa
 shape in `js/net/src/lite/publisher.ts`).
 
 - Keep each range's absolute frame bounds in the `Window` beside its group runs.
-- Position every group the cursor hands out (`group::Consumer::start_at`/`end_at`), on
+- Position every group the cursor hands out (`group::Consumer::with_range`), on
   the arrival, ordered, and re-offer paths, using the bounds of the range that covers it.
   A group whose head is gone and that was asked for from frame 0 stays a miss, as
   `position_group` does today.

@@ -33,7 +33,6 @@ import {
 	type GroupRecover,
 	groupBounds,
 	hooks,
-	type Recv,
 	type RecvDatagram,
 	type Replacement,
 	type ResumeShell,
@@ -234,8 +233,8 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 }
 
 /** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+function take(copy: Copy, ordered: boolean): track.Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub) : copy.sub.tryRecvGroup();
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -369,7 +368,7 @@ class Reader implements ResumeSource {
 		const start = Math.max(cursor.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
 		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
-		hooks.replaceGroups(copy.sub, {
+		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
 		});
@@ -417,7 +416,7 @@ class Reader implements ResumeSource {
 		return (end === undefined || sequence < end) && !delivered.has(sequence);
 	}
 
-	tryGroup(ordered: boolean, delivered: Delivered): Recv {
+	tryGroup(ordered: boolean, delivered: Delivered): track.Recv {
 		this.sync();
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
@@ -510,7 +509,7 @@ class Reader implements ResumeSource {
 	#end(
 		channel: "groups" | "datagrams",
 		done: (copy: Copy) => Error | null | undefined,
-	): Recv & { kind: "idle" | "done" | "error" } {
+	): track.Recv & { kind: "idle" | "done" | "error" } {
 		const route = this.route;
 		const last = this.#copies.at(-1);
 		const serving = last?.generation === this.#generation ? last : undefined;
@@ -535,7 +534,7 @@ class Reader implements ResumeSource {
 
 	// End the logical track on a failure, or cleanly once both channels drained: groups and
 	// datagrams end apart, and one running out leaves the other's backlog readable.
-	#finish<T extends Recv & { kind: "done" | "error" }>(end: T, channel: "groups" | "datagrams"): T {
+	#finish<T extends track.Recv & { kind: "done" | "error" }>(end: T, channel: "groups" | "datagrams"): T {
 		if (end.kind === "error") {
 			this.#shell.close(end.error);
 			return end;
@@ -597,7 +596,7 @@ class Reader implements ResumeSource {
 		};
 		disposes.push(this.route.changed.changed(once), this.#changed.changed(once));
 		for (const copy of this.#copies)
-			disposes.push(hooks.groupChanged(copy.sub, once), hooks.datagramChanged(copy.sub, once));
+			disposes.push(copy.sub.groupChanged(once), hooks.datagramChanged(copy.sub, once));
 		return dispose;
 	}
 

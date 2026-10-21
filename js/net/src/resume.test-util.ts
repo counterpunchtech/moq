@@ -12,9 +12,7 @@ export function readsFrom(active: BroadcastConsumer | undefined, source: Broadca
 	group.close();
 	const sub = active.track(name).subscribe();
 	try {
-		return sub.tryRecvGroup() !== undefined;
-	} catch {
-		return false;
+		return sub.tryRecvGroup().kind === "group";
 	} finally {
 		sub.close();
 		track.close();

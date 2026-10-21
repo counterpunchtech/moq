@@ -57,7 +57,7 @@ Learned from the shelved [#4998](https://github.com/moq-dev/moq/pull/4998)
 - Fetched backfill that is abandoned, and a `DeliveryTimeout` reset, are
   deliberate holes, not cuts, like old, evicted, and lagged groups.
 - A cut above a reader's group cap is skipped for good, so a reader whose cap
-  `set_groups` later raises over it must still see the cut, not a clean end.
+  `with_range` later raises over it must still see the cut, not a clean end.
 - moq-tokio's
   `subscription_end_integrity::a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean`
   flakes under load (`Ok(None)` with 10 of 20 frames, #4332): the code can

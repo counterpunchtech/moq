@@ -27,14 +27,15 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function read(subscribers: Subscriber[]) {
 	for (const subscriber of subscribers) {
-		const group = subscriber.tryRecvGroup();
-		if (!group) throw new Error("group was not delivered");
+		const recv = subscriber.tryRecvGroup();
+		if (recv.kind !== "group") throw new Error("group was not delivered");
+		const group = recv.group;
 		const frame = group.tryReadFrame();
 		if (!frame) throw new Error("frame was not delivered");
 		checksum += frame.payload.byteLength;
 		group.close();
 		// Read until idle, as a reader parked on the next group does.
-		if (subscriber.tryRecvGroup()) throw new Error("group delivered twice");
+		if (subscriber.tryRecvGroup().kind === "group") throw new Error("group delivered twice");
 	}
 }
 

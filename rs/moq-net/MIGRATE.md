@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One `with_range` bounds a reader
+
+`track::Subscriber::set_groups`, `track::Ordered::set_groups`, and `track::Subscription::with_groups` are replaced by the consuming `with_range(range) -> Self`, and `group::Consumer::set_frames` by `group::Consumer::with_range`.
+On a track reader both bounds now assign: an omitted start is group 0, where `set_groups` kept the floor, so pass the floor you want to keep.
+Lowering the floor offers the cached groups below the old one that the reader never read; a group is still handed out once.
+
+```rust
+// Before
+subscriber.set_groups(5..);
+// After
+let subscriber = subscriber.with_range(5..);
+```
+
+A custom publisher can now reach what the built-in ones use: `track::Subscriber::poll_start`, `track::Subscriber::poll_drop`, `group::Consumer::poll_expired`, `subscription::Position::final_sequence`, and `Subscription::{start, end, with_start, with_end}` for the covering span.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.
@@ -17,16 +32,16 @@ Dropping an unfinished writer now aborts the group with `Error::Dropped` immedia
 
 A `track::Subscriber` now reads only the groups its own `Subscription::ranges` cover, resolved again whenever `update` replaces them; before, they only set where its reads started.
 A reader that relied on groups another subscriber asked for must widen its own ranges.
-Once a track finishes, a subscriber with nothing left under its `set_groups` cap ends rather than waiting for the cap to rise; raise it before the track finishes to read past it.
+Once a track finishes, a subscriber with nothing left under its `with_range` cap ends rather than waiting for the cap to rise; raise it before the track finishes to read past it.
 
-### `largest()` reports only upstream state, within a reader's `set_groups` bounds
+### `largest()` reports only upstream state, within a reader's `with_range` bounds
 
-`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `set_groups`, where they used to ignore the bounds.
+`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `with_range`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
 Cached groups are still served meanwhile.
-To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
+To read the track's edge from a capped reader, lift the cap with `with_range(..)` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
@@ -82,8 +97,8 @@ session.retag(tier, &label);
 
 ### Subscriptions carry group ranges (#5732)
 
-`track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.
-Use `with_groups(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
+The `track::Subscription::start` and `end` fields are replaced by `ranges: Vec<Range>`; the `start()` and `end()` methods and the `with_start` and `with_end` builders read and set the span covering them.
+Use `with_range(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
 
 ### Receive estimates come from `Session::recv_bandwidth` (#5777)
 

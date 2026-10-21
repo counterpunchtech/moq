@@ -4,13 +4,42 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `largest()` reports within a reader's `setGroups` bounds
+### One `withRange` bounds a reader
 
-`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
+`Track.Subscriber.setGroups`, `withGroups`, and their `Track.Ordered` twins are replaced by `withRange(groups)`, which returns the reader.
+Both bounds now assign: an omitted start is group 0, where `setGroups` kept the floor, so pass the floor you want to keep.
+Lowering the floor offers the cached groups below the old one that the reader never read; a group is still handed out once.
+
+```ts
+// Before
+subscriber.setGroups({ end: { excluded: 10 } });
+// After
+subscriber.withRange({ start: { included: floor }, end: { excluded: 10 } });
+```
+
+### `tryRecvGroup` says why it returned no group
+
+`Track.Subscriber.tryRecvGroup()` returns a `Track.Recv` instead of a group or `undefined`, and no longer throws the track's error.
+Read `recv.group` when `recv.kind === "group"`; `idle` and `boundary` may change once `groupChanged(fn)` fires, `done` is the end, and `error` carries what it used to throw.
+`{ drops: true }` also reports the sequences the cursor gave up.
+
+```ts
+// Before
+const group = subscriber.tryRecvGroup();
+// After
+const recv = subscriber.tryRecvGroup();
+const group = recv.kind === "group" ? recv.group : undefined;
+```
+
+`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, and `Track.Consumer.info({ hold })` are new.
+
+### `largest()` reports within a reader's `withRange` bounds
+
+`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `withRange`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Unbounded readers and `Track.Producer.largest()` are unchanged.
-To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
+To read the track's edge from a capped reader, lift the cap with `withRange({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 

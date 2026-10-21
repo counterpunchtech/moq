@@ -11,11 +11,9 @@ import { Delivered } from "./delivered.ts";
 import { GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
-	finalSequence,
 	groupBounds,
 	hooks,
 	insertRun,
-	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
 	type Run,
@@ -30,6 +28,29 @@ import { Timescale, type Timestamp } from "./time.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
+
+/** The first group an exclusive track end excludes whole: one past the last group that may exist. */
+export function finalSequence(end: Location): number {
+	return end.group + (end.frame === 0 ? 0 : 1);
+}
+
+/**
+ * What a non-blocking group read found, which is everything the caller needs to decide what
+ * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
+ */
+export type Recv =
+	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
+	| { kind: "group"; group: GroupConsumer }
+	/** Sequences `[start, end)` this cursor gave up without serving. */
+	| { kind: "drop"; start: number; end: number }
+	/** Nothing readable, but the track is live and may produce more. */
+	| { kind: "idle" }
+	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
+	| { kind: "boundary" }
+	/** The producer finished and the buffer is drained. Nothing can follow. */
+	| { kind: "done" }
+	/** The track aborted. */
+	| { kind: "error"; error: Error };
 
 // Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
 // Media maxDelay only bounds how far behind the live edge a reader may fall.
@@ -380,9 +401,15 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/** Fetch the track's immutable publisher properties without subscribing. */
-	info(): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name);
+	/**
+	 * Fetch the track's immutable publisher properties without subscribing.
+	 *
+	 * A pending lookup keeps the track wanted. With `hold`, it stays wanted until `hold` aborts,
+	 * as a held Rust `query` does, so a publisher can keep a track alive while it answers for
+	 * it; aborting before the answer abandons the lookup.
+	 */
+	info(options?: { hold?: AbortSignal }): Promise<Info> {
+		return this.#broadcast.resolveTrackInfo(this.name, options?.hold);
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */
@@ -557,6 +584,15 @@ let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
+// Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, for a
+// reader whose floor moved below them; assigned in the producer's static block.
+let reofferCached: (
+	producer: Producer,
+	sink: TrackState,
+	start: number,
+	end: number,
+	offer: (sequence: number) => boolean,
+) => void;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -564,6 +600,7 @@ let cachedHolds: (producer: Producer, sequence: number) => boolean;
 let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
+	tryNextGroup(subscriber: Subscriber): Recv;
 	readFrame(subscriber: Subscriber): Promise<({ group: number; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
@@ -765,6 +802,15 @@ export class Producer {
 			const mirror = entry.group.mirror();
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
+		};
+		reofferCached = (producer, sink, start, end, offer) => {
+			const held = new Set(sink.groups.peek().map((group) => group.sequence));
+			for (const entry of producer.#cache) {
+				const sequence = entry.group.sequence;
+				if (sequence < start || sequence >= end || held.has(sequence)) continue;
+				if (entry.group.closed.peek() instanceof Error || !offer(sequence)) continue;
+				producer.#mirror(entry, sink);
+			}
 		};
 		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
 	}
@@ -1790,7 +1836,6 @@ export class Subscriber {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
 		};
-		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
@@ -1879,15 +1924,14 @@ export class Subscriber {
 			};
 			return dispose;
 		};
-		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 		};
-		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
+			tryNextGroup: (subscriber) => subscriber.#tryNextGroup(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
@@ -1957,7 +2001,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * The largest location within {@link setGroups}: the current one at first, then each newer
+	 * The largest location within {@link withRange}: the current one at first, then each newer
 	 * one (skipping any in between), and `undefined` once the track ends.
 	 *
 	 * The largest is the track's newest group or datagram at the newest frame (0 while empty), as
@@ -2032,37 +2076,32 @@ export class Subscriber {
 		return producer.subscribe(options);
 	}
 
-	/** Limit subsequent reads to these groups and return this reader for chaining. */
-	withGroups(groups: Groups): this {
-		this.setGroups(groups);
-		return this;
-	}
-
 	/**
-	 * Limit subsequent reads without rewinding read progress or changing the wire request.
-	 * An omitted start preserves the current floor; an omitted end removes the cap.
-	 * Raising the end makes unread buffered groups available again.
-	 * {@link largest} reports within these bounds.
+	 * Limit subsequent reads to these groups and return this reader for chaining. Mirrors the
+	 * Rust `with_range`.
+	 *
+	 * Both bounds are assigned, in either direction: an omitted start is group 0 and an
+	 * omitted end removes the cap. Lowering the floor or raising the cap offers the groups it
+	 * newly covers that the track still caches and this reader never handed out; a group is
+	 * never handed out twice. A local filter, not a request: it leaves the wire subscription
+	 * alone. {@link largest} reports within these bounds.
 	 */
-	setGroups(groups: Groups): void {
+	withRange(groups: Groups): this {
 		const { start, end } = groupBounds(groups);
-		this.#cursor.update((cursor) => ({ start: Math.max(cursor.start, start), end }));
-	}
-
-	// Serving counterpart of setGroups: a named start replaces the floor, matching
-	// Rust `start_at`. Local readers stay monotonic; only the wire publisher lowers.
-	#replaceGroups(groups: Groups): void {
-		const { start, end } = groupBounds(groups);
-		this.#cursor.update((cursor) => ({
-			start: groups.start === undefined ? cursor.start : start,
-			end,
-		}));
+		const before = this.#cursor.peek();
+		this.#cursor.set({ start, end });
+		const producer = this.#state.producer;
+		if (!this.#resume && producer && start < before.start) {
+			// The arrival cursor let go of what it passed below the old floor.
+			reofferCached(producer, this.#state, start, before.start, (sequence) => !this.#delivered.has(sequence));
+		}
+		return this;
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		// Settle if we're first (the producer may already have); either way drop anything
-		// still buffered. Groups parked at the setGroups cap deliberately outlive a clean
+		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
 		// producer close, so the subscriber leaving is what must release them: closing
 		// and clearing wakes a pending read to observe the end instead of hanging.
 		closeTrackState(this.#state, abort);
@@ -2086,7 +2125,7 @@ export class Subscriber {
 	 * is still delivered. When several groups are buffered, the lowest sequence is
 	 * returned first.
 	 *
-	 * Honors the range set by {@link setGroups}: a group
+	 * Honors the range set by {@link withRange}: a group
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 * A group whose presentation time is further behind the live edge than this
@@ -2127,8 +2166,7 @@ export class Subscriber {
 		});
 	}
 
-	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
-	// control state, popping the group, and positioning its frames are one JavaScript turn.
+	// The synchronous half of recvGroup, behind the public tryRecvGroup.
 	#tryRecvGroup(dispositions = false): Recv {
 		if (this.#resume) return this.#tryResumed(false);
 		const groups = this.#state.groups.peek();
@@ -2227,9 +2265,7 @@ export class Subscriber {
 		return end !== undefined && this.#state.received.peek() >= finalSequence(end) && !this.#state.owed.peek();
 	}
 
-	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
-	// the caller disposes the losers after whichever source wakes it. A declared end wakes it
-	// too, so a publisher can forward the end before the live edge reaches it.
+	// The readiness half of recvGroup, behind the public groupChanged.
 	#groupChanged(fn: () => void): Dispose {
 		if (this.#resume) {
 			const resumed = [this.#resume.changed(fn), this.#cursor.changed(fn), this.#state.closed.changed(fn)];
@@ -2252,21 +2288,28 @@ export class Subscriber {
 	}
 
 	/**
-	 * Take the next buffered group without blocking, honoring the same cursor bounds as
-	 * {@link recvGroup}.
+	 * Take the next group without waiting, honoring the same cursor bounds as
+	 * {@link recvGroup}, or say why there is none.
 	 *
-	 * Returns `undefined` when nothing is deliverable right now, which is not by itself the
-	 * end of the track: a group may still arrive, or one may be parked beyond the
-	 * {@link setGroups} cap. Use it to drain what the retained window already holds, where
-	 * waiting for a sequence nothing will republish would park forever.
+	 * Synchronous, so a publisher can pop a group and act on it in the same turn. `idle` and
+	 * `boundary` may read differently once {@link groupChanged} fires; `done` and `error` are
+	 * final. With `drops`, each run of sequences the cursor gives up is reported once as a
+	 * `drop`, which a publisher forwards to its peer; without it they pass silently.
+	 *
+	 * The first call commits this track to arrival order, as {@link recvGroup} does.
 	 */
-	tryRecvGroup(): GroupConsumer | undefined {
+	tryRecvGroup(options?: { drops?: boolean }): Recv {
 		this.#live();
 		this.#mode = "arrival";
-		const recv = this.#tryRecvGroup();
-		if (recv.kind === "group") return recv.group;
-		if (recv.kind === "error") throw recv.error;
-		return undefined;
+		return this.#tryRecvGroup(options?.drops ?? false);
+	}
+
+	/**
+	 * Call `fn` once when {@link tryRecvGroup} may read differently, including when the track
+	 * declares its end, and return the disposer.
+	 */
+	groupChanged(fn: () => void): Dispose {
+		return this.#groupChanged(fn);
 	}
 
 	/**
@@ -2555,7 +2598,7 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** The largest location within {@link setGroups}; see {@link Subscriber.largest}. */
+	/** The largest location within {@link withRange}; see {@link Subscriber.largest}. */
 	largest(): Promise<Location | undefined> {
 		return this.#subscriber.largest();
 	}
@@ -2570,15 +2613,14 @@ export class Ordered {
 		return this.#subscriber.finished();
 	}
 
-	/** Limit subsequent reads to these groups and return this reader for chaining. */
-	withGroups(groups: Groups): this {
-		this.setGroups(groups);
+	/**
+	 * Limit subsequent reads to these groups and return this reader for chaining; see
+	 * {@link Subscriber.withRange}. An ordered read never goes back, so lowering the floor
+	 * below a group it already returned offers nothing.
+	 */
+	withRange(groups: Groups): this {
+		this.#subscriber.withRange(groups);
 		return this;
-	}
-
-	/** Limit subsequent reads to these groups; see {@link Subscriber.setGroups}. */
-	setGroups(groups: Groups): void {
-		this.#subscriber.setGroups(groups);
 	}
 
 	/** Update this subscription's options; see {@link Subscriber.update}. */
@@ -2597,10 +2639,18 @@ export class Ordered {
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
 	 * group whose every frame is further behind the live edge than `maxDelay` (the default of
 	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
-	 * {@link setGroups}.
+	 * {@link withRange}.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
+	}
+
+	/**
+	 * Take the next group as {@link nextGroup} would without waiting, or say why there is none;
+	 * see {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
+	 */
+	tryNextGroup(): Recv {
+		return ordered_.tryNextGroup(this.#subscriber);
 	}
 
 	/**
