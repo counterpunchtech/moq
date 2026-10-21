@@ -3318,7 +3318,11 @@ mod tests {
         release(&mut client, id, 2);
         assert_eq!(client.local_max_data, initial + 12);
         assert_eq!(client.credit_stats().leased, 20);
-        assert_eq!(client.credit_stats().peak_spent, 80, "the gap counts, and the peak outlives the release");
+        assert_eq!(
+            client.credit_stats().peak_spent,
+            80,
+            "the gap counts, and the peak outlives the release"
+        );
     }
 
     /// A finished stream's state is reclaimed once its last byte is leased, but the lease and its
@@ -3533,7 +3537,10 @@ mod tests {
             data(&mut client, id, 0, 1, false);
         }
         for &id in &ids {
-            assert!(matches!(wait(&mut client, id, 2), Err(LeaseError::Blocked(_))));
+            assert!(matches!(
+                wait(&mut client, id, 2),
+                Err(LeaseError::Blocked(_))
+            ));
         }
         assert_eq!(client.credit_stats().evicted, 1);
         assert!(

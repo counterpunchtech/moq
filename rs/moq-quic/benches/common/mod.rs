@@ -24,8 +24,8 @@ use criterion::{
 use moq_clock::Instant;
 use moq_quic::{
     ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent,
-    Endpoint, EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError, ServerConfig,
-    StreamEvent, StreamId, TransportConfig, VarInt,
+    Endpoint, EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError,
+    ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
     coding::Codec,
     congestion::{Controller, ControllerFactory},
     fuzz::Plaintext,

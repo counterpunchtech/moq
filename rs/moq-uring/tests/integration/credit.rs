@@ -53,7 +53,10 @@ async fn leased(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, want: u
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| (lease.remaining(), lease.is_fin()))),
+		std::future::poll_fn(|cx| {
+			recv.poll_lease(cx, want)
+				.map_ok(|lease| (lease.remaining(), lease.is_fin()))
+		}),
 	)
 	.await
 	.expect("lease")
@@ -64,10 +67,12 @@ async fn consume(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, n: usi
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|mut lease| {
-			lease.advance(n);
-			lease.release();
-		})),
+		std::future::poll_fn(|cx| {
+			recv.poll_lease(cx, n).map_ok(|mut lease| {
+				lease.advance(n);
+				lease.release();
+			})
+		}),
 	)
 	.await
 	.expect("lease")

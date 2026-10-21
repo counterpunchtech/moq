@@ -971,7 +971,11 @@ mod tests {
 		};
 		assert!(lease.is_fin());
 		assert_eq!(lease.copy_to_bytes(2), Bytes::from_static(b"ab"));
-		assert_eq!(lease.copy_to_bytes(2), Bytes::from_static(b"cd"), "joined across chunks");
+		assert_eq!(
+			lease.copy_to_bytes(2),
+			Bytes::from_static(b"cd"),
+			"joined across chunks"
+		);
 		assert_eq!(lease.remaining(), 1);
 		lease.release();
 

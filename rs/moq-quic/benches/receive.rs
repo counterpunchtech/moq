@@ -113,7 +113,10 @@ fn bench_lease(c: &mut Criterion<ThreadCpu>) {
                 let mut pair = None;
                 group.throughput(Throughput::Bytes((streams * packets * PACKET) as u64));
                 group.bench_function(
-                    BenchmarkId::new(format!("{name}/streams_{streams}"), format!("packets_{packets}")),
+                    BenchmarkId::new(
+                        format!("{name}/streams_{streams}"),
+                        format!("packets_{packets}"),
+                    ),
                     |b| {
                         let pair = pair.get_or_insert_with(|| {
                             let mut pair = Pair::new(Setup::default());

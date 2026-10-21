@@ -1948,7 +1948,9 @@ async fn stuck_window_evicts_the_lower_priority() {
     high.set_priority(1);
     let leased = tokio::join!(
         poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
-        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high
+            .poll_lease(cx, WINDOW)
+            .map_ok(|lease| lease.remaining())),
     );
     assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
@@ -1971,12 +1973,14 @@ async fn leased(recv: &mut RecvStream, want: usize) -> usize {
 
 /// Consume the first `n` leased bytes of `recv`.
 async fn consume(recv: &mut RecvStream, n: usize) {
-    poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|mut lease| {
-			lease.advance(n);
-			lease.release();
-		}))
-        .await
-        .unwrap()
+    poll_fn(|cx| {
+        recv.poll_lease(cx, n).map_ok(|mut lease| {
+            lease.advance(n);
+            lease.release();
+        })
+    })
+    .await
+    .unwrap()
 }
 
 #[derive(Default)]

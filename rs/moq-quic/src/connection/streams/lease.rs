@@ -46,7 +46,8 @@ type Victim = Reverse<(i64, Reverse<StreamId>)>;
 /// data arrived while it waited. Its reader may be about to free the window, so nothing is
 /// evicted meanwhile.
 fn unlooked(unread: u64, lease: Option<&Leased>) -> bool {
-    (unread > 0 && lease.is_none_or(|lease| !lease.filled)) || lease.is_some_and(|lease| lease.ready)
+    (unread > 0 && lease.is_none_or(|lease| !lease.filled))
+        || lease.is_some_and(|lease| lease.ready)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -466,7 +467,10 @@ impl StreamsState {
             if recv.stopped || held == 0 || lease.is_some_and(|lease| lease.evicted) {
                 continue;
             }
-            debug_assert!(!unlooked(unread, lease), "{id} has data its reader has not looked at");
+            debug_assert!(
+                !unlooked(unread, lease),
+                "{id} has data its reader has not looked at"
+            );
             victims.push(rank(lease.map_or(0, |lease| lease.priority), id));
         }
         for (&id, lease) in &self.leases {
@@ -489,11 +493,16 @@ impl StreamsState {
             {
                 self.scans += 1;
             }
-            let recv = self.recv.get(&id).and_then(|slot| slot.as_ref()?.as_open_recv());
+            let recv = self
+                .recv
+                .get(&id)
+                .and_then(|slot| slot.as_ref()?.as_open_recv());
             let lease = self.leases.get(&id);
             let waiting = recv.is_some_and(|recv| {
                 let unread = recv.end - recv.assembler.bytes_read();
-                !recv.stopped && !lease.is_some_and(|lease| lease.evicted) && unlooked(unread, lease)
+                !recv.stopped
+                    && !lease.is_some_and(|lease| lease.evicted)
+                    && unlooked(unread, lease)
             });
             if waiting {
                 found = true;
