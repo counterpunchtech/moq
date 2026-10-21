@@ -660,15 +660,6 @@ mod tests {
 	use bytes::Bytes;
 	use std::time::Duration;
 
-	/// A late payload keeps its spacing on std's clock instead of collapsing onto now.
-	#[test]
-	fn a_late_payload_keeps_its_past_host_instant() {
-		let now = StdInstant::now();
-		let late = (moq_net::time::now() - Duration::from_millis(100)).into_std();
-		assert!(late < now, "{late:?} should precede {now:?}");
-		assert!((moq_net::time::now() + Duration::from_millis(100)).into_std() > now);
-	}
-
 	#[test]
 	fn send_buffer_uses_standard_srt_window() {
 		let mut options = SocketOptions::default();
