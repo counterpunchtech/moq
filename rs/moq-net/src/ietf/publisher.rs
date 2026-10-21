@@ -90,8 +90,13 @@ fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
 	if requested && missing { Error::Timeout } else { error }
 }
 
-// Returned from one poll and matched at once, so its size never sits in a task.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "returned from one poll and matched at once, so its size never sits in a task"
+	)
+)]
 enum FillStep {
 	Batch,
 	Partial(frame::Consumer),

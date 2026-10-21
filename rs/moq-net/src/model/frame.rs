@@ -762,7 +762,7 @@ pub struct Consumer {
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: passthrough
 	pub(crate) inflated: Option<u64>,
 	source: Source,

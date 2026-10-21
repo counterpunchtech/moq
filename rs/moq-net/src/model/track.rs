@@ -2691,7 +2691,7 @@ impl Producer {
 	/// Insert a received datagram of a compressed track, whose payload is its own DEFLATE
 	/// stream that must inflate to exactly `size` bytes. Kept as it arrived, beside the
 	/// inflated payload.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: passthrough
 	pub(crate) fn insert_deflated_datagram(&mut self, mut datagram: super::datagram::Stored, size: u64) -> Result<()> {
 		if !self.info.compress {

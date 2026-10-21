@@ -1148,7 +1148,7 @@ impl Producer {
 
 	/// Whether the parent track compresses, so a received frame arrives as a stored slice
 	/// with its inflated size ([`frame::Header::inflated`]).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn compressed(&self) -> bool {
 		self.handle.track.compress
