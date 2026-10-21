@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
+import { nextTask } from "../util/yield.ts";
 import { accept } from "./accept.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
@@ -273,6 +274,18 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 });
 
 test("the connection's tokens ride every session across a GOAWAY", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
+	// so the reconnect's delay passes long before the draining session's handover.
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 100 && !done(); i++) {
+			await nextTask();
+			clock.advance(Nano.fromMilli(Milli(1)));
+		}
+		expect(done()).toBe(true);
+	};
+
 	// Every dial gets a lite-07 session that grants each token it is presented.
 	const relays: { server: WebTransport; tokens: string[]; withdrawn: string[] }[] = [];
 	const stub = function StubWebTransport(dialed: string | URL) {
@@ -306,29 +319,34 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		goaway: { handover },
 		delay: { initial: Milli(1) },
 	});
-	const token = await reload.auth.add("token");
-	const first = relays[0];
-	if (!first) throw new Error("no first dial");
-	expect(first.tokens).toContain("token");
+	try {
+		const token = await reload.auth.add("token");
+		const first = relays[0];
+		if (!first) throw new Error("no first dial");
+		expect(first.tokens).toContain("token");
 
-	const stream = await Stream.open(first.server, { version: Lite.Version.DRAFT_07 });
-	await stream.writer.u53(Lite.StreamId.Goaway);
-	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+		const stream = await Stream.open(first.server, { version: Lite.Version.DRAFT_07 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
 
-	// The replacement presents it with no help from the application, while the draining
-	// session keeps presenting it beside its successor.
-	await waitUntil(() => relays[1]?.tokens.includes("token") === true);
-	await waitUntil(() => token.grant.peek() !== undefined && reload.established.peek() !== undefined);
-	await settle();
-	expect(first.withdrawn).not.toContain("token");
-	let ended = false;
-	void token.closed.then(() => {
-		ended = true;
-	});
-	await settle();
-	expect(ended).toBe(false);
+		// The replacement presents it with no help from the application, while the draining
+		// session keeps presenting it beside its successor.
+		await until(() => relays[1]?.tokens.includes("token") === true);
+		await until(() => token.grant.peek() !== undefined && reload.established.peek() !== undefined);
+		await nextTask();
+		expect(first.withdrawn).not.toContain("token");
+		let ended = false;
+		void token.closed.then(() => {
+			ended = true;
+		});
+		await nextTask();
+		expect(ended).toBe(false);
 
-	// The tokens end with the loop.
-	reload.close();
-	expect(await token.closed).toBeInstanceOf(Error);
+		// The tokens end with the loop.
+		reload.close();
+		expect(await token.closed).toBeInstanceOf(Error);
+	} finally {
+		reload.close();
+		restore();
+	}
 });
