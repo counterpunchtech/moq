@@ -853,11 +853,14 @@ export class Publisher {
 		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
 
 		try {
+			// Every draft waits for the track's info, as Rust does: it surfaces a rejected track
+			// (accept never called, track closed) as an error here, which resets the stream, and
+			// its priority breaks ties between this session's subscriptions at one subscriber
+			// priority.
+			const info = await untilAborted(track.info(), left.signal);
+			const publisher = info.priority;
 			// Older drafts carry no timestamps.
 			let timescale: Timescale | undefined;
-			// Breaks ties between this session's subscriptions at one subscriber priority. Drafts
-			// before lite-05 serve before the track's info resolves, so they rank by the default.
-			let publisher = 0;
 
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -866,12 +869,8 @@ export class Publisher {
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
-				// they always agree. Awaiting info() also surfaces a rejected track
-				// (accept never called, track closed) as an error here, which resets the
-				// stream.
-				const info = await untilAborted(track.info(), left.signal);
+				// they always agree.
 				timescale = wireTimescale(this.version, info.timescale);
-				publisher = info.priority;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({

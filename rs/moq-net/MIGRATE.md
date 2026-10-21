@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Priorities are signed, with 0 unset (#6142)
 
 `track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
-The track's default was 127 and the subscription's 0, the least urgent; both are 0 now.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
 
