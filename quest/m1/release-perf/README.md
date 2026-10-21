@@ -40,9 +40,9 @@ noise.
   [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) owns it.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
-  let an embedder bucket sessions by label and match payload billing per
-  bucket, and the drain runs once a second, using under 0.01% of a core at
-  10,000 sessions. Deleting those bytes was rejected.
+  match payload billing per label, such as per signing key. The drain runs
+  once a second, using under 0.01% of a core at 10,000 sessions. Deleting
+  those bytes was rejected.
 
 ### Release as a baseline
 
