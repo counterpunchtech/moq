@@ -14,6 +14,13 @@ A handle backs one active session at a time, plus the ones draining after a GOAW
 `Auth.None` is removed; nothing returned it.
 On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` rejecting with that code.
 
+### A dropped or cut group ends its reader with an error (#6143)
+
+A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `Track.Subscriber` saw it is now handed out, and its reads reject with the publisher's `StreamError`; before, it was skipped or ended cleanly.
+A group already held rejects the same way when the drop lands, even while its stream is still arriving.
+On lite-05 and lite-06 the code is always `StreamCode.NotFound`.
+Treat a rejected group read as the loss of that group and keep reading the track, rather than ending the subscription.
+
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
