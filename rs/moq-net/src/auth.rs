@@ -290,8 +290,11 @@ impl Attached {
 	/// Present the handle's token `id` on this session, returning the answer when the
 	/// session settles it at once: `Ok` when only a request can carry it, so nothing will
 	/// answer, and [`Error::Unsupported`] when nothing can.
+	///
+	/// A draining session takes no new tokens, so its verdict never ends one its successor
+	/// carries.
 	fn offer(&mut self, id: u64, token: &Bytes) -> Option<Result<()>> {
-		if self.closed.is_some() {
+		if !self.active() {
 			return None;
 		}
 		let answered = match (self.supported, self.requests) {
@@ -2781,6 +2784,24 @@ mod tests {
 			third.poll_opening(&kio::Waiter::noop()).is_pending(),
 			"a refused token stays ended"
 		);
+	}
+
+	/// A token added while a session without AUTH drains rides only its successor, so the
+	/// draining session cannot end it as unsupported.
+	#[test]
+	fn a_draining_session_takes_no_new_token() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, false, false).unwrap();
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+		let successor = Link::attach(&handle, true, false).unwrap();
+
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		assert!(Selector::Token(auth.id()).ended(&handle.state.read()).is_none());
+		let id = opened(&successor);
+		successor.granted(id, Grant::all());
+		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
 	}
 
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.

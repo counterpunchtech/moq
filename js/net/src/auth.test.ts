@@ -15,7 +15,7 @@ import * as LiteMessage from "./lite/message.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { type Stream, Writer } from "./stream.ts";
+import { Stream, Writer } from "./stream.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { nextTask } from "./util/yield.ts";
@@ -713,6 +713,45 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 		warned.mockRestore();
 		restore();
 	}
+});
+
+test("lite-07 presents a token added after a GOAWAY only on the successor", async () => {
+	const protocol = Lite.ALPN_07_WIP;
+	const handle = new Handle();
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume(), auth: handle }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const seen: string[] = [];
+	answer(server.auth.requests(), (token) => {
+		seen.push(token);
+		return token ? grant(["first"], []) : grant([], []);
+	});
+	const token = await handle.add("token");
+	await waitFor(handle.grant, (g) => g?.publish.equals(patterns("first")) === true);
+
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	const late = handle.add("late");
+	const successor = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	// The successor has not answered yet, so its predecessor's grant no longer applies.
+	expect(handle.grant.peek()).toBeUndefined();
+	expect(token.grant.peek()).toBeUndefined();
+
+	answer(successor.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
+	await late;
+	await waitFor(handle.grant, (g) => g?.publish.equals(patterns("second")) === true);
+	for (let i = 0; i < 10; i++) await nextTask();
+	expect(seen).not.toContain("late");
+
+	client.abort();
+	server.abort();
+	successor.client.abort();
+	successor.server.abort();
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.

@@ -203,6 +203,8 @@ class HandleState {
 	attach(session: AuthSession) {
 		this.vacant();
 		this.sessions.push(session);
+		// The successor is live now, so its predecessor's grants no longer apply.
+		this.refresh();
 	}
 
 	/** A session closed: it presents nothing anymore. A handle of its own ends with it. */
@@ -582,9 +584,12 @@ export class AuthSession {
 		return this.#byToken.get(token)?.grant;
 	}
 
-	/** Present one of the handle's tokens on this session. */
+	/**
+	 * Present one of the handle's tokens on this session. A draining session takes no new
+	 * tokens, so its verdict never ends one its successor carries.
+	 */
 	offer(token: Token) {
-		if (this.#closed || this.#byToken.has(token)) return;
+		if (!this.active || this.#byToken.has(token)) return;
 		if (!this.#wire && !this.#requests) {
 			this.#state.verdict(token, new Unsupported());
 			return;
@@ -857,6 +862,12 @@ export class AuthSession {
 			if (this.#closed || presented.withdrawn || presented.ended) {
 				refused = false;
 				result = null;
+				break;
+			}
+			// After a GOAWAY the peer must not see new streams: the successor presents it.
+			if (this.#draining()) {
+				refused = false;
+				result = new StreamError(StreamCode.GoingAway);
 				break;
 			}
 		}
