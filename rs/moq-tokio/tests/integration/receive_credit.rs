@@ -700,11 +700,28 @@ const STOCK_WINDOW: u64 = 128 << 20;
 const BENCH_BYTES: usize = 256 << 20;
 /// The benchmark's bottleneck, and the bytes a run delivers through it.
 const BENCH_BLOAT: (u64, usize) = (200_000_000, 16 << 20);
+/// Groups each track keeps in flight, so a track is not bound to its round trip.
+const INFLIGHT: usize = 4;
+
+/// One benchmark configuration.
+#[derive(Clone, Copy)]
+struct Cell {
+	/// The setting this cell varies from the default.
+	axis: &'static str,
+	/// Tracks writing at once, each its own stream per group.
+	streams: usize,
+	/// Bytes per frame, one frame per group.
+	frame: usize,
+	/// The receiver's connection receive window.
+	window: u64,
+	/// Whether each stream gets the whole connection window instead of the driver's finite default.
+	follow: bool,
+}
 
 /// What one benchmark run measured.
 struct Measured {
-	/// The most the receiver held plus received without reading, in bytes.
-	retained: u64,
+	/// The most credit the peer had spent at once: leased or not yet read.
+	peak: u64,
 	/// Payload bytes delivered per second.
 	throughput: f64,
 	/// How long frames took from the write to the receiver completing them, sorted.
@@ -713,78 +730,76 @@ struct Measured {
 	overflowed: u64,
 }
 
-/// Deliver `bytes` over `streams` tracks of one-frame groups of `frame` bytes, each track
-/// writing its next group once the last arrived, so `streams` streams are open at once.
-/// `follow` gives each stream the whole connection window; otherwise it keeps the
-/// driver's finite default. Every frame fits the window alongside the others, so nothing
-/// may be evicted, through `profile` or not.
-async fn measure(
-	streams: usize,
-	frame: usize,
-	follow: bool,
-	profile: Option<moq_shaper::Profile>,
-	bytes: usize,
-) -> Measured {
-	let mut transport = transport(STOCK_WINDOW);
+/// Deliver `bytes` over `cell.streams` tracks of one-frame groups, each track keeping
+/// [`INFLIGHT`] groups outstanding. Every incomplete frame fits the window alongside the
+/// others, so nothing may be evicted, through `profile` or not.
+async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize) -> Measured {
+	let mut transport = transport(cell.window);
 	let max = driver::VarInt::from_u64(moq_tokio::quic::DEFAULT_MAX_STREAMS).unwrap();
 	transport.max_concurrent_uni_streams(max);
 	transport.max_concurrent_bidi_streams(max);
-	if follow {
-		transport.stream_receive_window(driver::VarInt::from_u64(STOCK_WINDOW).unwrap());
+	if cell.follow {
+		transport.stream_receive_window(driver::VarInt::from_u64(cell.window).unwrap());
 	}
 	let setup = setup_through("moq-lite-06", transport, profile).await;
-	let mut tracks = Vec::with_capacity(streams);
-	for index in 0..streams {
+	let mut tracks = Vec::with_capacity(cell.streams);
+	for index in 0..cell.streams {
 		tracks.push(setup.subscribe(&index.to_string(), 0).await);
 	}
 
-	let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let sampler = tokio::spawn({
-		let conn = setup.conn.clone();
-		let done = done.clone();
-		async move {
-			let mut peak = 0;
-			while !done.load(std::sync::atomic::Ordering::Relaxed) {
-				// Every byte whose credit has not come back: leased or not yet read.
-				peak = peak.max(STOCK_WINDOW.saturating_sub(conn.stats().credit.available));
-				tokio::time::sleep(Duration::from_millis(1)).await;
-			}
-			peak
-		}
-	});
-
-	let rounds = (bytes / frame / streams).max(1);
-	let payload = Bytes::from(vec![7u8; frame]);
+	let rounds = (bytes / cell.frame / cell.streams).max(1);
+	let payload = Bytes::from(vec![7u8; cell.frame]);
 	let start = std::time::Instant::now();
 	let tasks: Vec<_> = tracks
 		.into_iter()
 		.map(|(track, mut sub)| {
 			let payload = payload.clone();
 			tokio::spawn(async move {
+				let inflight = Arc::new(tokio::sync::Semaphore::new(INFLIGHT));
+				let sent = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+				let writer = tokio::spawn({
+					let (inflight, sent, payload) = (inflight.clone(), sent.clone(), payload.clone());
+					async move {
+						for _ in 0..rounds {
+							inflight.acquire().await.unwrap().forget();
+							let mut group = track.append_group().unwrap();
+							sent.lock().unwrap().insert(group.sequence, std::time::Instant::now());
+							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+							group.finish().unwrap();
+						}
+						track
+					}
+				});
 				let mut latency = Vec::with_capacity(rounds);
 				for _ in 0..rounds {
-					let sent = std::time::Instant::now();
-					let mut group = track.append_group().unwrap();
-					group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-					group.finish().unwrap();
-					assert_eq!(next_frame(&mut sub).await.len(), payload.len());
+					let mut group = next_group(&mut sub).await;
+					let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+						.await
+						.expect("frame timed out")
+						.expect("frame")
+						.expect("group ended");
+					assert_eq!(frame.payload.len(), payload.len());
+					let sent = sent.lock().unwrap().remove(&group.sequence).expect("written");
 					latency.push(sent.elapsed());
+					inflight.add_permits(1);
 				}
+				// Keep the track open until every group is read.
+				drop(writer.await.unwrap());
 				latency
 			})
 		})
 		.collect();
-	let mut latency = Vec::with_capacity(rounds * streams);
+	let mut latency = Vec::with_capacity(rounds * cell.streams);
 	for task in tasks {
 		latency.extend(task.await.unwrap());
 	}
 	let elapsed = start.elapsed();
-	done.store(true, std::sync::atomic::Ordering::Relaxed);
 	latency.sort();
-	assert_eq!(setup.conn.stats().credit.evicted, 0, "pacing evicted a stream");
+	let credit = setup.conn.stats().credit;
+	assert_eq!(credit.evicted, 0, "pacing evicted a stream");
 	Measured {
-		retained: sampler.await.unwrap(),
-		throughput: (rounds * streams * frame) as f64 / elapsed.as_secs_f64(),
+		peak: credit.peak_spent,
+		throughput: (rounds * cell.streams * cell.frame) as f64 / elapsed.as_secs_f64(),
 		latency,
 		overflowed: setup
 			.verify()
@@ -792,61 +807,86 @@ async fn measure(
 	}
 }
 
-/// What bounded receive memory costs: a finite stream window against one that follows the
-/// connection window, swept over concurrent streams and frame sizes on separate axes so
-/// a cost that grows with either shows up as a slope, on loopback and through a
-/// bufferbloated bottleneck. Reports the peak retained bytes (leased plus unread),
-/// throughput, frame completion latency, and the bottleneck's queue drops, each the median
-/// of the runs, and fails if any run evicted a stream. The publisher is a stock server, so
-/// its send window bounds what is in flight as it would in production. Run by nightly.
+/// What bounded receive memory costs, on loopback and through a bufferbloated bottleneck.
+///
+/// Each axis varies one setting from the default cell (16 streams of 256 KiB frames, the
+/// stock connection window, the driver's finite stream window): concurrent streams and frame
+/// size, so a cost that grows with either shows up as a slope; the connection window, which
+/// trades memory for throughput once it nears the path's bandwidth-delay product; and a
+/// stream window that follows the connection window. Reports the peak credit the peer had
+/// spent (leased plus unread), throughput, frame completion latency, and the bottleneck's
+/// queue drops, each the median of the runs, and fails if any run evicted a stream. The
+/// publisher is a stock server, so its send window bounds what is in flight as it would in
+/// production. Run by nightly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {
 	const RUNS: usize = 3;
-	const FRAME: usize = 256 * 1024;
-	const STREAMS: usize = 16;
-	let cells = [1, 16, 256]
-		.map(|streams| ("streams", streams, FRAME))
-		.into_iter()
-		.chain([16 * 1024, 256 * 1024, 4 << 20].map(|frame| ("frame", STREAMS, frame)));
+	let default = Cell {
+		axis: "default",
+		streams: 16,
+		frame: 256 * 1024,
+		window: STOCK_WINDOW,
+		follow: false,
+	};
+	let cells = std::iter::once(default)
+		.chain([1, 256].map(|streams| Cell {
+			axis: "streams",
+			streams,
+			..default
+		}))
+		.chain([16 * 1024, 4 << 20].map(|frame| Cell {
+			axis: "frame",
+			frame,
+			..default
+		}))
+		.chain([8 << 20, 32 << 20].map(|window| Cell {
+			axis: "window",
+			window,
+			..default
+		}))
+		.chain([4 << 20].map(|frame| Cell {
+			axis: "follow",
+			frame,
+			follow: true,
+			..default
+		}));
 	let paths = [
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
 	];
-	println!("path,axis,streams,frame,stream_window,retained_mib,mib_per_s,p50_ms,p99_ms,overflowed");
-	for ((axis, streams, frame), (path, profile, bytes)) in
-		cells.flat_map(|cell| paths.clone().map(|path| (cell, path)))
-	{
-		let mut runs: [Vec<Measured>; 2] = Default::default();
-		// Alternate the modes so drift in the host hits both alike.
+	println!("path,axis,streams,frame,window_mib,stream_window,peak_mib,mib_per_s,p50_ms,p99_ms,overflowed");
+	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
+		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
-			for (mode, follow) in [false, true].into_iter().enumerate() {
-				runs[mode].push(measure(streams, frame, follow, profile.clone(), bytes).await);
-			}
+			runs.push(measure(cell, profile.clone(), bytes).await);
 		}
-		for (runs, mode) in runs.iter().zip(["finite", "follow"]) {
-			let median = |mut values: Vec<f64>| {
-				values.sort_by(f64::total_cmp);
-				values[values.len() / 2]
-			};
-			let percentile = |p: usize| {
-				median(
-					runs.iter()
-						.map(|run| run.latency[(run.latency.len() - 1) * p / 100].as_secs_f64() * 1e3)
-						.collect(),
-				)
-			};
-			let retained = median(runs.iter().map(|run| run.retained as f64).collect());
-			let throughput = median(runs.iter().map(|run| run.throughput).collect());
-			let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
-			println!(
-				"{path},{axis},{streams},{frame},{mode},{:.1},{:.0},{:.2},{:.2},{overflowed}",
-				retained / (1 << 20) as f64,
-				throughput / (1 << 20) as f64,
-				percentile(50),
-				percentile(99),
-			);
-		}
+		let median = |mut values: Vec<f64>| {
+			values.sort_by(f64::total_cmp);
+			values[values.len() / 2]
+		};
+		let percentile = |p: usize| {
+			median(
+				runs.iter()
+					.map(|run| run.latency[(run.latency.len() - 1) * p / 100].as_secs_f64() * 1e3)
+					.collect(),
+			)
+		};
+		let peak = median(runs.iter().map(|run| run.peak as f64).collect());
+		let throughput = median(runs.iter().map(|run| run.throughput).collect());
+		let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
+		println!(
+			"{path},{},{},{},{},{},{:.1},{:.0},{:.2},{:.2},{overflowed}",
+			cell.axis,
+			cell.streams,
+			cell.frame,
+			cell.window >> 20,
+			if cell.follow { "follow" } else { "finite" },
+			peak / (1 << 20) as f64,
+			throughput / (1 << 20) as f64,
+			percentile(50),
+			percentile(99),
+		);
 	}
 }
 
