@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Priorities are signed
+### Priorities are signed (#6142)
 
 `Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
 The track's default was 127 and the subscription's 0, the least urgent; both are 0 now.

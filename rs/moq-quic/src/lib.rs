@@ -55,7 +55,7 @@ mod connection;
 pub use crate::connection::{
     Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
     Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
-    RttEstimator, SendDatagramError, SendDomain, SendGroup, SendGroups, SendOptions, SendStream,
+    RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
     ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]

@@ -832,25 +832,6 @@ pub struct Config {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
-
-	/// Share each relay-to-relay session's bandwidth equally between its broadcasts.
-	/// Boolean flag: pass `--cluster-fair` (or `=true` / `=false`). Off by default.
-	///
-	/// Off, a peer session orders every stream by the downstream subscriber's priority,
-	/// so one tenant's broadcast can starve another's on a congested link. On, each
-	/// broadcast gets an equal share however many tracks or subscribers it has, the
-	/// publisher's track priority alone orders the streams inside it, and the subscriber
-	/// priorities from downstream are not forwarded. Sessions with clients are unchanged,
-	/// as are peer sessions over a transport without send domains (WebSocket, iroh) or
-	/// over moq-transport, which stay strict.
-	#[usage(
-		name = "cluster-fair",
-		long = "cluster-fair",
-		env = "MOQ_CLUSTER_FAIR",
-		setting = "cluster.fair",
-		bool_value
-	)]
-	pub fair: bool,
 }
 
 impl Config {
@@ -1186,23 +1167,6 @@ impl Cluster {
 			self.peer_limits
 		} else {
 			self.session_limits
-		}
-	}
-
-	/// How an admitted session shares bandwidth: per broadcast for a `peer` grant when
-	/// [`Config::fair`] is on, strictly otherwise.
-	pub(crate) fn schedule(&self, lease: &auth::Lease) -> moq_net::session::Schedule {
-		match lease.token().peer {
-			true => self.peer_schedule(),
-			false => moq_net::session::Schedule::Strict,
-		}
-	}
-
-	/// How a relay-to-relay session shares bandwidth. See [`Config::fair`].
-	fn peer_schedule(&self) -> moq_net::session::Schedule {
-		match self.config.fair {
-			true => moq_net::session::Schedule::Broadcast,
-			false => moq_net::session::Schedule::Strict,
 		}
 	}
 
@@ -2068,8 +2032,7 @@ impl Cluster {
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
 			.with_stats(stats.clone())
-			.with_limits(self.peer_limits)
-			.with_schedule(self.peer_schedule());
+			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -2377,31 +2340,6 @@ mod tests {
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
 			let limits = cluster.limits(&lease);
 			assert_eq!((limits.announces, limits.subscriptions, limits.fetches), expected);
-		}
-	}
-
-	/// `cluster.fair` schedules only relay-to-relay sessions per broadcast.
-	#[tokio::test]
-	async fn fair_scheduling_follows_the_peer_grant() {
-		use moq_net::session::Schedule;
-		for (fair, peer, expected) in [
-			(false, false, Schedule::Strict),
-			(false, true, Schedule::Strict),
-			(true, false, Schedule::Strict),
-			(true, true, Schedule::Broadcast),
-		] {
-			let mut options = Options::default();
-			options.config.fair = fair;
-			let cluster = Cluster::new(options).unwrap();
-			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
-			grant.peer = peer;
-			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
-			let lease = auth::Lease::new("/.cluster/peer", consumer);
-			assert_eq!(cluster.schedule(&lease), expected, "fair {fair}, peer {peer}");
-			assert_eq!(
-				cluster.peer_schedule(),
-				if fair { Schedule::Broadcast } else { Schedule::Strict }
-			);
 		}
 	}
 

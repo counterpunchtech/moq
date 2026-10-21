@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Priorities are signed, with 0 unset
+### Priorities are signed, with 0 unset (#6142)
 
 `track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
 The track's default was 127 and the subscription's 0, the least urgent; both are 0 now.
@@ -167,16 +167,14 @@ Hold one of those, such as `track.subscribe(None)` or `track.query()` to only le
 ### Custom transports declare send groups (#5711)
 
 A `transport::poll::SendStream` declares `type Group` (`Ungrouped` when the transport has none) and implements `set_group`, and `set_priority` takes an `i64`.
-A `transport::poll::Session` implements `send_domain` and `send_group`, returning `None` without groups.
-A send group opens in a send domain, which shares bytes equally with the session's other domains, or in the session's default domain for `None`.
+A `transport::poll::Session` implements `send_group`, returning `None` without groups.
 
 ```rust
 type Group = Ungrouped;
 fn set_priority(&mut self, priority: i64) { ... }
 fn set_group(&mut self, group: &Ungrouped) { match *group {} }
 // and on the Session
-fn send_domain(&mut self) -> Option<Ungrouped> { None }
-fn send_group(&mut self, _domain: Option<&Ungrouped>, _priority: i64) -> Option<Ungrouped> { None }
+fn send_group(&mut self, _priority: i64) -> Option<Ungrouped> { None }
 ```
 
 ### Superseded groups age by wall clock too (#5548)

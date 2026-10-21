@@ -135,10 +135,8 @@ pub struct Info {
 	pub max_age: Option<Duration>,
 	/// The publisher's priority for this track, higher first, defaulting to 0.
 	///
-	/// It breaks ties between subscriptions of equal subscriber priority. On a session
-	/// scheduled per broadcast (`session::Schedule::Broadcast`)
-	/// it replaces the subscriber's priority, ordering the broadcast's tracks among
-	/// themselves. Reported in TRACK_INFO (Lite05+).
+	/// It breaks ties between subscriptions of equal subscriber priority. Reported in
+	/// TRACK_INFO (Lite05+).
 	pub priority: i8,
 	/// The ratio of a group's bytes after its first frame to the first frame past which a
 	/// joining subscriber asks for a new group, or `None` (the default) to never ask.

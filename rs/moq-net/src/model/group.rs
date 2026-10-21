@@ -2228,13 +2228,6 @@ impl Consumer {
 		self.track.timescale
 	}
 
-	/// The parent track's publisher priority, [`track::Info::priority`].
-	#[cfg(feature = "async")]
-	// private: passthrough
-	pub(crate) fn track_priority(&self) -> i8 {
-		self.track.priority
-	}
-
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has

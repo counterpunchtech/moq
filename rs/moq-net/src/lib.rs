@@ -103,8 +103,6 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
-#[cfg(feature = "async")]
-mod scheduler;
 pub mod setup;
 #[cfg(feature = "async")]
 mod tail;

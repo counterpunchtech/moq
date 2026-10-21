@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Priorities are signed
+### Priorities are signed (#6142)
 
 `TrackInfo.priority`, `Subscription.priority`, `FetchGroupOptions.priority`, and `GroupRequest.priority` are `Int8`, higher first, and 0 is the unset midpoint.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.

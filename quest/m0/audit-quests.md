@@ -32,7 +32,7 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
 - Retired datagram priority: #5770 (`79005b06d`) and #5872 (`8e3966cd3`)
   already contain the scheduler, publisher integration, saturation and
   eviction tests, fan-out benchmarks, and draft updates. Broadcast-domain
-  exposure remains owned by track-priority-scope.
+  exposure remains owned by [broadcast fairness](/quest/m2/broadcast-fairness.md).
 - Encoded the already-decided timestamp and E2EE naming-design
   prerequisites. Corrected stale paths, epoch discovery, accepted refresh
   recovery behavior, mobile priority, and the landed error, shard, benchmark
@@ -73,7 +73,3 @@ settled. The unattended instruction was to skip uncertain choices:
 - [Catalog HLS](/quest/m1/archive/catalog-hls.md) names `.hls.z` tracks,
   while [compression migration](/quest/m1/compress/migrate.md) removes `.z`
   names. Their shared timeline edits need a consistent final name and order.
-- [Priority scope](/quest/m1/track-priority-scope.md) still preserves old
-  archive priority encoding, while [archive](/quest/m1/archive/README.md)
-  replaces the old layout without migration. The ladder also assumes a
-  publisher-priority tiebreak that priority scope still asks to decide.

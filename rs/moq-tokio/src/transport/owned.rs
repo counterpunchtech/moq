@@ -81,15 +81,8 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 			})
 			.map_err(Error)
 	}
-	fn send_domain(&mut self) -> Option<poll::DomainOf<Self>> {
-		self.session.send_domain()
-	}
-	fn send_group(
-		&mut self,
-		domain: Option<&poll::DomainOf<Self>>,
-		priority: i64,
-	) -> Option<<S::SendStream as super::GroupedSend>::Group> {
-		self.session.send_group(domain, priority)
+	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
+		self.session.send_group(priority)
 	}
 	fn send_datagram(
 		&mut self,

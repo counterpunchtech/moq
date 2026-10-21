@@ -10,8 +10,8 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not the current one.
-	#[error("unknown version {0}")]
+	/// The recording format version is unknown, or older than the current one when writing.
+	#[error("unsupported version {0}")]
 	Version(u64),
 
 	/// A group ID, segment ID, or frame timestamp is outside 0 through 2^53 - 1.

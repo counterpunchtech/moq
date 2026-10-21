@@ -129,8 +129,7 @@ impl<R: Incoming> Connection<R> {
 		// publish-only or subscribe-only session.
 		let mut request = request
 			.with_stats(stats.clone())
-			.with_limits(lifecycle.cluster.limits(&lease))
-			.with_schedule(lifecycle.cluster.schedule(&lease));
+			.with_limits(lifecycle.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}

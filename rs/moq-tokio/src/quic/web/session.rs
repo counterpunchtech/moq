@@ -362,22 +362,13 @@ impl Session {
 		Ok(())
 	}
 
-	/// Open a send domain. See [`crate::quic::driver::SendDomain`].
-	pub fn send_domain(&self) -> crate::quic::driver::SendDomain {
-		self.conn.send_domain()
-	}
-
-	/// Open a send group at `priority` in `domain`, or the connection's default domain, for
-	/// streams and datagrams to join with [`SendOptions`] or [`SendStream::set_group`].
+	/// Open a send group at `priority`, for streams and datagrams to join with [`SendOptions`]
+	/// or [`SendStream::set_group`].
 	///
 	/// See [`crate::quic::driver::SendGroup`]. The HTTP/3 streams stay outside every group,
 	/// so they go first.
-	pub fn send_group(
-		&self,
-		domain: Option<&crate::quic::driver::SendDomain>,
-		priority: i64,
-	) -> crate::quic::driver::SendGroup {
-		self.conn.send_group(domain, priority)
+	pub fn send_group(&self, priority: i64) -> crate::quic::driver::SendGroup {
+		self.conn.send_group(priority)
 	}
 
 	/// Computes the maximum size of datagrams that may be passed to

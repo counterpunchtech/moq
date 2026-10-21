@@ -105,5 +105,5 @@ separate guide quest is needed.
 ## Related
 
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the frame cap; frame payload credit becomes per segment
-- [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcast fairness domains on the same sessions
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance

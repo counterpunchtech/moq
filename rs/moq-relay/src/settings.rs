@@ -97,9 +97,6 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_TIER", cli("--cluster-tier"))]
 	tier: Option<String>,
 
-	#[usage(env = "MOQ_CLUSTER_FAIR", cli("--cluster-fair"))]
-	fair: Option<bool>,
-
 	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]
 	lan: ClusterLan,

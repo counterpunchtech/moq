@@ -302,19 +302,11 @@ impl Connection {
 		&self.shared.owner
 	}
 
-	/// Open a send domain, which shares bytes equally with the connection's other domains.
-	pub fn send_domain(&self) -> super::SendDomain {
-		super::SendDomain::new(self.shared.clone())
-	}
-
-	/// Open a send group at `priority` in `domain`, or the connection's default domain, for
-	/// streams to join with [`SendStream::set_group`](super::SendStream::set_group) and
-	/// datagrams with [`SendOptions`](super::SendOptions).
-	///
-	/// # Panics
-	/// - when `domain` belongs to another connection
-	pub fn send_group(&self, domain: Option<&super::SendDomain>, priority: i64) -> super::SendGroup {
-		super::SendGroup::new(self.shared.clone(), domain, priority)
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`](super::SendStream::set_group) and datagrams with
+	/// [`SendOptions`](super::SendOptions).
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		super::SendGroup::new(self.shared.clone(), priority)
 	}
 
 	/// Send a datagram scheduled by `options`, like one of its group's streams at its priority,

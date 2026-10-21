@@ -546,15 +546,26 @@ pub struct SendGroups<'a> {
 }
 
 impl SendGroups<'_> {
-    /// Open a send group at `priority` in `domain`, or the connection's default domain
+    /// Open a send group at `priority`
+    pub fn open(&mut self, priority: i64) -> SendGroup {
+        SendGroup {
+            index: self.state.pending.open_group(priority, None),
+            tag: self.state.tag,
+        }
+    }
+
+    /// Open a send group at `priority` in `domain`
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn open(&mut self, domain: Option<&SendDomain>, priority: i64) -> SendGroup {
+    #[cfg(test)]
+    pub(crate) fn open_in(&mut self, priority: i64, domain: &SendDomain) -> SendGroup {
         let tag = self.state.tag;
-        let domain = domain.map(|domain| domain.index(tag));
         SendGroup {
-            index: self.state.pending.open_group(priority, domain),
+            index: self
+                .state
+                .pending
+                .open_group(priority, Some(domain.index(tag))),
             tag,
         }
     }
@@ -588,9 +599,8 @@ impl SendGroups<'_> {
     }
 
     /// Open a domain, which gets an equal share of bytes with every other domain
-    ///
-    /// The default domain, holding every group opened without one, is one of them.
-    pub fn open_domain(&mut self) -> SendDomain {
+    #[cfg(test)]
+    pub(crate) fn open_domain(&mut self) -> SendDomain {
         SendDomain {
             index: self.state.pending.open_domain(),
             tag: self.state.tag,
@@ -601,7 +611,8 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn close_domain(&mut self, domain: SendDomain) {
+    #[cfg(test)]
+    pub(crate) fn close_domain(&mut self, domain: SendDomain) {
         let index = domain.index(self.state.tag);
         self.state.pending.close_domain(index);
     }
@@ -697,13 +708,15 @@ impl SendGroup {
 /// A domain of send groups, from [`SendGroups::open_domain`]
 ///
 /// Release it with [`SendGroups::close_domain`] on the connection that opened it.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a domain lives until it is closed"]
-pub struct SendDomain {
+pub(crate) struct SendDomain {
     index: usize,
     tag: ConnectionTag,
 }
 
+#[cfg(test)]
 impl SendDomain {
     fn index(&self, tag: ConnectionTag) -> usize {
         assert_eq!(self.tag, tag, "send domain used on another connection");

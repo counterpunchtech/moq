@@ -189,8 +189,6 @@ pub struct Config<S: crate::transport::poll::Session> {
 	pub auth: crate::auth::Handle,
 	/// What the peer may make this session hold.
 	pub limits: crate::session::Limits,
-	/// How the session shares bandwidth between the broadcasts it serves.
-	pub schedule: crate::session::Schedule,
 }
 
 /// Start a lite session.
@@ -213,7 +211,6 @@ where
 		peer_setup,
 		auth,
 		limits,
-		schedule,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -311,7 +308,6 @@ where
 		client,
 		subscriptions,
 		fetches: crate::session::Slots::new(limits.fetches),
-		schedule,
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -918,7 +914,6 @@ mod tests {
 			runtime: crate::time::sim(),
 			client: true,
 			limits: Default::default(),
-			schedule: Default::default(),
 			session: transport,
 			setup_stream: None,
 			publish: None,
@@ -951,7 +946,6 @@ mod tests {
 				runtime: crate::time::sim(),
 				client: false,
 				limits: Default::default(),
-				schedule: Default::default(),
 				session: transport,
 				setup_stream: None,
 				publish: None,
@@ -1038,7 +1032,6 @@ mod tests {
 			runtime: crate::time::sim(),
 			client: true,
 			limits: Default::default(),
-			schedule: Default::default(),
 			session: transport,
 			setup_stream: None,
 			publish: None,
@@ -1117,7 +1110,6 @@ mod tests {
 					client: false,
 					auth: crate::auth::Handle::new(version.has_auth()),
 					limits: Default::default(),
-					schedule: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1172,7 +1164,6 @@ mod tests {
 					client: false,
 					auth: crate::auth::Handle::new(version.has_auth()),
 					limits: Default::default(),
-					schedule: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1205,7 +1196,6 @@ mod tests {
 			peer_setup,
 			auth: crate::auth::Handle::new(version.has_auth()),
 			limits: Default::default(),
-			schedule: Default::default(),
 		})
 		.unwrap()
 	}

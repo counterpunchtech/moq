@@ -659,10 +659,6 @@ The `Subscriber Priority` is scoped to the connection and MAY change over the li
 The `Publisher Priority` is fixed for the lifetime of the Track (see [TRACK_INFO](#track-info)) and SHOULD be used only to resolve conflicts or ties.
 Both are a byte where higher is more urgent, and 128 is the midpoint an endpoint SHOULD use for a priority it was never given.
 
-A relay serving many broadcasts to another relay MAY scope priority to the broadcast instead of the connection.
-It then shares the connection's bandwidth equally between the broadcasts it serves, however many subscriptions each carries, and orders the streams within each broadcast by `Publisher Priority` alone, ignoring the `Subscriber Priority` it receives and not forwarding it upstream.
-This keeps one broadcast's subscribers from starving another's, at the cost of the subscribers' preferences across that hop.
-
 A conflict can occur when a relay tries to serve multiple downstream subscriptions from a single upstream subscription.
 The relay cannot pick any one subscriber's priority, so the upstream subscription SHOULD use the publisher priority instead of some combination of different subscriber priorities.
 Publisher priority is therefore mostly relevant on the upstream (origin-facing) leg of a relay; closer to the subscriber, the subscriber priority dominates.

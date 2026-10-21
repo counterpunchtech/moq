@@ -74,8 +74,8 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the m1
   qmux port onto `moq-quic`'s stream state
-- [Scope track priority](/quest/m1/track-priority-scope.md) - the
-  per-broadcast fairness policy on cluster sessions
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the
+  per-broadcast fairness policy on cluster sessions, a consumer for send domains
 - [Native probing](/quest/m2/probe/native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate

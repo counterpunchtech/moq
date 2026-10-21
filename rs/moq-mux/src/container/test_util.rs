@@ -346,16 +346,8 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_open_bi(cx, options)
 	}
 
-	fn send_domain(&mut self) -> Option<moq_net::transport::poll::Ungrouped> {
-		self.inner.send_domain()
-	}
-
-	fn send_group(
-		&mut self,
-		domain: Option<&moq_net::transport::poll::Ungrouped>,
-		priority: i64,
-	) -> Option<moq_net::transport::poll::Ungrouped> {
-		self.inner.send_group(domain, priority)
+	fn send_group(&mut self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
+		self.inner.send_group(priority)
 	}
 
 	fn send_datagram(

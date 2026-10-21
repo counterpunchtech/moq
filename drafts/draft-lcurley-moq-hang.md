@@ -1155,15 +1155,16 @@ Each track has its own objects so a reader can fetch one rendition without downl
 
 ~~~
 {
-  "version": 2,
+  "version": 3,
   "priority": 0,
   "timescale": 1000000
 }
 ~~~
 
 `version` and `priority` are required integers.
-`version` identifies this recording format and MUST be 2.
-`priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is in the range 0 through 255, and `timescale` is in the range 1 through 9007199254740991, so JSON consumers can preserve it exactly.
+`version` identifies this recording format and MUST be 3 when written.
+A reader MAY also accept version 2, which differs only in storing `priority` as its moq-lite byte, 0 through 255, from which the reader subtracts 128.
+`priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is the Publisher Priority minus 128, in the range -128 through 127 with 0 for an unset priority, and `timescale` is in the range 1 through 9007199254740991, so JSON consumers can preserve it exactly.
 `timescale` is absent exactly when the track is untimed: its frames store no timestamps ({{recording-segments}}) and its records carry no `pts` or `duration` ({{timeline-records}}).
 A timeline track's object declares a `timescale` exactly when the track it indexes does.
 A reader MUST preserve integer values exactly.
@@ -1182,7 +1183,7 @@ A segment object holds one record's frames:
 
 ~~~
 Segment Object {
-  Version (i) = 2
+  Version (i) = 3
   Frame Start (i)
   Group Count (i)
   Group Table {
@@ -1355,6 +1356,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Recording format version 3: `.info` stores `priority` signed, -128 through 127 with 0 unset, instead of its moq-lite byte. A reader may still accept version 2.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.

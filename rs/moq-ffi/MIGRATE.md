@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### Priorities are signed
+### Priorities are signed (#6142)
 
 `MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` are `i8`, higher first, and 0 is the unset midpoint.
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.

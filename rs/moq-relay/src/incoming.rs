@@ -63,7 +63,6 @@ pub trait Sealed: Sized {
 	fn role(&self) -> Option<moq_net::Role>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
-	fn with_schedule(self, schedule: moq_net::session::Schedule) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
 	fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self;
 
@@ -123,10 +122,6 @@ impl Sealed for moq_tokio::server::Request {
 
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self {
 		moq_tokio::server::Request::with_limits(self, limits)
-	}
-
-	fn with_schedule(self, schedule: moq_net::session::Schedule) -> Self {
-		moq_tokio::server::Request::with_schedule(self, schedule)
 	}
 
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self {
@@ -193,11 +188,6 @@ impl<S: poll::Boxable> Sealed for Accepted<S> {
 
 	fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.handshake = self.handshake.with_limits(limits);
-		self
-	}
-
-	fn with_schedule(mut self, schedule: moq_net::session::Schedule) -> Self {
-		self.handshake = self.handshake.with_schedule(schedule);
 		self
 	}
 

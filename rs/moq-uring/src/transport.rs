@@ -15,12 +15,8 @@ impl Grouped for quic::web::Session {
 		Some(quic::web::Session::wire(self))
 	}
 
-	fn send_domain(&mut self) -> Option<quic::SendDomain> {
-		Some(quic::web::Session::send_domain(self))
-	}
-
-	fn send_group(&mut self, domain: Option<&quic::SendDomain>, priority: i64) -> Option<quic::SendGroup> {
-		Some(quic::web::Session::send_group(self, domain, priority))
+	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
+		Some(quic::web::Session::send_group(self, priority))
 	}
 
 	fn send_datagram(
@@ -51,8 +47,6 @@ impl GroupedSend for quic::web::SendStream {
 
 #[cfg(feature = "quic")]
 impl moq_net::transport::poll::SendGroup for quic::SendGroup {
-	type Domain = quic::SendDomain;
-
 	fn set_priority(&mut self, priority: i64) {
 		quic::SendGroup::set_priority(self, priority)
 	}

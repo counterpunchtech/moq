@@ -2325,10 +2325,7 @@ where
 				// resolves, so the publisher's priority is the unset default.
 				let ranking = Ranking {
 					queue: self.priority.clone(),
-					group: self
-						.session
-						.clone()
-						.send_group(None, crate::priority::group(priority, 0)),
+					group: self.session.clone().send_group(crate::priority::group(priority, 0)),
 					request_id: msg.request_id,
 					priority: kio::Producer::new(priority).consume(),
 					publisher: 0,
@@ -4178,7 +4175,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		let mut session = session;
 		let ranking = Ranking {
 			queue: PriorityQueue::default(),
-			group: session.send_group(None, crate::priority::group(track.subscription().priority, publisher)),
+			group: session.send_group(crate::priority::group(track.subscription().priority, publisher)),
 			request_id,
 			priority: priority.consume(),
 			publisher,

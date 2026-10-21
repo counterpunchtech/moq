@@ -43,7 +43,11 @@ pub use store::Store;
 pub use writer::Writer;
 
 /// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
+
+/// The oldest recording format version a reader accepts. Version 2 stored `.info`'s
+/// priority as its moq-lite byte and is otherwise identical.
+pub(crate) const VERSION_MIN: u64 = 2;
 
 /// Largest group, segment, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;

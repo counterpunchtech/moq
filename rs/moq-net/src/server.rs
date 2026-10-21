@@ -69,7 +69,6 @@ pub struct Server {
 	stats: stats::Session,
 	versions: Versions,
 	limits: crate::session::Limits,
-	schedule: crate::session::Schedule,
 	extensions: setup::Extensions,
 }
 
@@ -112,13 +111,6 @@ impl Server {
 	/// Cap what each client can make its session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;
-		self
-	}
-
-	/// Share bandwidth between the broadcasts each session serves as `schedule` says.
-	/// Defaults to [`Schedule::Strict`](crate::session::Schedule::Strict).
-	pub fn with_schedule(mut self, schedule: crate::session::Schedule) -> Self {
-		self.schedule = schedule;
 		self
 	}
 
@@ -186,7 +178,6 @@ impl Server {
 			runtime: runtime.clone(),
 			client: false,
 			limits: self.limits,
-			schedule: self.schedule,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -748,7 +739,6 @@ where
 						runtime: runtime.clone(),
 						client: false,
 						limits: server.limits,
-						schedule: server.schedule,
 						session: session.clone(),
 						setup_stream: Some(stream),
 						publish,
@@ -910,14 +900,6 @@ where
 	/// Set request caps after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.inner_mut().server.limits = limits;
-		self
-	}
-
-	/// Set how the session shares bandwidth between the broadcasts it serves, after
-	/// authorizing the peer and before answering SETUP. Overrides any value from the
-	/// [`Server`] builder.
-	pub fn with_schedule(mut self, schedule: crate::session::Schedule) -> Self {
-		self.inner_mut().server.schedule = schedule;
 		self
 	}
 
@@ -1100,15 +1082,7 @@ mod tests {
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
-		fn send_domain(&mut self) -> Option<crate::transport::poll::Ungrouped> {
-			None
-		}
-
-		fn send_group(
-			&mut self,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
-		) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 

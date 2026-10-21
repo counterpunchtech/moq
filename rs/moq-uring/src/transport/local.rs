@@ -63,18 +63,8 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn send_domain(&mut self) -> Option<poll::DomainOf<Self>> {
-		self.0.send_domain().map(Local::new)
-	}
-
-	fn send_group(
-		&mut self,
-		domain: Option<&poll::DomainOf<Self>>,
-		priority: i64,
-	) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
-		self.0
-			.send_group(domain.map(|domain| &*domain.0), priority)
-			.map(Local::new)
+	fn send_group(&mut self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
+		self.0.send_group(priority).map(Local::new)
 	}
 
 	fn send_datagram(
@@ -176,8 +166,6 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 }
 
 impl<T: poll::SendGroup> poll::SendGroup for Local<T> {
-	type Domain = Local<T::Domain>;
-
 	fn set_priority(&mut self, priority: i64) {
 		self.0.set_priority(priority)
 	}

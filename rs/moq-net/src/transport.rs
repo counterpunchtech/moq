@@ -220,23 +220,16 @@ pub mod poll {
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
-		/// Open a send domain, or `None` when the transport has none.
-		///
-		/// Domains share the bytes left after the ungrouped streams equally, however many
-		/// groups each holds, and the session's default domain is one of them. The domain is
-		/// released once its last handle is dropped and its groups are.
-		fn send_domain(&mut self) -> Option<DomainOf<Self>>;
-
-		/// Open a send group at `priority` in `domain`, or the session's default domain, or
-		/// `None` when the transport orders streams by their own priority alone.
+		/// Open a send group at `priority`, or `None` when the transport orders streams by
+		/// their own priority alone.
 		///
 		/// Streams that join a group, through [`SendOptions`] or [`SendStream::set_group`], and
-		/// datagrams sent in it share their domain's bytes with its other groups: a higher
-		/// priority group preempts every lower one, and groups of equal priority get an equal
-		/// share of bytes however many streams each has queued. Streams outside every group go
-		/// before all of them. The group is released once its last handle is dropped and its
-		/// streams finish.
-		fn send_group(&mut self, domain: Option<&DomainOf<Self>>, priority: i64) -> Option<GroupOf<Self>>;
+		/// datagrams sent in it share bytes with the session's
+		/// other groups: a higher priority group preempts every lower one, and groups of equal
+		/// priority get an equal share of bytes however many streams each has queued. Streams
+		/// outside every group go before all of them. The group is released once its last
+		/// handle is dropped and its streams finish.
+		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
 
 		/// Send a datagram scheduled by `options`, best-effort.
 		///
@@ -405,7 +398,7 @@ pub mod poll {
 	/// requires until it too becomes named machines. Implemented automatically.
 	pub trait Boxable:
 		Session<
-			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync + SendGroup<Domain: MaybeSend + MaybeSync>>,
+			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
 			RecvStream: MaybeSend,
 			Error: MaybeSend,
 		> + MaybeSend
@@ -415,8 +408,7 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend
-				                + SendStream<Group: MaybeSend + MaybeSync + SendGroup<Domain: MaybeSend + MaybeSync>>,
+				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
 				RecvStream: MaybeSend,
 				Error: MaybeSend,
 			> + MaybeSend
@@ -425,10 +417,8 @@ pub mod poll {
 	}
 
 	/// The send group of a session's streams.
-	pub type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
-
-	/// The send domain of a session's groups.
-	pub type DomainOf<S> = <GroupOf<S> as SendGroup>::Domain;
+	#[cfg(feature = "async")]
+	pub(crate) type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
 
 	/// How an outgoing stream or datagram is scheduled, like W3C WebTransport's send options.
 	///
@@ -463,10 +453,7 @@ pub mod poll {
 	///
 	/// Clones share the group.
 	pub trait SendGroup: Clone + 'static {
-		/// The transport's send domain, from [`Session::send_domain`]. Clones share the domain.
-		type Domain: Clone + 'static;
-
-		/// Change the group's priority: higher preempts lower within its domain.
+		/// Change the group's priority: higher preempts lower.
 		fn set_priority(&mut self, priority: i64);
 	}
 
@@ -475,8 +462,6 @@ pub mod poll {
 	pub enum Ungrouped {}
 
 	impl SendGroup for Ungrouped {
-		type Domain = Ungrouped;
-
 		fn set_priority(&mut self, _: i64) {
 			match *self {}
 		}

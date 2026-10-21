@@ -19,7 +19,6 @@ pub struct Client {
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
-	schedule: crate::session::Schedule,
 	extensions: setup::Extensions,
 }
 
@@ -64,13 +63,6 @@ impl Client {
 	/// Cap what the server can make this session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;
-		self
-	}
-
-	/// Share bandwidth between the broadcasts this session serves as `schedule` says.
-	/// Defaults to [`Schedule::Strict`](crate::session::Schedule::Strict).
-	pub fn with_schedule(mut self, schedule: crate::session::Schedule) -> Self {
-		self.schedule = schedule;
 		self
 	}
 
@@ -219,7 +211,6 @@ impl Client {
 			runtime: runtime.clone(),
 			client: true,
 			limits: self.limits,
-			schedule: self.schedule,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -437,7 +428,6 @@ impl Client {
 					runtime: runtime.clone(),
 					client: true,
 					limits: self.limits,
-					schedule: self.schedule,
 					session: session.clone(),
 					setup_stream: Some(stream),
 					publish: publish.clone(),
@@ -646,15 +636,7 @@ mod tests {
 			Poll::Pending
 		}
 
-		fn send_domain(&mut self) -> Option<crate::transport::poll::Ungrouped> {
-			None
-		}
-
-		fn send_group(
-			&mut self,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
-		) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 
@@ -1058,15 +1040,7 @@ mod tests {
 			})
 		}
 
-		fn send_domain(&mut self) -> Option<crate::transport::poll::Ungrouped> {
-			None
-		}
-
-		fn send_group(
-			&mut self,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
-		) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 

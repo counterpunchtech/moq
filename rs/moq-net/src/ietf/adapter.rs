@@ -1332,16 +1332,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			.map(|r| r.map(AdapterRecv::Real).map_err(|_| crate::Error::Closed))
 	}
 
-	fn send_domain(&mut self) -> Option<crate::transport::poll::DomainOf<Self>> {
-		self.inner.send_domain()
-	}
-
-	fn send_group(
-		&mut self,
-		domain: Option<&crate::transport::poll::DomainOf<Self>>,
-		priority: i64,
-	) -> Option<crate::transport::poll::GroupOf<Self>> {
-		self.inner.send_group(domain, priority)
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
+		self.inner.send_group(priority)
 	}
 
 	fn send_datagram(

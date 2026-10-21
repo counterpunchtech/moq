@@ -3359,8 +3359,8 @@ mod tests {
     fn send_group_from_another_connection() {
         let mut a = make(Side::Client);
         let mut b = make(Side::Client);
-        let group = crate::SendGroups { state: &mut a }.open(None, 0);
-        let _other = crate::SendGroups { state: &mut b }.open(None, 0);
+        let group = crate::SendGroups { state: &mut a }.open(0);
+        let _other = crate::SendGroups { state: &mut b }.open(0);
         crate::SendGroups { state: &mut b }.set_priority(&group, 1);
     }
 
@@ -3371,7 +3371,7 @@ mod tests {
         let mut b = make(Side::Client);
         let domain = crate::SendGroups { state: &mut a }.open_domain();
         let _other = crate::SendGroups { state: &mut b }.open_domain();
-        let _ = crate::SendGroups { state: &mut b }.open(Some(&domain), 0);
+        let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
     }
 
     /// Another connection holding at least as much credit still refuses it.

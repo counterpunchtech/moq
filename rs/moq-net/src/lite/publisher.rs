@@ -19,9 +19,8 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
-	scheduler::{Domain, Scheduler},
 	track::Order,
-	transport::poll::{DomainOf, GroupOf, SendGroup as _, SendOptions},
+	transport::poll::{GroupOf, SendGroup as _, SendOptions},
 };
 
 use super::Version;
@@ -54,8 +53,6 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
 	pub subscriptions: crate::session::Slots,
 	pub fetches: crate::session::Slots,
-	/// How the session shares bandwidth between the broadcasts it serves.
-	pub schedule: crate::session::Schedule,
 }
 
 /// Context shared by every control-stream child.
@@ -78,7 +75,6 @@ struct Shared<S: crate::transport::poll::Session> {
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
 	priority: PriorityQueue,
-	scheduler: Scheduler<DomainOf<S>>,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	auth: crate::auth::Handle,
@@ -190,17 +186,8 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
 		let self_origin = config.origin.hop();
-		let mut accept = config.session.clone();
+		let accept = config.session.clone();
 		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
-		// Strict rather than refused: a peer that reaches us over a transport without send
-		// domains still needs serving, just in one order.
-		let schedule = match config.schedule {
-			crate::session::Schedule::Broadcast if accept.send_domain().is_none() => {
-				tracing::debug!("the transport has no send domains, so the session schedules strictly");
-				crate::session::Schedule::Strict
-			}
-			schedule => schedule,
-		};
 		Self {
 			enforce,
 			shared: Arc::new(Shared {
@@ -213,7 +200,6 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				peer_hop: config.peer_hop,
 				serving: std::sync::OnceLock::new(),
 				priority: Default::default(),
-				scheduler: Scheduler::new(schedule),
 				version: config.version,
 				goaway: config.goaway,
 				auth: config.auth,
@@ -314,7 +300,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	},
 	Announce(AnnounceServe<S>),
 	Subscribe(RequestServe<S, SubscribeServe<S>>),
-	Fetch(RequestServe<S, FetchServe<S>>),
+	Fetch(RequestServe<S, FetchServe>),
 	TrackInfo(RequestServe<S, TrackInfoServe>),
 	Tracks(RequestServe<S, TracksServe>),
 	Probe(ProbeServe<S>),
@@ -2093,8 +2079,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(shared: &Shared<S>, mut msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		msg.priority = shared.scheduler.subscriber(msg.priority);
+	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
 			max_delay: serving_max_delay(shared.version, msg.max_delay),
@@ -2180,20 +2165,14 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 
 					let mut session = shared.session.clone();
 					let publisher = track.info().priority;
-					let domain = shared.scheduler.domain(&msg.broadcast, || session.send_domain());
-					let group = session.send_group(
-						domain.as_deref().map(|domain| domain.get()),
-						crate::priority::group(msg.priority, publisher),
-					);
+					let group = session.send_group(crate::priority::group(msg.priority, publisher));
 					let sub = Subscription {
 						session,
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: shared.priority.clone(),
-						scheduler: shared.scheduler.clone(),
 						publisher,
 						group,
-						_domain: domain,
 						steer: steer_tx.consume(),
 						steer_seen: steer,
 						version: shared.version,
@@ -2246,7 +2225,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum FetchServe<S: crate::transport::poll::Session> {
+enum FetchServe {
 	/// Waiting for the fetched group.
 	Fetch {
 		msg: lite::Fetch<'static>,
@@ -2265,17 +2244,13 @@ enum FetchServe<S: crate::transport::poll::Session> {
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
 		records: Option<lite::ietf::Records>,
-		/// The response's send group in its broadcast's domain, on a session scheduled per
-		/// broadcast, so a fetch shares its broadcast's bytes rather than going ahead of
-		/// every broadcast's. `None` leaves it with the ungrouped streams.
-		_group: Option<(GroupOf<S>, Domain<DomainOf<S>>)>,
 	},
 }
 
 /// A batch of frames with their relay metadata, which the `ietf` extension forwards.
 type Objects = arrayvec::ArrayVec<frame::Object, 8>;
 
-impl<S: crate::transport::poll::Session> Request<S> for FetchServe<S> {
+impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 	const KIND: &'static str = "fetch";
 	const FETCH: bool = true;
 	// The response carries no header, so a run cut short would read as whole.
@@ -2293,8 +2268,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe<S> {
 		msg.epoch.as_ref()
 	}
 
-	fn start(shared: &Shared<S>, mut msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		msg.priority = shared.scheduler.subscriber(msg.priority);
+	fn start(_: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		let fetching = broadcast
 			.track(&msg.track)?
 			.fetch_group(
@@ -2343,17 +2317,6 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe<S> {
 					let capped = msg.end_frame.is_some();
 					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
-					let mut session = shared.session.clone();
-					let placed = shared
-						.scheduler
-						.domain(&msg.broadcast, || session.send_domain())
-						.and_then(|domain| {
-							let priority = crate::priority::group(msg.priority, group.track_priority());
-							let group = session.send_group(Some(domain.get()), priority)?;
-							writer.set_group(&group);
-							Some((group, domain))
-						});
-
 					*self = Self::Serve {
 						group,
 						timescale,
@@ -2363,7 +2326,6 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe<S> {
 						batch: Box::default(),
 						batch_pos: 0,
 						records,
-						_group: placed,
 					};
 				}
 				Self::Serve {
@@ -2375,7 +2337,6 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe<S> {
 					batch,
 					batch_pos,
 					records,
-					..
 				} => {
 					let mut cx = waiter.context();
 					loop {
@@ -3626,15 +3587,11 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
-	/// Maps the subscriber's priority updates onto the session's schedule.
-	scheduler: Scheduler<DomainOf<S>>,
 	/// The publisher's priority for the track, which breaks subscriber priority ties.
 	publisher: i8,
 	/// The subscription's send group, ranking it against the session's others, or `None`
 	/// on a transport without groups, where `priority` ranks every group stream instead.
 	group: Option<GroupOf<S>>,
-	/// The broadcast's send domain, on a session scheduled per broadcast.
-	_domain: Option<Domain<DomainOf<S>>>,
 	steer: kio::Consumer<Steer>,
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
@@ -3856,16 +3813,15 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		{
 			self.track.join();
 		}
-		let priority = self.ctx.scheduler.subscriber(upd.priority);
 		if let Ok(mut value) = self.steer_tx.write() {
 			*value = Steer {
-				priority,
+				priority: upd.priority,
 				order: upd.order,
 			};
 		}
 		// One move for the whole subscription; its streams keep their order within it.
 		if let Some(group) = &mut self.ctx.group {
-			group.set_priority(crate::priority::group(priority, self.ctx.publisher));
+			group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -3874,7 +3830,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
-			priority,
+			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
 			order: upd.order,
 			..bounds.positions()
@@ -4432,7 +4388,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					batch,
 					batch_pos,
 					records,
-					..
 				} => {
 					let mut cx = waiter.context();
 
@@ -4769,10 +4724,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4818,10 +4771,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4871,10 +4822,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4924,10 +4873,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4995,10 +4942,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -5075,10 +5020,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -5127,10 +5070,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -5178,10 +5119,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -5241,10 +5180,8 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
-			scheduler: Scheduler::new(Default::default()),
 			publisher: 0,
 			group: None,
-			_domain: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version,
@@ -5322,7 +5259,7 @@ mod serve_group_test {
 		let mut session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, None, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
 
 		write_group(&mut track, 0, 0);
 		write_group(&mut track, 1, 1);
@@ -5379,7 +5316,7 @@ mod serve_group_test {
 			.with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, None, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
 
 		write_group(&mut track, 0, 0);
 		let sequence = track
@@ -5408,7 +5345,7 @@ mod serve_group_test {
 		let mut session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
-		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, None, 3);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
 
 		let first = track
 			.append_datagram(Timestamp::from_millis(1).unwrap(), b"a".as_slice())
@@ -6379,10 +6316,8 @@ mod serve_group_test {
 				id: 0,
 				track_name: "test".into(),
 				priority: PriorityQueue::default(),
-				scheduler: Scheduler::new(Default::default()),
 				publisher: 0,
 				group: None,
-				_domain: None,
 				steer: steer.consume(),
 				steer_seen: Steer::default(),
 				version: Version::Lite07,
@@ -6683,7 +6618,6 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -6855,7 +6789,6 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
@@ -7156,7 +7089,6 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -7253,7 +7185,7 @@ mod tests {
 						start_frame: 0,
 						end_frame: None,
 					};
-					leave_request::<FetchServe<_>>(version, &fetch, wait, close).await;
+					leave_request::<FetchServe>(version, &fetch, wait, close).await;
 				}
 			}
 		}
@@ -7287,7 +7219,6 @@ mod tests {
 						peer_hop: None,
 						subscriptions: Default::default(),
 						fetches: Default::default(),
-						schedule: Default::default(),
 						auth: crate::auth::Handle::new(false),
 						peer_grant: Default::default(),
 						client: false,
@@ -7380,7 +7311,6 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -7497,7 +7427,6 @@ mod tests {
 			peer_hop: None,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			auth: crate::auth::Handle::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -7659,7 +7588,6 @@ mod tests {
 				peer_hop: None,
 				subscriptions: crate::session::Slots::new(0),
 				fetches: Default::default(),
-				schedule: Default::default(),
 				auth: crate::auth::Handle::new(false),
 				peer_grant: Default::default(),
 				client: false,
@@ -7704,7 +7632,6 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 		let mut script = Vec::new();
@@ -7730,7 +7657,7 @@ mod tests {
 			writer: Writer::new(send, VERSION),
 			reader: crate::coding::Reader::new(recv, VERSION),
 		};
-		let mut serve = RequestServe::<_, FetchServe<_>>::new(publisher.shared.clone(), stream);
+		let mut serve = RequestServe::<_, FetchServe>::new(publisher.shared.clone(), stream);
 		assert!(!drive(&mut serve).await, "the open group holds the response");
 
 		// The track runs a full second past the group's successor.
@@ -7772,7 +7699,6 @@ mod tests {
 			client: false,
 			subscriptions: crate::session::Slots::new(0),
 			fetches: crate::session::Slots::new(2),
-			schedule: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 		let mut script = Vec::new();
@@ -7801,7 +7727,7 @@ mod tests {
 				writer: Writer::new(send, VERSION),
 				reader: crate::coding::Reader::new(recv, VERSION),
 			};
-			let mut request = RequestServe::<_, FetchServe<_>>::new(publisher.shared.clone(), stream);
+			let mut request = RequestServe::<_, FetchServe>::new(publisher.shared.clone(), stream);
 			if count < 2 {
 				assert!(!drive(&mut request).await);
 				held.push(request);
@@ -8139,23 +8065,14 @@ mod tests {
 		}
 	}
 
-	/// A publisher on a session with send domains and groups, scheduled as `schedule`.
-	fn grouped_publisher(origin: origin::Consumer, schedule: crate::session::Schedule) -> Publisher<ScriptedSession> {
-		scheduled_publisher(origin, schedule, ScriptedSession::new(Vec::new()).with_groups())
-	}
-
-	/// A publisher on `session`, scheduled as `schedule`.
-	fn scheduled_publisher(
-		origin: origin::Consumer,
-		schedule: crate::session::Schedule,
-		session: ScriptedSession,
-	) -> Publisher<ScriptedSession> {
+	/// A publisher on a session with send groups.
+	fn grouped_publisher(origin: origin::Consumer) -> Publisher<ScriptedSession> {
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
-			session,
+			session: ScriptedSession::new(Vec::new()).with_groups(),
 			origin,
 			version: Version::Lite07,
 			peer_setup,
@@ -8166,39 +8083,9 @@ mod tests {
 			client: false,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			schedule,
 			estimate: kio::Producer::default().weak(),
 		})
 	}
-
-	/// Serve a request stream whose peer sends `request`, returning that peer.
-	async fn serve_request<R: Request<ScriptedSession>>(
-		publisher: &Publisher<ScriptedSession>,
-		request: &impl Encode<Version>,
-	) -> (ScriptedSession, RequestServe<ScriptedSession, R>) {
-		let version = Version::Lite07;
-		let mut script = Vec::new();
-		request
-			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
-			.unwrap();
-		let mut session = ScriptedSession::new(script);
-		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
-		})
-		.await
-		.unwrap();
-		let stream = Stream::<ScriptedSession, Version> {
-			writer: Writer::new(send, version),
-			reader: crate::coding::Reader::new(recv, version),
-		};
-		(session, RequestServe::new(publisher.shared.clone(), stream))
-	}
-
-	type Subscribed = (
-		ScriptedSession,
-		RequestServe<ScriptedSession, SubscribeServe<ScriptedSession>>,
-		track::Producer,
-	);
 
 	/// Subscribe to `broadcast`'s `track` at the subscriber `priority`, resolving the track
 	/// with `info`, until the subscription runs.
@@ -8209,7 +8096,11 @@ mod tests {
 		track: &'static str,
 		priority: i8,
 		info: track::Info,
-	) -> Subscribed {
+	) -> (
+		RequestServe<ScriptedSession, SubscribeServe<ScriptedSession>>,
+		track::Producer,
+	) {
+		let version = Version::Lite07;
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
 			epoch: None,
@@ -8223,7 +8114,20 @@ mod tests {
 			start_frame: 0,
 			end_frame: None,
 		};
-		let (session, mut serve) = serve_request::<SubscribeServe<_>>(publisher, &msg).await;
+		let mut script = Vec::new();
+		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, version),
+			reader: crate::coding::Reader::new(recv, version),
+		};
+		let mut serve = RequestServe::<_, SubscribeServe<_>>::new(publisher.shared.clone(), stream);
 		assert!(!drive(&mut serve).await);
 		let track = dynamic
 			.requested_track()
@@ -8236,167 +8140,29 @@ mod tests {
 			matches!(serve.state, RequestState::Serve(SubscribeServe::Run(_))),
 			"the subscription is not running"
 		);
-		(session, serve, track)
+		(serve, track)
 	}
 
-	/// Two announced broadcasts, `a` and `b`, with their track requests.
-	fn two_broadcasts() -> (origin::Producer, [(broadcast::Producer, broadcast::Dynamic); 2]) {
+	/// A subscription's send group ranks by the peer's subscriber priority first, and the
+	/// publisher's track priority breaks a tie between two at one subscriber priority.
+	#[moq_clock::test]
+	async fn send_group_ranks_by_the_subscriber_then_the_publisher() {
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcasts = ["a", "b"].map(|name| {
-			let broadcast = origin.create_broadcast(name).unwrap();
-			let dynamic = broadcast.dynamic();
-			broadcast.announce(Default::default()).unwrap();
-			(broadcast, dynamic)
-		});
-		(origin, broadcasts)
-	}
-
-	/// Scheduled per broadcast, a broadcast's subscriptions share one send domain, so the
-	/// transport splits bytes evenly between broadcasts however many tracks or subscribers
-	/// each has. Inside it the publisher's track priority alone orders the groups: the
-	/// peer's subscriber priority, at either extreme or updated, moves nothing, and is not
-	/// fed upstream.
-	#[moq_clock::test]
-	async fn per_broadcast_schedule_ranks_by_the_publisher_alone() {
-		let (origin, [(_a, mut a), (_b, mut b)]) = two_broadcasts();
-		let publisher = grouped_publisher(origin.consume(), crate::session::Schedule::Broadcast);
-		let log = publisher.shared.session.log.clone();
-		let video = || track::Info::timed().with_priority(60);
-		let audio = || track::Info::timed().with_priority(80);
-
-		let mut a_video = subscribe_at(&publisher, &mut a, "a", "video", i8::MAX, video()).await;
-		let _a_audio = subscribe_at(&publisher, &mut a, "a", "audio", i8::MIN, audio()).await;
-		let _b_video = subscribe_at(&publisher, &mut b, "b", "video", 0, video()).await;
-		assert_eq!(log.groups(), [(0, 60), (1, 80), (2, 60)]);
-		let domains = log.domains();
-		assert!(
-			domains[0].is_some() && domains[1] == domains[0] && domains[2].is_some() && domains[2] != domains[0],
-			"not one domain per broadcast: {domains:?}"
-		);
-
-		let update = lite::SubscribeUpdate {
-			wanted_group: None,
-			order: crate::track::Order::Descending,
-			priority: i8::MIN,
-			max_delay: Duration::ZERO,
-			start_group: None,
-			end_group: None,
-			start_frame: 0,
-			end_frame: None,
-		};
-		a_video.0.push(&update.encode_bytes(Version::Lite07).unwrap());
-		assert!(!drive(&mut a_video.1).await, "the update ended the subscription");
-		assert!(
-			log.groups()
-				.iter()
-				.all(|&(group, priority)| group != 0 || priority == 60),
-			"the update moved the group: {:?}",
-			log.groups()
-		);
-		let RequestState::Serve(SubscribeServe::Run(run)) = &a_video.1.state else {
-			panic!("the subscription is not running");
-		};
-		assert_eq!(run.steer_tx.read().priority, 0, "the subscriber priority was kept");
-	}
-
-	/// The default schedule keeps every subscription in the session's default domain,
-	/// ranked by the peer's subscriber priority first and the publisher's after.
-	#[moq_clock::test]
-	async fn strict_schedule_ranks_by_the_subscriber_first() {
-		let (origin, [(_a, mut a), (_b, mut b)]) = two_broadcasts();
-		let publisher = grouped_publisher(origin.consume(), crate::session::Schedule::Strict);
+		let broadcast = origin.create_broadcast("a").unwrap();
+		let mut dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+		let publisher = grouped_publisher(origin.consume());
 		let log = publisher.shared.session.log.clone();
 
-		let _a = subscribe_at(
-			&publisher,
-			&mut a,
-			"a",
-			"video",
-			i8::MAX,
-			track::Info::timed().with_priority(60),
-		)
-		.await;
-		let _b = subscribe_at(
-			&publisher,
-			&mut b,
-			"b",
-			"audio",
-			i8::MIN,
-			track::Info::timed().with_priority(80),
-		)
-		.await;
-		assert_eq!(
-			log.groups(),
-			[
-				(0, crate::priority::group(i8::MAX, 60)),
-				(1, crate::priority::group(i8::MIN, 80))
-			]
-		);
-		assert_eq!(log.domains(), [None, None]);
-	}
+		let video = track::Info::timed().with_priority(60);
+		let audio = track::Info::timed().with_priority(80);
+		let _video = subscribe_at(&publisher, &mut dynamic, "a", "video", 0, video).await;
+		let _audio = subscribe_at(&publisher, &mut dynamic, "a", "audio", 0, audio).await;
+		let _urgent = subscribe_at(&publisher, &mut dynamic, "a", "chat", 1, track::Info::timed()).await;
 
-	/// Asked to schedule per broadcast over a transport without send domains, the publisher
-	/// serves strictly rather than refusing the peer, so the subscriber priority still ranks.
-	#[moq_clock::test]
-	async fn per_broadcast_schedule_without_send_domains_is_strict() {
-		let (origin, [(_a, mut a), _]) = two_broadcasts();
-		let publisher = scheduled_publisher(
-			origin.consume(),
-			crate::session::Schedule::Broadcast,
-			ScriptedSession::new(Vec::new()),
-		);
-		let (_session, serve, _track) =
-			subscribe_at(&publisher, &mut a, "a", "video", i8::MAX, track::Info::timed()).await;
-		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
-			panic!("the subscription is not running");
-		};
-		assert_eq!(
-			run.steer_tx.read().priority,
-			i8::MAX,
-			"the subscriber priority was dropped"
-		);
-	}
-
-	/// Scheduled per broadcast, a FETCH response joins its broadcast's domain at the
-	/// track's publisher priority, so a backfill shares its broadcast's bytes rather than
-	/// going ahead of every broadcast's.
-	#[moq_clock::test]
-	async fn per_broadcast_schedule_places_a_fetch_in_its_broadcast() {
-		let (origin, [(_a, mut a), _]) = two_broadcasts();
-		let publisher = grouped_publisher(origin.consume(), crate::session::Schedule::Broadcast);
-		let log = publisher.shared.session.log.clone();
-
-		let (_session, _serve, track) = subscribe_at(
-			&publisher,
-			&mut a,
-			"a",
-			"video",
-			0,
-			track::Info::timed().with_priority(60),
-		)
-		.await;
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
-		group.finish().unwrap();
-
-		let fetch = lite::Fetch {
-			epoch: None,
-			broadcast: crate::Path::new("a"),
-			track: "video".into(),
-			priority: i8::MAX,
-			max_delay: None,
-			group: 0,
-			start_frame: 0,
-			end_frame: None,
-		};
-		let (session, mut serve) = serve_request::<FetchServe<_>>(&publisher, &fetch).await;
-		drive(&mut serve).await;
-		assert_eq!(log.groups(), [(0, 60), (1, 60)]);
-		let domains = log.domains();
-		assert!(
-			domains[0].is_some() && domains[1] == domains[0],
-			"the fetch left its broadcast's domain: {domains:?}"
-		);
-		assert_eq!(session.log.joins(), [(0, 1)], "the response never joined its group");
+		let groups = log.groups();
+		assert_eq!(groups.len(), 3);
+		assert!(groups[1].1 > groups[0].1, "the publisher's priority breaks the tie");
+		assert!(groups[2].1 > groups[1].1, "the subscriber's priority dominates");
 	}
 }

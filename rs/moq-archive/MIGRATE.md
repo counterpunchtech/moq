@@ -4,10 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Info::priority` is signed
+### Recording format version 3 stores a signed priority (#6142)
 
 `Info::priority`, `Info::new`, and `Error::Priority` use `i8`, higher first, with 0 unset.
-`.info` still stores the moq-lite byte, `priority + 128`, so existing recordings keep their meaning: a stored 127 reads as -1.
+`VERSION` is 3, whose `.info` stores that `i8` as written; version 2 stored the moq-lite byte, `priority + 128`.
+Readers still read version 2 recordings, converting the byte, so a stored 127 reads as -1; a decoded version 2 `Info` keeps `version: 2` and refuses to `encode`.
+A writer refuses to append to a version 2 recording with `Error::Version(2)`, so start a new prefix, as for `Error::EpochMismatch`.
 
 ### Untimed tracks record untimed (#5720)
 

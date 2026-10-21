@@ -3339,8 +3339,8 @@ fn first_flight_datagrams(stream: i64, datagram: i64) -> usize {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
     let conn = pair.server_conn_mut(server_ch);
-    let streams = conn.send_groups().open(None, stream);
-    let datagrams = conn.send_groups().open(None, datagram);
+    let streams = conn.send_groups().open(stream);
+    let datagrams = conn.send_groups().open(datagram);
     let s = conn
         .streams()
         .open(
