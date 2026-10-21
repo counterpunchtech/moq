@@ -57,7 +57,6 @@ lands before the cut.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [TS qmux in the monorepo](/quest/m1/ts-qmux.md) - `@moq/qmux` moves into `js/` and `js/net` stops depending on moq-dev/web-transport
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux runs in-tree over `moq-quic`'s stream state machine, returning credit for every byte and delivering its close frame
-- [Drop moq-native's noq feature](/quest/m1/native-noq-feature.md) - the empty default `noq` feature is removed
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
@@ -76,7 +75,6 @@ lands before the cut.
 - [Report relays that refuse TRACK_STATUS](/quest/m1/track-status-race.md) - moqx and any other relay refusing TRACK_STATUS with an undefined code get an upstream report
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
-- [One hang catalog consumer](/quest/m1/catalog-consumer-fold.md) - `moq-mux` reads hang catalogs through `hang`'s consumer
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
