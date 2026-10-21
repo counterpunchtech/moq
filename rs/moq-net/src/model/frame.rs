@@ -169,23 +169,23 @@ impl<const N: usize> Buffer<N> {
 /// size fits what remains is allocated up front; past that, its buffer grows with the
 /// bytes received. Each frame returns its share once it completes or aborts.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // pending: /quest/m1/public-model/ingest.md
 pub(crate) struct Budget(Arc<AtomicUsize>);
 
 impl Budget {
 	/// Enough for a handful of large keyframes in flight at once.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	const DEFAULT: usize = 16 * 1024 * 1024;
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(AtomicUsize::new(bytes)))
 	}
 
 	/// Take `size` bytes of the budget, or `None` if that is more than remains.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn reserve(&self, size: usize) -> Option<Reservation> {
 		self.0
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
@@ -204,7 +204,7 @@ impl Default for Budget {
 }
 
 /// A frame's share of a [`Budget`], returned on drop.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(super) struct Reservation {
 	budget: Budget,
 	size: usize,
@@ -308,7 +308,7 @@ impl FrameBuf {
 	}
 
 	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn growing(size: usize) -> Self {
 		Self::with_growth(size, true)
 	}
@@ -603,7 +603,7 @@ impl<'a> Producer<'a> {
 /// frame or a group finish cannot race this frame.
 ///
 /// Holds the frame's share of the session's [`Budget`], if it got one, until then.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // pending: /quest/m1/public-model/ingest.md
 pub(crate) struct ProducerOwned {
 	raw: Raw<group::Producer>,
@@ -620,7 +620,7 @@ impl std::ops::Deref for ProducerOwned {
 
 impl ProducerOwned {
 	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: capability gap
 	// Public drivers still borrow frames; the owned public writer belongs to ingest.
 	pub(crate) fn cancel_on_drop(mut self) -> Self {
@@ -628,7 +628,7 @@ impl ProducerOwned {
 		self
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
 		Self {
 			raw: Raw {
@@ -644,14 +644,14 @@ impl ProducerOwned {
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.raw.stats = meter;
 		self
 	}
 
 	/// Bytes still needed to complete the frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn remaining(&self) -> usize {
 		self.raw.remaining()
 	}
@@ -664,28 +664,28 @@ impl ProducerOwned {
 	/// to publish bytes nobody can observe yet.
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: tuning
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.raw.write(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: tuning
 	pub(crate) fn notify(&self) {
 		self.raw.group.as_ref().expect("frame owns its group").frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn finish(mut self) -> Result<group::Producer> {
 		self.raw.finish()?;
 		Ok(self.raw.group.take().expect("frame owns its group"))
 	}
 
 	/// Abort the frame (and its group) with the given error.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn abort(mut self, err: Error) -> Result<()> {
 		self.raw.abort(err)
 	}
@@ -747,7 +747,7 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// private: passthrough
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,

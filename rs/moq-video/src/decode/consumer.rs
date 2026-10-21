@@ -371,7 +371,10 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;

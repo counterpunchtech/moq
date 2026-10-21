@@ -4,7 +4,10 @@
 //!
 //! Without the `runtime` feature there are no timers, and reads fall back to std,
 //! except in the browser, where std has no clock and `web_async::time` still reads.
-#![allow(clippy::disallowed_methods)]
+#![cfg_attr(
+	not(target_arch = "wasm32"),
+	expect(clippy::disallowed_methods, reason = "this backend is where the host clock is read")
+)]
 
 #[cfg(feature = "runtime")]
 use std::{future::Future, pin::Pin};

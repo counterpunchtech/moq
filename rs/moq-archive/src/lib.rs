@@ -24,7 +24,7 @@ pub mod info;
 mod mock;
 mod path;
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod proof;
 pub mod reader;
 mod recover;

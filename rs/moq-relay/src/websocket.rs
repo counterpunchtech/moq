@@ -14,8 +14,10 @@ use axum::{
 
 use crate::{web::MtlsPeer, web::WebState, web::landing_response};
 
-// One axum extractor per fact the upgrade needs; there is no struct to fold them into.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the upgrade needs; there is no struct to fold them into"
+)]
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
 pub(crate) async fn serve_ws(

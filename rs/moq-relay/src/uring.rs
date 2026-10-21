@@ -853,7 +853,6 @@ mod tests {
 	/// `Config` is non-exhaustive, so the windows are filled in after `default`
 	/// rather than in a struct literal.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_are_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.receive_window = Some(64 << 20);
@@ -870,7 +869,6 @@ mod tests {
 	/// left at the documented defaults: the tokio backends apply `Resolved`'s
 	/// windows as they are, and the workers must get exactly those.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
 		set.receive_window = Some(128 << 20);
@@ -902,7 +900,6 @@ mod tests {
 	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
 	/// instead of binding and logging nothing.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn bind_refuses_a_keylog_without_sslkeylogfile() {
 		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
 		unsafe { std::env::remove_var("SSLKEYLOGFILE") };

@@ -1,5 +1,8 @@
-// Host time measures benchmark throughput.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 //! `Writer::run` recording every enrolled track into memory, swept over the number of tracks and
 //! the groups each one publishes. Throughput is per frame, so a per-event cost that grows with the

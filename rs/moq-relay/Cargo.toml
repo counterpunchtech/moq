@@ -134,3 +134,6 @@ harness = false
 [[bench]]
 name = "auth"
 harness = false
+
+[lints]
+workspace = true

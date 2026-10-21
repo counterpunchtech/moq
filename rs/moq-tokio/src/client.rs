@@ -409,7 +409,7 @@ impl Client {
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
 		// that dial waits for the negotiated binding and builds its own.
 		let moq = self.moq_with_path(setup_path(&url));
-		#[allow(unused_variables)]
+		#[allow(unused_variables, reason = "an iroh-only build never reads it")]
 		let moq = match setup_authority(&url) {
 			Some(authority) => moq.with_authority(authority),
 			None => moq,
@@ -669,7 +669,7 @@ impl Dialed {
 			feature = "tcp",
 			feature = "uds"
 		)),
-		allow(dead_code)
+		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
 		Self { session, transport }

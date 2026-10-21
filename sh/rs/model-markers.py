@@ -58,9 +58,22 @@ def marker(path, index, line, private):
 def block(lines, index, prefixes):
 	"""The indices of the comment and attribute lines directly above `index`."""
 	above = []
-	while index > 0 and lines[index - 1].lstrip().startswith(prefixes):
-		index -= 1
-		above.append(index)
+	while index > 0:
+		line = lines[index - 1].lstrip()
+		if line.startswith(prefixes):
+			index -= 1
+			above.append(index)
+		elif "#[" in prefixes and line.startswith(")]"):
+			# rustfmt wraps a long attribute over several lines; step over it to its `#[`.
+			start = index - 1
+			while start > 0 and not lines[start].lstrip().startswith(("#[", "#!")):
+				start -= 1
+			if not lines[start].lstrip().startswith(("#[", "#!")):
+				break
+			above.extend(range(index - 1, start - 1, -1))
+			index = start
+		else:
+			break
 	return above
 
 

@@ -54,3 +54,6 @@ moq-loc = { path = "../moq-loc" }
 # turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

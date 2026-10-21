@@ -2960,7 +2960,7 @@ mod tests {
 
 		#[derive(Debug, serde::Deserialize)]
 		struct Doc {
-			#[allow(dead_code)]
+			#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 			connect: Vec<Peer>,
 		}
 		let err = toml::from_str::<Doc>("connect = [{ url = \"https://peer.example/\", cost = \"cheap\" }]")

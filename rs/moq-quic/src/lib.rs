@@ -13,12 +13,21 @@
 //! managing a single connection and all the related state (such as streams).
 
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(dead_code))]
-// Fixes welcome:
-#![warn(unreachable_pub)]
-#![allow(clippy::cognitive_complexity)]
-#![allow(clippy::too_many_arguments)]
-#![warn(clippy::use_self)]
+#![cfg_attr(
+    test,
+    allow(dead_code, reason = "test builds compile helpers only some tests call")
+)]
+// quinn's workspace lints, kept so upstream code stays clean against them. They
+// live here because Cargo can't extend the workspace lint table per crate.
+#![warn(
+    elided_lifetimes_in_paths,
+    unnameable_types,
+    unreachable_pub,
+    unused_qualifications,
+    clippy::manual_let_else,
+    clippy::or_fun_call,
+    clippy::use_self
+)]
 
 use std::{
     fmt,

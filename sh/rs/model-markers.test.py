@@ -108,6 +108,10 @@ class TestModelMarkers(unittest.TestCase):
 		error = run(**{"rs/moq-net/src/model/group.rs": ("private: test", "private: later")})
 		self.assertIn("unknown private marker", error)
 
+	def test_marker_above_a_wrapped_attribute_passes(self):
+		wrapped = '// private: test\n#[cfg_attr(\n\tnot(feature = "async"),\n\tallow(dead_code, reason = "why")\n)]\npub(crate) struct Open'
+		self.assertIsNone(run(**{"rs/moq-net/src/model/group.rs": ("// private: test\npub(crate) struct Open", wrapped)}))
+
 	def test_stale_rust_marker_fails(self):
 		error = run(**{"rs/moq-net/src/model/group.rs": ("pub(super) struct Inner", "// private: test\npub(super) struct Inner")})
 		self.assertIn("group.rs:1: marker is not on an item", error)

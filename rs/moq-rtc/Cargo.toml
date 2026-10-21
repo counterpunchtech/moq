@@ -46,3 +46,6 @@ uuid = { version = "1", features = ["v4"] }
 aws-lc-rs = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

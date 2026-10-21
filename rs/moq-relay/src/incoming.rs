@@ -33,7 +33,10 @@ impl<S: poll::Session> Accepted<S> {
 ///
 /// Public in a private module, so [`Incoming`] can name it while nothing outside
 /// this crate can implement it.
-#[allow(async_fn_in_trait)]
+#[expect(
+	async_fn_in_trait,
+	reason = "a sealed trait, so no outside implementor needs a `Send` bound"
+)]
 pub trait Sealed: Sized {
 	/// The running session's protocol driver.
 	type Driver;

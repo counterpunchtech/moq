@@ -25,11 +25,13 @@ pub enum SettingsError {
 }
 
 pub struct Settings {
-	// A reference to the send/recv stream, so we don't close it until dropped.
-	#[allow(dead_code)]
+	#[allow(
+		dead_code,
+		reason = "a reference to the send/recv stream, so we don't close it until dropped"
+	)]
 	send: crate::quic::driver::SendStream,
 
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held so the stream stays open until dropped")]
 	recv: crate::quic::driver::RecvStream,
 }
 

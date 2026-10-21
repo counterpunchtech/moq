@@ -275,7 +275,7 @@ struct Relay {
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 #[derive(Clone, Debug)]
 // private: passthrough
 pub(crate) struct Wire {
@@ -1069,7 +1069,7 @@ impl Producer {
 	///
 	/// The declared size is the peer's claim, so the buffer is allocated up front only
 	/// while it fits the session's `budget`; otherwise it grows with the bytes received.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn create_frame_owned(
 		mut self,
@@ -1291,8 +1291,10 @@ impl Producer {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		self.handle.abort_unused(err)
@@ -1327,8 +1329,10 @@ impl Producer {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.handle.poll_unused(waiter)
@@ -1440,7 +1444,7 @@ impl Handle {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
@@ -1530,13 +1534,13 @@ impl Handle {
 	}
 
 	/// Whether `other` is a handle to this same group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 
 	/// Whether the group opened its first frame, or ended without one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn is_started(&self) -> bool {
 		self.state.read().started()
@@ -1714,7 +1718,7 @@ impl Handle {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())

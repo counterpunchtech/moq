@@ -133,7 +133,10 @@ pub(super) struct Entry {
 ///
 /// Nothing reads these payloads, which is the point: they exist so the driver
 /// thread is the one that drops them.
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "nothing reads the payloads; they exist so the driver thread drops them"
+)]
 pub(super) enum Retired {
 	/// A sink that was removed or rebuilt.
 	Sink(Entry),

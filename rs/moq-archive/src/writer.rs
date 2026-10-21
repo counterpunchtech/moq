@@ -641,8 +641,10 @@ impl<S: ObjectStore> Track<S> {
 	}
 }
 
-// Each read is already boxed as a future, so the variant sizes cost nothing extra.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "each read is already boxed as a future, so the variant sizes cost nothing extra"
+)]
 enum Read {
 	Group {
 		name: String,
@@ -1048,7 +1050,7 @@ fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use futures::TryStreamExt;
 	use object_store::memory::InMemory;

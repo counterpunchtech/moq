@@ -73,8 +73,10 @@ pub struct Session {
 	header_bi: Vec<u8>,
 	header_datagram: Vec<u8>,
 
-	// Keep a reference to the settings and connect stream to avoid closing them until dropped.
-	#[allow(dead_code)]
+	#[allow(
+		dead_code,
+		reason = "keep a reference to the settings and connect stream to avoid closing them until dropped"
+	)]
 	settings: Option<Arc<Settings>>,
 
 	// The send side of the CONNECT stream, used to write the CloseWebTransportSession capsule.
@@ -1029,7 +1031,10 @@ impl web_transport_trait::Session for Session {
 		Self::protocol(self)
 	}
 
-	#[allow(refining_impl_trait)]
+	#[expect(
+		refining_impl_trait,
+		reason = "returns the concrete stats type rather than the trait's opaque one"
+	)]
 	fn stats(&self) -> SessionStats {
 		Self::stats(self)
 	}

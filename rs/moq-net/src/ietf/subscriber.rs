@@ -819,7 +819,10 @@ impl<S> Subscriber<S>
 where
 	S: crate::transport::poll::Boxable,
 {
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	pub fn new(
 		runtime: crate::time::Deadlines,
 		session: S,
@@ -1212,7 +1215,10 @@ where
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
@@ -4662,7 +4668,10 @@ where
 	///
 	/// A pre-draft-20 join resuming partway through a group asks for all of it, so the
 	/// objects below `resume` are dropped: another route already delivered them.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn run_fill_objects(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,

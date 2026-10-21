@@ -491,7 +491,10 @@ impl ValidationTokenConfig {
         self
     }
 
-    #[allow(rustdoc::redundant_explicit_links)] // which links are redundant depends on features
+    #[allow(
+        rustdoc::redundant_explicit_links,
+        reason = "which links are redundant depends on features"
+    )]
     /// Set a custom [`TokenLog`]
     ///
     /// If the `bloom` feature is enabled (which it is by default), defaults to a default

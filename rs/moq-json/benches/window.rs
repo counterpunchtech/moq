@@ -49,7 +49,7 @@ unsafe impl GlobalAlloc for Counter {
 
 /// A stats-shaped record: flat counters plus one nested object, nothing owned on the heap.
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench only measures deserializing it")]
 struct Record {
 	bytes: u64,
 	frames: u64,
@@ -59,7 +59,7 @@ struct Record {
 }
 
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench only measures deserializing it")]
 struct Nested {
 	bytes: u64,
 	frames: u64,

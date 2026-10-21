@@ -1096,7 +1096,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: moq_quic::Connection,
         handle: ConnectionHandle,

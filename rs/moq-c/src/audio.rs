@@ -33,7 +33,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_audio_sample_format {
 	MOQ_AUDIO_SAMPLE_FORMAT_U8 = 0,
@@ -63,7 +63,6 @@ fn audio_format_from_u32(value: u32) -> Result<moq_audio::Format, Error> {
 
 /// PCM layout the caller hands to [`moq_encode_audio_frame`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_encoder_input {
 	/// `moq_audio_sample_format` discriminant.
 	pub format: u32,
@@ -78,7 +77,6 @@ pub struct moq_audio_encoder_input {
 /// "match the input (snapping the rate up to a libopus-supported
 /// value if necessary)".
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_encoder_output {
 	/// Codec id, UTF-8: "opus", "pcm", or "aac". AAC encodes through the
 	/// platform's encoder, so a host without one refuses it.
@@ -98,7 +96,6 @@ pub struct moq_audio_encoder_output {
 
 /// PCM layout the caller wants out of [`moq_decode_audio`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_decoder_output {
 	pub format: u32,
 	/// 0 = deliver at the codec's native sample rate.
@@ -123,7 +120,6 @@ pub struct moq_audio_decoder_output {
 /// [`moq_decode_audio_frame_free`]) or borrowed by the publish call
 /// (the publisher copies before returning).
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_frame {
 	pub timestamp_us: u64,
 	pub data: *const u8,

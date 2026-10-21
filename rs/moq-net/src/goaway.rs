@@ -180,7 +180,7 @@ impl Consumer {
 /// why the flag is not merely a read of the channel), and a wakeup for the
 /// per-source tasks, which have to react to a peer that drains and then goes quiet.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GoingAway {
 	flag: Arc<AtomicBool>,
 	received: Consumer,
@@ -188,13 +188,13 @@ pub(crate) struct GoingAway {
 
 impl GoingAway {
 	/// Mark the session as going away, returning whether this was the first time.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn set(&self) -> bool {
 		!self.flag.swap(true, Ordering::AcqRel)
 	}
 
 	/// Whether a GOAWAY has been received.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn is_set(&self) -> bool {
 		self.flag.load(Ordering::Acquire)
 	}
@@ -204,7 +204,7 @@ impl GoingAway {
 	///
 	/// Stays `Ready` once set, so a caller must treat what it does in response as
 	/// idempotent rather than as an edge.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
 		// Presence only, rather than [`Consumer::poll`]: this stays ready for the rest
 		// of the session, and every wakeup of every per-source task would otherwise
@@ -239,7 +239,7 @@ impl Default for GoingAway {
 
 /// The halves handed to a protocol driver's `start()`.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Protocol {
 	/// Awaited by the driver's send path; firing means "encode and send GOAWAY now".
 	trigger: kio::Consumer<Option<Goaway>>,
@@ -258,7 +258,7 @@ impl Protocol {
 	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
 	/// payload instead would leave an observer acting on a URI the peer has since
 	/// replaced, with no way to tell.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn record(&self, goaway: Goaway) -> Result<()> {
 		if !self.going_away.set() {
 			return Err(Error::ProtocolViolation);
@@ -273,7 +273,7 @@ impl Protocol {
 	///
 	/// `None` if the trigger was dropped without firing (the session is closing
 	/// without a drain), so nothing should be sent.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Goaway>> {
 		match self.trigger.poll(waiter, |state| match &**state {
 			Some(goaway) => Poll::Ready(goaway.clone()),
@@ -291,7 +291,7 @@ impl Protocol {
 /// The draft makes the deadline the sender's promise, not the peer's, so the
 /// driver arms this after the message hits the wire rather than making the
 /// caller hold a handle and await it.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 	session: S,
 	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
@@ -300,7 +300,7 @@ pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> Enforce<S> {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(runtime: &crate::time::Deadlines, session: S, timeout: Option<Duration>) -> Self {
 		Self {
 			session,
@@ -309,7 +309,7 @@ impl<S: crate::transport::poll::Session> Enforce<S> {
 	}
 
 	/// Ready once the session closes on its own or the deadline passes (closing it).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let Some((deadline, timeout)) = &mut self.deadline else {
 			return Poll::Ready(());
@@ -342,7 +342,7 @@ pub(crate) async fn enforce<S: crate::transport::poll::Session>(
 }
 
 /// The halves held by the public [`crate::Session`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Handle {
 	/// Cloned into each [`Producer`] handed out by `crate::Session::drain`.
 	trigger: kio::Producer<Option<Goaway>>,
@@ -356,7 +356,7 @@ impl Handle {
 	/// Create the session-side handle and its protocol-side counterpart.
 	///
 	/// `redirect` is whether this side may name a URI in its own GOAWAY.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
@@ -385,7 +385,7 @@ impl Handle {
 	/// A send half. Handing one out is always allowed; sending twice is what
 	/// [`Producer::send`] refuses, so a caller never has to ask whether the slot
 	/// is still free before deciding how to shut down.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn producer(&self) -> Producer {
 		Producer {
 			trigger: self.trigger.clone(),
@@ -394,7 +394,7 @@ impl Handle {
 	}
 
 	/// A fresh handle on the receive half.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consumer(&self) -> Consumer {
 		self.consumer.clone()
 	}

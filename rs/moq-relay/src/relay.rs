@@ -241,7 +241,6 @@ impl Relay {
 		#[cfg(feature = "iroh")]
 		let iroh = config.iroh.bind(&config.quic).await?;
 
-		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
