@@ -716,6 +716,8 @@ struct Candidate {
 
 /// Exact identities within the reader's budget. The last delivery never ages until
 /// another supersedes it, as a group's budget starts at its immediate successor.
+/// A replacement copy replays at most its buffered datagrams, so no more than that many
+/// superseded identities are kept, whatever the budget: a publisher cannot grow it.
 #[derive(Default)]
 struct Datagrams {
 	latest: Option<(u64, u64)>,
@@ -739,6 +741,11 @@ impl Datagrams {
 			return false;
 		}
 		if let Some(previous) = self.latest.replace(id) {
+			if self.superseded.len() == super::track::MAX_DATAGRAMS
+				&& let Some((_, oldest)) = self.superseded.pop_front()
+			{
+				self.seen.remove(&oldest);
+			}
 			self.seen.insert(previous);
 			self.superseded.push_back((at, previous));
 		}
@@ -3522,6 +3529,21 @@ mod test {
 			assert!(!delivered.insert((5, 0), at));
 			assert!(delivered.insert((10, 0), at + budget));
 		}
+	}
+
+	#[test]
+	fn datagram_identities_are_capped_by_the_replay_buffer() {
+		let mut delivered = Datagrams::default();
+		let max = super::super::track::MAX_DATAGRAMS as u64;
+		// Superseded identities never expire under the longest budget, so only the cap bounds them.
+		for sequence in 0..=max + 1 {
+			assert!(delivered.insert((sequence, 0), Instant::ZERO));
+		}
+		delivered.expire(Instant::ZERO + HOUR, Duration::MAX);
+		assert_eq!(delivered.seen.len(), max as usize);
+		assert_eq!(delivered.superseded.len(), max as usize);
+		assert!(!delivered.insert((1, 0), Instant::ZERO));
+		assert!(delivered.insert((0, 0), Instant::ZERO));
 	}
 
 	#[test]

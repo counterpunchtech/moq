@@ -49,7 +49,7 @@ const DEFAULT_PRIORITY: u8 = 127;
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
 /// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
 /// The payload size limit also bounds the buffer's memory use.
-const MAX_DATAGRAMS: usize = 64;
+pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.

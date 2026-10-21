@@ -189,8 +189,8 @@ for (const replayed of [0, 1, 64, 1024]) {
 	}
 }
 
-// Sweep audience and retained identities: a read must touch only the delivered identity,
-// even when a large history remains inside the budget.
+// Sweep audience and delivered history: a read must touch only the delivered identity,
+// whether the history is under, at, or past the replay-buffer cap on retained identities.
 async function measureDatagrams(readers: number, retained: number): Promise<number> {
 	const front = new Front();
 	const broadcast = new BroadcastProducer();

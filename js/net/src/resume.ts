@@ -41,6 +41,7 @@ import {
 	type GroupRecover,
 	groupBounds,
 	hooks,
+	MAX_DATAGRAMS,
 	type Recv,
 	type RecvDatagram,
 	type Replacement,
@@ -266,7 +267,11 @@ class Reader implements ResumeSource {
 	#newest?: number;
 	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
-	/** Previously handed-out identities, in the order they were superseded. */
+	/**
+	 * Previously handed-out identities, in the order they were superseded. A replacement copy
+	 * replays at most its buffered datagrams, so no more than that many are kept, whatever the
+	 * budget: a publisher cannot grow it.
+	 */
 	#datagrams = new Map<number, Instant>();
 	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
@@ -525,7 +530,12 @@ class Reader implements ResumeSource {
 				if (recv.kind === "datagram") {
 					const sequence = recv.datagram.sequence;
 					if (sequence === this.#datagram || this.#datagrams.has(sequence)) continue;
-					if (this.#datagram !== undefined) this.#datagrams.set(this.#datagram, at);
+					if (this.#datagram !== undefined) {
+						if (this.#datagrams.size === MAX_DATAGRAMS) {
+							this.#datagrams.delete(this.#datagrams.keys().next().value as number);
+						}
+						this.#datagrams.set(this.#datagram, at);
+					}
 					this.#datagram = sequence;
 					return recv;
 				}
