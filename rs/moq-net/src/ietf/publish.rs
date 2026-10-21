@@ -374,10 +374,14 @@ impl Message for Publish<'_> {
 pub struct PublishOk {
 	pub request_id: Option<RequestId>,
 	pub forward: bool,
-	pub subscriber_priority: u8,
-	pub group_order: GroupOrder,
-	pub filter: Filter,
-	// pub parameters: Parameters,
+	/// SUBSCRIBER_PRIORITY, `None` when absent: the subscription keeps the one it had.
+	pub subscriber_priority: Option<u8>,
+	/// GROUP_ORDER (through draft-18), `None` when absent.
+	pub group_order: Option<GroupOrder>,
+	/// The Location Filter (through draft-19), `None` when absent.
+	pub filter: Option<Filter>,
+	/// NEW_GROUP_REQUEST (drafts 16 to 19), which a dynamic track judges as a join.
+	pub new_group: Option<u64>,
 }
 
 impl Message for PublishOk {
@@ -395,11 +399,11 @@ impl Message for PublishOk {
 		match version {
 			Version::Draft14 => {
 				w.bool(self.forward);
-				w.u8(self.subscriber_priority);
-				self.group_order.encode(w, version)?;
+				w.u8(self.subscriber_priority.unwrap_or(128));
+				self.group_order.unwrap_or(GroupOrder::Descending).encode(w, version)?;
 				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
 				// decode, so encoding one would truncate the message.
-				self.filter.encode(w, version)?;
+				self.filter.unwrap_or(Filter::Unfiltered).encode(w, version)?;
 				// no parameters
 				w.u8(0);
 			}
@@ -413,12 +417,20 @@ impl Message for PublishOk {
 					version,
 					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
 				)
-				.then_some(self.group_order);
+				.then_some(self.group_order)
+				.flatten();
+				let new_group = matches!(
+					version,
+					Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19
+				)
+				.then_some(self.new_group)
+				.flatten();
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
 					0x22 => group_order,
+					0x32 => new_group,
 				);
 			}
 		}
@@ -446,15 +458,15 @@ impl Message for PublishOk {
 				Ok(Self {
 					request_id,
 					forward,
-					subscriber_priority,
-					group_order,
-					filter,
+					subscriber_priority: Some(subscriber_priority),
+					group_order: Some(group_order),
+					filter: Some(filter),
+					new_group: None,
 				})
 			}
 			_ => {
-				// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts and
-				// NEW_GROUP_REQUEST are legal on the drafts that list them and dropped:
-				// nothing here acts on a publisher's timeout. Draft-20 moved the
+				// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts are legal on the
+				// drafts that list them and dropped: nothing here acts on a publisher's timeout. Draft-20 moved the
 				// subscription parameters off PUBLISH_OK, and draft-19 already dropped
 				// GROUP_ORDER.
 				decode_params!(r, version,
@@ -465,20 +477,16 @@ impl Message for PublishOk {
 					0x20 => subscriber_priority: Option<u8> where !Filter::is_draft20(version),
 					0x21 => filter: Option<Filter> where !Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18),
-					0x32 => _new_group_request: Option<u64> where matches!(version, Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19),
+					0x32 => new_group: Option<u64> where matches!(version, Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19),
 				);
-
-				let forward = forward.unwrap_or(true);
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter = filter.unwrap_or(Filter::Unfiltered);
 
 				Ok(Self {
 					request_id,
-					forward,
+					forward: forward.unwrap_or(true),
 					subscriber_priority,
 					group_order,
 					filter,
+					new_group,
 				})
 			}
 		}
@@ -628,9 +636,10 @@ mod tests {
 		let msg = PublishOk {
 			request_id: Some(RequestId(7)),
 			forward: true,
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			filter: Filter::NextObject,
+			subscriber_priority: Some(128),
+			group_order: Some(GroupOrder::Descending),
+			filter: Some(Filter::NextObject),
+			new_group: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -638,7 +647,7 @@ mod tests {
 
 		assert_eq!(decoded.request_id, Some(RequestId(7)));
 		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.subscriber_priority, Some(128));
 	}
 
 	#[test]
@@ -646,9 +655,10 @@ mod tests {
 		let msg = PublishOk {
 			request_id: Some(RequestId(7)),
 			forward: true,
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			filter: Filter::NextObject,
+			subscriber_priority: Some(128),
+			group_order: Some(GroupOrder::Descending),
+			filter: Some(Filter::NextObject),
+			new_group: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -656,7 +666,7 @@ mod tests {
 
 		assert_eq!(decoded.request_id, Some(RequestId(7)));
 		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.subscriber_priority, Some(128));
 	}
 
 	#[test]
@@ -690,9 +700,10 @@ mod tests {
 		let msg = PublishOk {
 			request_id: None,
 			forward: true,
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			filter: Filter::NextObject,
+			subscriber_priority: Some(128),
+			group_order: Some(GroupOrder::Descending),
+			filter: Some(Filter::NextObject),
+			new_group: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -700,7 +711,7 @@ mod tests {
 
 		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.subscriber_priority, Some(128));
 	}
 
 	fn publish_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
@@ -990,9 +1001,10 @@ mod tests {
 		let msg = PublishOk {
 			request_id: None,
 			forward: true,
-			subscriber_priority: 128,
-			group_order: GroupOrder::Descending,
-			filter: Filter::NextObject,
+			subscriber_priority: Some(128),
+			group_order: Some(GroupOrder::Descending),
+			filter: Some(Filter::NextObject),
+			new_group: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1000,7 +1012,7 @@ mod tests {
 
 		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
-		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.subscriber_priority, Some(128));
 	}
 
 	/// Draft-18 lets PUBLISH_OK carry EXPIRES; it is ignored rather than rejected.
@@ -1011,6 +1023,36 @@ mod tests {
 		let decoded: PublishOk = decode_message(&bytes, Version::Draft16).unwrap();
 		assert_eq!(decoded.request_id, Some(RequestId(4)));
 		assert!(decoded.forward);
+	}
+
+	/// An absent parameter stays absent, so the subscription keeps the one it had: draft-19
+	/// has no GROUP_ORDER on PUBLISH_OK at all.
+	#[test]
+	fn test_publish_ok_absent_parameters_stay_absent() {
+		// No parameters.
+		let decoded: PublishOk = decode_message(&[0x00], Version::Draft19).unwrap();
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, None);
+		assert_eq!(decoded.group_order, None);
+		assert_eq!(decoded.filter, None);
+		assert_eq!(decoded.new_group, None);
+	}
+
+	/// NEW_GROUP_REQUEST is kept on the drafts that allow it on PUBLISH_OK.
+	#[test]
+	fn test_publish_ok_carries_new_group_request() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let msg = PublishOk {
+				request_id: None,
+				forward: true,
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
+				new_group: Some(9),
+			};
+			let decoded: PublishOk = decode_message(&encode_message(&msg, version), version).unwrap();
+			assert_eq!(decoded.new_group, Some(9), "{version}");
+		}
 	}
 
 	#[test]

@@ -691,6 +691,9 @@ where
 			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
 		})
 		.await;
+		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
+		// the resume.
+		let mut new_group: Option<u64>;
 		let resume = match answer {
 			None => {
 				stream.writer.abort(&Error::Cancel);
@@ -711,21 +714,20 @@ where
 					let ok = body
 						.message::<ietf::PublishOk>(self.version)
 						.map_err(|err| goaways.failed(err.into()))?;
-					// Through draft-19 the answer sets the Forward State and its parameters, an
-					// absent FORWARD meaning 1. Draft-20 moved them off PUBLISH_OK, leaving it paused.
-					match Filter::is_draft20(self.version) {
-						true => None,
-						false => {
-							params.priority = ok.subscriber_priority;
-							params.order = Some(ok.group_order);
-							params.filter = ok.filter;
-							ok.forward.then_some(Resume {
-								fill: None,
-								new_group: None,
-								answer: false,
-							})
-						}
+					// Through draft-19 the answer sets the Forward State and the parameters it
+					// carries, an absent FORWARD meaning 1; an absent parameter keeps the one the
+					// SUBSCRIBE_TRACKS set. Draft-20 moved them off PUBLISH_OK, leaving it paused.
+					if let Some(priority) = ok.subscriber_priority {
+						params.priority = priority;
 					}
+					params.order = ok.group_order.or(params.order);
+					params.filter = ok.filter.unwrap_or(params.filter);
+					new_group = ok.new_group;
+					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
+						fill: None,
+						new_group: new_group.take(),
+						answer: false,
+					})
 				}
 				_ => return Err(goaways.failed(Error::UnexpectedMessage)),
 			},
@@ -853,7 +855,7 @@ where
 				Some(true) => {
 					resume = Some(Resume {
 						fill: update.fill,
-						new_group: update.new_group,
+						new_group: update.new_group.or(new_group.take()),
 						answer: true,
 					})
 				}
@@ -1136,9 +1138,10 @@ mod tests {
 			.encode(&ietf::PublishOk {
 				request_id: None,
 				forward: false,
-				subscriber_priority: 128,
-				group_order: GroupOrder::Ascending,
-				filter: Filter::NextObject,
+				subscriber_priority: Some(128),
+				group_order: Some(GroupOrder::Ascending),
+				filter: Some(Filter::NextObject),
+				new_group: None,
 			})
 			.await
 			.unwrap();
@@ -1430,9 +1433,10 @@ mod tests {
 				.encode(&ietf::PublishOk {
 					request_id: None,
 					forward: true,
-					subscriber_priority: 128,
-					group_order: GroupOrder::Ascending,
-					filter: Filter::NextObject,
+					subscriber_priority: Some(128),
+					group_order: Some(GroupOrder::Ascending),
+					filter: Some(Filter::NextObject),
+					new_group: None,
 				})
 				.await
 				.unwrap();
