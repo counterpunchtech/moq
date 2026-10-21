@@ -161,11 +161,13 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     atomically with `accept`, gates `poll_start` (the lite publisher's
     resolved start) until `start_at`. The IETF TRACK_STATUS race is fixed
     with a crate-private `Request::idle()` applied in the same accept.
-  - Still open: the public way to accept idle, replay, then go live. Gating
-    `poll_live` on a pending start breaks lite-06 relays (no SUBSCRIBE_OK, so
-    the start resolves only with the first served group). Options: public
-    `Request::idle()` plus `Producer::set_live`; or `request_start` also
-    gating `poll_live`, accepting the lite-06 change.
+  - Still open: the public way to accept with content. Gating `poll_live`
+    on a pending start makes an IETF SUBSCRIBE_OK for an empty lite-06 track
+    wait for its first group (lite-06 resolves its start only with the first
+    served group), and a public runtime `set_live` is unwanted. Candidates:
+    write through the request before `accept`; a staged accept whose
+    `commit(self) -> Producer` publishes the track, rejecting if dropped; or
+    `accept` taking the initial content.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
   `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups
