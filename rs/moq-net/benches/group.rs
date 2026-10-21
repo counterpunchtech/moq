@@ -14,7 +14,10 @@
 //!
 //! Run with `cargo bench -p moq-net`.
 
-#![expect(clippy::disallowed_methods, reason = "`iter_custom` timings measure the host clock on purpose")]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "`iter_custom` timings measure the host clock on purpose"
+)]
 
 use std::{
 	hint::black_box,
