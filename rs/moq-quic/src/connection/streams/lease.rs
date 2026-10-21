@@ -119,7 +119,8 @@ pub enum LeaseError {
     ///
     /// The peer has not been told: stop the stream with [`RecvStream::stop()`] and a code of the
     /// caller's choosing. Until then the peer may keep sending, which costs bandwidth but no
-    /// window, since it is credited on arrival.
+    /// window, since it is credited on arrival, and the bytes the reader took keep their credit,
+    /// which holds further eviction off.
     #[error("evicted")]
     Evicted,
     /// More bytes were wanted than the connection receive window can ever hold.
@@ -284,6 +285,11 @@ impl RecvStream<'_> {
         if !lease.evicted {
             return false;
         }
+        // Eviction paused for this stop; what it returned may only have paid debt.
+        if let Some(transmit) = self.state.evict_if_stuck() {
+            self.pending.max_data |= transmit.should_transmit();
+            self.state.queue_max_stream_id(self.pending);
+        }
         let receiving = self
             .state
             .recv
@@ -336,7 +342,9 @@ impl StreamsState {
     /// stream read without leases returns its credit as it reads.
     ///
     /// Credit freed while a shrunk window is in debt pays that first and may advertise nothing,
-    /// so eviction continues until the peer has credit again or no candidate is left.
+    /// so eviction continues until the peer has credit again or no candidate is left. It pauses
+    /// while an evicted reader still holds bytes it took, which keep their credit until it stops
+    /// the stream, so a pass never evicts more than that stop would have freed.
     /// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
     /// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
     pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
@@ -347,6 +355,9 @@ impl StreamsState {
             && let Some(Reverse((_, Reverse(id)))) = victims.pop()
         {
             transmit = Some(self.evict(id));
+            if self.leases.get(&id).is_some_and(|lease| lease.held > 0) {
+                break;
+            }
         }
         transmit
     }
@@ -377,8 +388,12 @@ impl StreamsState {
             }
             victims.push(rank(lease.map_or(0, |lease| lease.priority), id));
         }
-        // A lease outlives its stream state once the last byte is read.
         for (&id, lease) in &self.leases {
+            // Its reader has yet to stop the stream, which returns the credit of what it took.
+            if lease.evicted && lease.held > 0 {
+                return None;
+            }
+            // A lease outlives its stream state once the last byte is read.
             if lease.held > 0 && !lease.evicted && !self.recv.contains_key(&id) {
                 victims.push(rank(lease.priority, id));
             }
@@ -387,13 +402,16 @@ impl StreamsState {
         Some(BinaryHeap::from(victims))
     }
 
-    /// Discard everything `id` holds, returning its credit, and fail its next lease.
+    /// Discard everything `id` buffers, returning its credit, and fail its next lease.
+    ///
+    /// Bytes the reader took live on outside the connection until it stops the stream, so their
+    /// credit stays held until then.
     fn evict(&mut self, id: StreamId) -> ShouldTransmit {
         tracing::debug!(%id, "evicting a stream to free a stuck receive window");
         let lease = self.leases.entry(id).or_default();
-        let held = std::mem::take(&mut lease.held);
+        let held = std::mem::take(&mut lease.len);
+        lease.held -= held;
         lease.chunks.clear();
-        lease.len = 0;
         lease.want = None;
         lease.ready = false;
         lease.evicted = true;

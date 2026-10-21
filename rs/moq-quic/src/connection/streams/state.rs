@@ -3421,34 +3421,82 @@ mod tests {
     }
 
     /// Credit an eviction frees pays a shrunk window's debt first, so eviction goes on until the
-    /// peer has credit again; stopping at one victim would leave the other reader and the peer
+    /// peer has credit again; stopping at one victim would leave the other readers and the peer
     /// waiting on each other.
     #[test]
     fn stuck_window_evicts_past_shrink_debt() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+        }
+        assert_eq!(readable(&mut client), ids);
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(3 * WINDOW / 2).unwrap());
+
+        let want = WINDOW as usize + 1;
+        assert!(matches!(
+            wait(&mut client, ids[0], want),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 2);
+        assert_eq!(readable(&mut client), [ids[2], ids[1]], "newest first");
+        assert_eq!(client.local_max_data, max_data + WINDOW / 2);
+        assert!(!client.leased(ids[0]).unwrap().evicted);
+    }
+
+    /// Bytes a reader took outlive an eviction until it stops the stream, so their credit
+    /// returns only then, and nothing else is evicted meanwhile.
+    #[test]
+    fn evicted_taken_bytes_keep_credit_until_stop() {
         const WINDOW: u64 = 1000;
         let (mut client, ids) = stuck(WINDOW);
         let mut pending = Retransmits::default();
         for id in ids {
             data(&mut client, id, 0, WINDOW as usize, false);
             assert_eq!(lease(&mut client, id), WINDOW as usize);
-            // Taken, so a wait for the next unit stays within the shrunk window.
             let _ = recv(&mut client, &mut pending, id).take(WINDOW as usize);
         }
         assert_eq!(readable(&mut client), ids);
         let max_data = client.local_max_data;
-        client.set_receive_window(VarInt::from_u64(WINDOW / 2).unwrap());
+        // Debt as large as one stream's bytes, so the first stop only pays it.
+        client.set_receive_window(VarInt::from_u64(WINDOW).unwrap());
 
         assert!(matches!(
             wait(&mut client, ids[0], 1),
             Err(LeaseError::Blocked(_))
         ));
+        assert_eq!(readable(&mut client), [ids[1]]);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(
+            client.credit_stats().leased,
+            2 * WINDOW,
+            "taken credit stays held"
+        );
+        assert!(matches!(
+            wait(&mut client, ids[0], 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
+        assert_eq!(wait(&mut client, ids[1], 1), Err(LeaseError::Evicted));
+
+        // The stop pays the debt alone, so eviction resumes with the other stream.
+        let _ = stop(&mut client, ids[1], 0);
+        assert_eq!(client.local_max_data, max_data);
         assert_eq!(client.credit_stats().evicted, 2);
-        assert_eq!(readable(&mut client), [ids[1], ids[0]], "newest first");
-        for id in ids {
-            assert_eq!(wait(&mut client, id, 1), Err(LeaseError::Evicted));
-        }
+        assert_eq!(readable(&mut client), [ids[0]]);
+        let _ = stop(&mut client, ids[0], 0);
         assert_eq!(client.credit_stats().leased, 0);
-        assert_eq!(client.local_max_data, max_data + WINDOW / 2);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
     }
 
     /// Once the peer has spent the window and every reader waits for more than it has, the
@@ -3515,7 +3563,8 @@ mod tests {
     }
 
     /// A frame past the window: once its taken bytes fill the window, waiting for one more
-    /// evicts it like any stuck holder, so its group reads as evicted rather than broken.
+    /// evicts it like any stuck holder, so its group reads as evicted rather than broken. The
+    /// credit returns when the reader stops the stream and lets go of what it took.
     #[test]
     fn a_frame_past_the_window_is_evicted() {
         const WINDOW: u64 = 1000;
@@ -3531,6 +3580,12 @@ mod tests {
             Err(LeaseError::Blocked(ShouldTransmit(true)))
         );
         assert_eq!(wait(&mut client, frame, 1), Err(LeaseError::Evicted));
+        assert_eq!(
+            client.local_max_data, WINDOW,
+            "the taken bytes are still held"
+        );
+        drop(taken);
+        let _ = stop(&mut client, frame, 0);
         assert_eq!(
             client.local_max_data,
             2 * WINDOW,

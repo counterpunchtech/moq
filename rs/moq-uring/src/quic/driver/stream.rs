@@ -267,9 +267,10 @@ impl RecvStream {
 	///
 	/// When the peer has spent the connection window and no reader can make
 	/// progress, the stream ranked lowest by [`Self::set_priority`] is
-	/// evicted: its bytes and credit are discarded and its next lease fails
-	/// with [`Error::Evicted`]. Nothing is evicted while the leased and unread
-	/// bytes of every stream stay below the connection receive window.
+	/// evicted: its buffered bytes and their credit are discarded and its next
+	/// lease fails with [`Error::Evicted`]. Bytes it took keep their credit
+	/// until the stream is stopped. Nothing is evicted while the leased and
+	/// unread bytes of every stream stay below the connection receive window.
 	///
 	/// Do not mix with the plain reads on one stream, which skip the leased
 	/// bytes.
