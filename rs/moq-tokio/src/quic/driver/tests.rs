@@ -1991,7 +1991,11 @@ async fn stuck_window_evicts_the_lower_priority() {
         client.open_uni(Default::default()).await.unwrap(),
         client.open_uni(Default::default()).await.unwrap(),
     ]
-    .map(|mut send| tokio::spawn(async move { send.write_all(&[7; WINDOW]).await.is_ok() }));
+    .map(|mut send| {
+        tokio::spawn(
+            async move { send.write_all(&[7; WINDOW]).await.is_ok() && send.finish().is_ok() },
+        )
+    });
 
     let mut low = server.accept_uni().await.unwrap();
     let mut high = server.accept_uni().await.unwrap();
