@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A client session asks only about what its readers watch
+### A client session asks only about what its readers watch (#6165)
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
 It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
@@ -14,6 +14,15 @@ A broadcast resolved through a discovered route keeps its path watched until dro
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
 moq-transport sessions are unchanged.
+
+### A claim answers by publishing (#5678)
+
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
+`Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
+`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)
 
