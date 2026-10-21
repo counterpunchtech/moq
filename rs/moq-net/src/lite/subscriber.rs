@@ -1989,12 +1989,12 @@ mod tests {
 	const VERSION: Version = Version::Lite05;
 
 	/// A pre-lite-05 relay's track, untimed, with a fetch of `sequence` queued on it.
-	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::GroupFill) {
+	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::Fill) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.dynamic();
 		let fetching = track.consume().fetch_group(sequence, None);
-		let req = dynamic.requested_fill_group().now_or_never().expect("queued").unwrap();
+		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		(track, fetching, req)
 	}
 
@@ -2038,7 +2038,7 @@ mod tests {
 		let (track, fetching, req) = feed_fetch(100);
 
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1, "held while its caller waits");
 
@@ -2059,7 +2059,7 @@ mod tests {
 		arrive(&track, &tail, 0, start);
 
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		arrive(&track, &tail, 2, start);
 		let late = start + crate::tail::GRACE / 2;
 		fetches.poll(&sub, late, &kio::Waiter::noop());
@@ -2088,7 +2088,7 @@ mod tests {
 		arrive(&track, &tail, 2, start);
 
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start + crate::tail::GRACE, &kio::Waiter::noop());
 		assert!(fetches.held.is_empty());
 		assert!(matches!(fetching.now_or_never(), Some(Err(Error::NotFound))));
@@ -2140,7 +2140,7 @@ mod tests {
 			let now = crate::time::Instant::now();
 			let clock = crate::time::Deadlines::new(now);
 			let mut fetches = FeedFetches::new(&clock);
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 			fetches.poll(&sub, now, &kio::Waiter::noop());
 			assert_eq!(
 				fetches.held.len(),
@@ -2166,7 +2166,7 @@ mod tests {
 	) -> (
 		track::Producer,
 		Vec<kio::Pending<track::Fetching>>,
-		Vec<track::GroupFill>,
+		Vec<track::Fill>,
 	) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
@@ -2175,7 +2175,7 @@ mod tests {
 		let mut requests = Vec::new();
 		for sequence in sequences {
 			callers.push(track.consume().fetch_group(sequence, None));
-			requests.push(dynamic.requested_fill_group().now_or_never().expect("queued").unwrap());
+			requests.push(dynamic.requested_fill().now_or_never().expect("queued").unwrap());
 		}
 		(track, callers, requests)
 	}
@@ -2197,7 +2197,7 @@ mod tests {
 		let wakes = Arc::new(Wakes::default());
 		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &waiter);
 		wakes.0.store(0, atomic::Ordering::Relaxed);
 		drop(caller);
@@ -2243,7 +2243,7 @@ mod tests {
 		let mut fetches = FeedFetches::new(&clock);
 		let (track, _callers, requests) = feed_batch(0..32);
 		for req in requests {
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 		}
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
@@ -2264,7 +2264,7 @@ mod tests {
 		let (track, _callers, requests) = feed_batch([1, 3, 5, 1000]);
 		let mut fetches = FeedFetches::new(&clock);
 		for req in requests {
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 		}
 		arrive(&track, &tail, 0, start);
 		arrive(&track, &tail, 2, start);
@@ -2292,7 +2292,7 @@ mod tests {
 		let (mut track, _callers, requests) = feed_batch([1, 3, 5, 1000]);
 		let mut fetches = FeedFetches::new(&clock);
 		for req in requests {
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 		}
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
@@ -2321,7 +2321,7 @@ mod tests {
 		let (track, mut callers, requests) = feed_batch([1, 3, 5]);
 		let mut fetches = FeedFetches::new(&clock);
 		for req in requests {
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 		}
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
@@ -2334,6 +2334,44 @@ mod tests {
 		assert!(matches!(callers.remove(0).now_or_never(), Some(Err(Error::NotFound))));
 	}
 
+	/// A peer that starts its feed far past a reader's floor makes the reader's miss wide.
+	/// Holding it settles what the feed gave up by run, in one poll, rather than holding or
+	/// refusing its groups one at a time.
+	#[moq_clock::test]
+	async fn a_wide_feed_fill_settles_by_run() {
+		const WIDE: u64 = 1 << 40;
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Deadlines::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let info = track::Info::default().with_timescale(None);
+		let mut track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let dynamic = track.dynamic();
+		let mut reader = track.subscribe(
+			Subscription::default()
+				.with_groups(0..)
+				.with_max_delay(Duration::from_secs(30)),
+		);
+		track.start_at(WIDE).unwrap();
+		arrive(&track, &tail, WIDE, start);
+		let waiter = kio::Waiter::noop();
+		// Reading judges the reader's misses.
+		let _ = reader.poll_recv_group(&waiter);
+		let fill = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
+		assert_eq!((fill.start().group, fill.end()), (0, WIDE));
+
+		let mut fetches = FeedFetches::new(&clock);
+		fetches.push(fill, &track.consume());
+		fetches.poll(&sub, start, &waiter);
+		assert!(fetches.held.is_empty(), "the feed starts past every group of it");
+		assert_eq!(fetches.polled, 1);
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		assert!(
+			dynamic.requested_fill().now_or_never().is_none(),
+			"a refusal is not asked again"
+		);
+	}
+
 	#[moq_clock::test]
 	async fn the_feed_track_backstop_refuses_the_next_group() {
 		let start = crate::time::Instant::now();
@@ -2344,7 +2382,7 @@ mod tests {
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.max = 2;
 		for req in requests {
-			fetches.push(req, track.consume());
+			fetches.push(req, &track.consume());
 		}
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 2);
@@ -2364,16 +2402,16 @@ mod tests {
 		let (track, caller, req) = feed_fetch(1);
 		let dynamic = track.dynamic();
 		let mut fetches = FeedFetches::new(&clock);
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		drop(caller);
 		let next = track.consume().fetch_group(1, None);
 		let req = dynamic
-			.requested_fill_group()
+			.requested_fill()
 			.now_or_never()
 			.expect("replacement queued")
 			.unwrap();
-		fetches.push(req, track.consume());
+		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1);
 		arrive(&track, &tail, 1, start);
@@ -2471,9 +2509,9 @@ mod tests {
 							let mut fetches = FeedFetches::new(&clock);
 							for req in requests {
 								if indexed {
-									fetches.push(req, track.consume());
+									fetches.push(req, &track.consume());
 								} else {
-									scan.held.push((req, track.consume()));
+									scan.held.push((req.group(req.start().group), track.consume()));
 								}
 							}
 							if indexed {
@@ -6540,10 +6578,15 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	},
 }
 
-/// Fetches a pre-lite-05 upstream has no FETCH for, held while the live subscription may
-/// still deliver the group. A group the feed delivers lands in the cache, where a waiting
-/// fetch reads it once its request is dropped.
+/// Fills a pre-lite-05 upstream has no FETCH for, held while the live subscription may
+/// still deliver their groups. A group the feed delivers lands in the cache, where the fill
+/// answers it.
+///
+/// A fill waits on one group at a time, the next it still owes. Each verdict on that group
+/// also settles, by run, every group of the fill the feed gave up on, so a fill a peer
+/// made wide costs what the cache and ledger hold rather than its width.
 struct FeedFetches {
+	/// Each fill, by the group it waits on.
 	held: BTreeMap<u64, HeldFetch>,
 	ready: kio::Shared<BTreeSet<u64>>,
 	arrivals: Option<track::Arrivals>,
@@ -6556,8 +6599,10 @@ struct FeedFetches {
 }
 
 struct HeldFetch {
-	req: track::GroupFill,
+	fill: track::Fill,
 	waiter: kio::Waiter,
+	/// Not judged yet: what the feed already gave up on is settled at once.
+	fresh: bool,
 }
 
 struct FetchWake {
@@ -6587,16 +6632,10 @@ impl FeedFetches {
 		}
 	}
 
-	/// Hold every group of `fill` for the live feed.
-	fn push_fill(&mut self, fill: track::Fill, feed: &track::Consumer) {
-		for sequence in fill.start().group..fill.end() {
-			self.push(fill.group(sequence), feed.clone());
-		}
-	}
-
-	fn push(&mut self, req: track::GroupFill, feed: track::Consumer) {
+	/// Hold `fill` for the live feed.
+	fn push(&mut self, fill: track::Fill, feed: &track::Consumer) {
 		let Some(arrivals) = feed.arrivals() else {
-			req.reject(Error::NotFound);
+			fill.drop_groups(fill.start().group..fill.end());
 			return;
 		};
 		if let Some(previous) = &self.arrivals {
@@ -6604,21 +6643,28 @@ impl FeedFetches {
 		} else {
 			self.arrivals = Some(arrivals);
 		}
-		let sequence = req.sequence();
+		if self.held.len() >= self.max {
+			fill.refuse(Error::TooManyRequests);
+			return;
+		}
+		self.hold(fill, true);
+	}
+
+	/// Wait on the next group `fill` still owes, if any.
+	fn hold(&mut self, fill: track::Fill, fresh: bool) {
+		let Some(sequence) = fill.next() else {
+			return;
+		};
 		// The last caller may leave and a replacement attempt arrive before the
 		// queued cancellation gets polled. The old attempt owns no callers now.
 		if let Some(previous) = self.held.remove(&sequence) {
-			debug_assert!(previous.req.poll_unused(&kio::Waiter::noop()).is_ready());
-		}
-		if self.held.len() >= self.max {
-			req.reject(Error::TooManyRequests);
-			return;
+			debug_assert!(previous.fill.poll_unused(&kio::Waiter::noop()).is_ready());
 		}
 		let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(FetchWake {
 			sequence,
 			ready: self.ready.clone(),
 		})));
-		self.held.insert(sequence, HeldFetch { req, waiter });
+		self.held.insert(sequence, HeldFetch { fill, waiter, fresh });
 		self.ready.lock().insert(sequence);
 	}
 
@@ -6630,7 +6676,7 @@ impl FeedFetches {
 	) {
 		let Sub::Active(_) = sub else {
 			for (_, held) in std::mem::take(&mut self.held) {
-				held.req.reject(Error::NotFound);
+				held.fill.drop_groups(held.fill.start().group..held.fill.end());
 			}
 			let mut ready = self.ready.lock();
 			if !ready.is_empty() {
@@ -6671,37 +6717,53 @@ impl FeedFetches {
 			Poll::Pending => BTreeSet::new(),
 		};
 		let _ = self.ready.poll(waiter, |_| Poll::<()>::Pending);
+		let mut unused = Vec::new();
 		let mut settled = Vec::new();
 		for sequence in ready {
-			let Some(held) = self.held.remove(&sequence) else {
+			let Some(mut held) = self.held.remove(&sequence) else {
 				continue;
 			};
 			#[cfg(test)]
 			{
 				self.polled += 1;
 			}
-			if held.req.poll_unused(&held.waiter).is_ready() {
-				settled.push((held.req, None));
+			if held.fill.poll_unused(&held.waiter).is_ready() {
+				unused.push(held.fill);
 				continue;
 			}
-			match arrivals.poll_group(sequence, now, &held.waiter) {
-				Poll::Ready(Some(_)) => settled.push((held.req, None)),
-				Poll::Ready(None) => settled.push((held.req, Some(Error::NotFound))),
-				Poll::Pending => {
-					self.held.insert(sequence, held);
-				}
+			let verdict = arrivals.poll_group(sequence, now, &held.waiter);
+			if verdict.is_pending() && !held.fresh {
+				self.held.insert(sequence, held);
+				continue;
 			}
+			let gone = arrivals.given_up(held.fill.start().group..held.fill.end(), now);
+			if verdict.is_pending() && gone.is_empty() {
+				held.fresh = false;
+				self.held.insert(sequence, held);
+				continue;
+			}
+			settled.push((held.fill, verdict.is_ready().then_some(sequence), gone));
 		}
 		let fold = arrivals
 			.folds()
 			.filter_map(|(gap, at)| self.held.range(gap).next().map(|_| at))
 			.min();
-		// Requests own track producers: releasing one takes the track lock too.
+		// Fills own track producers: answering or releasing one takes the track lock too.
 		drop(arrivals);
-		for (req, err) in settled {
-			if let Some(err) = err {
-				req.reject(err);
+		drop(unused);
+		for (fill, decided, gone) in settled {
+			for groups in gone.iter() {
+				fill.drop_groups(groups.clone());
 			}
+			// The group waited on is settled, so the fill moves past it: one landed without
+			// the frames the fill starts from is no answer, and the cache serves what it has.
+			if let Some(sequence) = decided
+				&& fill.next() == Some(sequence)
+			{
+				fill.drop_groups(sequence..sequence + 1);
+			}
+			// Waits on the next group it owes, judged on the poll its readiness wakes.
+			self.hold(fill, false);
 		}
 		self.fold.set(fold);
 		let _ = self.fold.poll(waiter);
@@ -6821,7 +6883,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							} else {
 								// No FETCH on the wire: wait for the live feed, which a
 								// subscription arriving alongside may still be opening.
-								self.feed_fetches.push_fill(fill, &self.serving.consume());
+								self.feed_fetches.push(fill, &self.serving.consume());
 							}
 							continue;
 						}

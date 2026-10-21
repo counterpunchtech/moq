@@ -175,13 +175,13 @@ impl Misses {
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
 				match answer {
+					// What the cache holds is filled, and the rest settled by run: a fill that
+					// ended unanswered may span far more groups than were ever cached.
 					Ok(()) => {
-						for sequence in groups {
-							match state.lookup.get(&sequence).is_some_and(|slot| !slot.is_aborted()) {
-								true => {
-									self.filled.insert(sequence);
-								}
-								false => self.settle(&state, sequence..sequence + 1, given_up),
+						self.settle(&state, groups.clone(), given_up);
+						for (&sequence, slot) in state.lookup.range(groups) {
+							if !slot.is_aborted() {
+								self.filled.insert(sequence);
 							}
 						}
 					}
@@ -422,8 +422,9 @@ impl TrackState {
 	) -> (RangeSet<u64>, Vec<(ops::Range<u64>, Option<crate::time::Instant>)>) {
 		let mut unfed = RangeSet::new();
 		let mut awaited = Vec::new();
-		// Nothing more arrives after an abort, a seal, or a settled end.
-		if self.abort.is_some() || self.sealed || (self.end.is_some() && !self.tail_pending) {
+		// Nothing more arrives after an abort, a seal, or once the live edge reached a
+		// declared end with no tail owed: until then, a group below the end may still arrive.
+		if self.abort.is_some() || self.is_complete() {
 			unfed.insert(hole);
 			return (unfed, awaited);
 		}

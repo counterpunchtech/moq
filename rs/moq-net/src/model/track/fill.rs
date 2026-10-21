@@ -491,6 +491,14 @@ impl Fill {
 		}
 	}
 
+	/// Refuse every group still owed with `err`, which says nothing about whether the source
+	/// has them, so nothing is recorded dropped.
+	// private: capability gap
+	pub(crate) fn refuse(&self, err: Error) {
+		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
+		self.inner.refuse(&unresolved, err);
+	}
+
 	/// A handle on group `sequence` alone, for a session serving the fill one group at a time.
 	// private: capability gap
 	pub(crate) fn group(&self, sequence: u64) -> GroupFill {

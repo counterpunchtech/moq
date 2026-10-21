@@ -3854,6 +3854,48 @@ impl ArrivalRead<'_> {
 			res => res,
 		}
 	}
+
+	/// The groups of `groups` [`Self::poll_group`] gives up on, judged by run, so a span a
+	/// peer made wide costs what the cache and ledger hold rather than its width.
+	// Legacy wires lack FETCH, so a held fill settles what the feed gave up in bulk.
+	// private: capability gap
+	pub(crate) fn given_up(&self, groups: ops::Range<u64>, now: crate::time::Instant) -> RangeSet<u64> {
+		let state = &*self.state;
+		let mut gone = RangeSet::new();
+		let mut give_up = |groups: ops::Range<u64>| {
+			if !groups.is_empty() {
+				gone.insert(groups);
+			}
+		};
+		let closed = self.state.is_closed();
+		let start = state.start_sequence.unwrap_or(0);
+		let fin = state.final_sequence().unwrap_or(u64::MAX);
+		for hole in miss::holes(state, groups) {
+			if closed {
+				give_up(hole);
+				continue;
+			}
+			give_up(hole.start..hole.end.min(start));
+			give_up(hole.start.max(fin)..hole.end);
+			for dropped in state.drops.overlapping(&hole) {
+				give_up(dropped.start.max(hole.start)..dropped.end.min(hole.end));
+			}
+			// Every group of a gap folds at once: its grace runs from the run above it.
+			let folded = |gap: u64| state.arrivals.folds_at(gap, self.grace).is_some_and(|at| at <= now);
+			let mut from = hole.start;
+			for arrived in state.arrivals.accounted(hole.clone()) {
+				if from < arrived.start && folded(from) {
+					give_up(from..arrived.start);
+				}
+				from = arrived.end;
+				give_up(arrived);
+			}
+			if from < hole.end && folded(from) {
+				give_up(from..hole.end);
+			}
+		}
+		gone
+	}
 }
 
 /// A lazy handle to a single track within a broadcast.
@@ -15022,6 +15064,24 @@ mod test {
 		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 	}
 
+	/// An end declared ahead of the live edge does not end the feed yet: a group missing
+	/// below the edge may still arrive, so it is not named dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_end_ahead_of_the_edge_keeps_a_late_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_groups(0..));
+		for sequence in [0, 1, 2, 4, 5] {
+			write_group(&producer, sequence);
+		}
+		producer.finish_at(Position::group(10)).unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0, 1, 2, 4, 5]);
+		assert!(drained_drops(&mut subscriber).is_empty(), "group 3 may still arrive");
+		write_group(&producer, 3);
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+		assert!(drained_drops(&mut subscriber).is_empty());
+	}
+
 	/// With no handler to fill it, a miss is named dropped once the feed gives up on it.
 	#[test]
 	#[cfg(feature = "async")]
@@ -15038,6 +15098,26 @@ mod test {
 		assert!(drained_drops(&mut subscriber).is_empty());
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+	}
+
+	/// A fill whose handler leaves before taking it settles by run: a peer that starts its
+	/// feed far past the reader's floor makes the miss wide, and walking it group by group
+	/// would never finish.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_wide_fill_its_handler_left_settles_by_run() {
+		const WIDE: u64 = 1 << 40;
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_groups(0..));
+		producer.start_at(WIDE).unwrap();
+		write_group(&producer, WIDE);
+		assert_eq!(drain_groups(&mut subscriber), [WIDE]);
+		drop(dynamic);
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		assert!(drained_drops(&mut subscriber).is_empty(), "the feed may still deliver them");
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [(0, WIDE)]);
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
