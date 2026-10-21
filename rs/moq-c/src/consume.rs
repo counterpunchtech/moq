@@ -124,9 +124,11 @@ async fn resolve(
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
 	let source = moq_mux::Source::new(origin.inner, broadcast);
+	// The C ABI does not expose a reference's epoch yet, so it reads like an older reader: the
+	// first instance resolved, without the epoch's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(Some(&reference.borrow())).await?) })
+		.watch(async { Ok(source.resolve(Some(&reference.borrow()), None).await?) })
 		.await
 }
 
@@ -222,13 +224,6 @@ impl Consume {
 		origin: Option<crate::origin::Consumer>,
 	) -> Result<Id, Error> {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
-	}
-
-	/// Whether the caller still holds `id` as a handle to `broadcast`.
-	pub fn holds(&self, id: Id, broadcast: &moq_net::broadcast::Consumer) -> bool {
-		self.broadcast
-			.get(id)
-			.is_some_and(|held| held.broadcast.is_clone(broadcast))
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {

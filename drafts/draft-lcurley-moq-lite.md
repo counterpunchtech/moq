@@ -36,6 +36,14 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
+  moqflate:
+    title: "DEFLATE Compressed Tracks for MoQ"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 --- abstract
 
@@ -793,6 +801,7 @@ DATAGRAM Body {
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
+  [Inflated Size (i)]
   Payload (b)
 }
 ~~~
@@ -807,6 +816,10 @@ The absolute sequence number of the group carried by this datagram.
 **Timestamp**:
 The absolute timestamp of the single frame in the group, expressed in the Track's `Timescale`.
 Present only on a timed Track, which the receiver learns from the subscription named by `Subscribe ID`.
+
+**Inflated Size**:
+The size of the payload once inflated.
+Present only when the Track's Compression is not none; the datagram payload is then compressed alone, as a stream of its own.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
@@ -1306,6 +1319,7 @@ TRACK_INFO Message {
   Publisher Max Age (i)
   Timescale (i)
   Refresh (i)
+  [Compression (i)]
 }
 ~~~
 
@@ -1344,6 +1358,13 @@ On a live-edge join, a publisher asks for a group beyond every sequence already 
 Joins coalesce until the requested group arrives.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
 Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
+
+**Compression**:
+Present from lite-07.
+How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
+Any other value is a PROTOCOL_VIOLATION.
+When Compression is not none, FRAME messages and datagrams carry an `Inflated Size`.
+A publisher that cannot send this field, on lite-06 and earlier, MUST send the Track's frames inflated instead.
 
 ## TRACKS {#tracks}
 TRACKS is sent by a subscriber to list a Broadcast's Tracks.
@@ -1474,7 +1495,8 @@ SUBSCRIBE_DROP Message {
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
-**Error Code** is an application-specific error code; 0 means the groups are simply unavailable.
+**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example NOT_FOUND for a sequence the publisher never had, or OLD for one past its budget.
+A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream, send a datagram, or name it in SUBSCRIBE_DROP.
 This includes sequences it skipped and streams reset before their headers were delivered.
@@ -1701,6 +1723,7 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   [Timestamp Delta (i)]
+  [Inflated Size (i)]
   Message Length (i)
   Payload (b)
 }
@@ -1717,6 +1740,11 @@ Encoded as a zigzag-mapped variable-length integer:
 Zigzag interleaves non-negative and negative values so small magnitudes of either sign fit in a 1-byte varint.
 The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
 
+**Inflated Size**:
+The size of the payload once inflated.
+Present only when the Track's Compression is not none; the payload is then the next slice of the Group's compressed stream.
+A receiver MUST check it against its limits before inflating, and MUST treat a payload that inflates to any other size as malformed.
+
 **Payload**:
 An application-specific payload.
 The `Message Length` describes the payload size on the wire.
@@ -1728,6 +1756,8 @@ The `Message Length` describes the payload size on the wire.
 
 - Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
+
+- Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
@@ -1765,6 +1795,7 @@ The `Message Length` describes the payload size on the wire.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
+- SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving. In lite-05 and lite-06 it is application-specific, so a subscriber there reads every drop as NOT_FOUND.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.

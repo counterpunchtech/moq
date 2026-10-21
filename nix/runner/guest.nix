@@ -12,7 +12,17 @@
 }:
 
 {
-  imports = [ (modulesPath + "/profiles/qemu-guest.nix") ];
+  imports = [
+    (modulesPath + "/profiles/qemu-guest.nix")
+    ./image.nix
+  ];
+
+  assertions = [
+    {
+      assertion = resources.disk >= 8;
+      message = "Runner guests and migrations need at least 8 GiB for the base image.";
+    }
+  ];
 
   networking = {
     hostName = "github-runner";
@@ -31,7 +41,11 @@
     ];
   };
   boot = {
-    loader.grub.device = "/dev/vda";
+    loader = {
+      grub.enable = false;
+      systemd-boot.enable = true;
+      efi.canTouchEfiVariables = false;
+    };
     kernelParams = [ "console=ttyS0" ];
     kernelModules = [ "qemu_fw_cfg" ];
     growPartition = true;
@@ -41,18 +55,31 @@
   };
   fileSystems."/" = {
     device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
+    fsType = "xfs";
     autoResize = true;
+  };
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/ESP";
+    fsType = "vfat";
+    options = [ "umask=0077" ];
   };
   system.stateVersion = "26.05";
 
-  system.build.image = import (modulesPath + "/../lib/make-disk-image.nix") {
-    inherit config lib pkgs;
-    format = "qcow2";
-    partitionTableType = "legacy";
-    diskSize = "auto";
-    additionalSpace = "1G";
-    copyChannel = false;
+  # Build the offline migration tool with the same image and disk budget.
+  system.build.runner-migrate = pkgs.writeShellApplication {
+    name = "runner-migrate";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gptfdisk
+      libguestfs-with-appliance
+      psmisc
+      qemu_kvm
+    ];
+    text = ''
+      runner_image=${config.system.build.image}/${config.image.fileName}
+      runner_capacity=${toString resources.disk}G
+      ${builtins.readFile ./migrate.sh}
+    '';
   };
 
   services.openssh = {
@@ -158,6 +185,36 @@
   systemd.services.github-runner-runner = {
     requires = [ "runner-token.service" ];
     after = [ "runner-token.service" ];
+  };
+
+  # Free page reporting hands back only free pages. The disk bypasses the host's
+  # cache, so the guest's page cache keeps every file a job touched resident on the
+  # host until it is dropped between jobs.
+  systemd.services.runner-reclaim = {
+    serviceConfig.Type = "oneshot";
+    path = [ pkgs.procps ];
+    # A write-heavy build can leave sync running long enough for a job to start,
+    # so check again right before dropping.
+    script = ''
+      idle() {
+        if pgrep -f Runner.Worker >/dev/null; then
+          echo "A job is running; keeping caches."
+          return 1
+        fi
+      }
+      idle || exit 0
+      sync
+      idle || exit 0
+      echo 3 > /proc/sys/vm/drop_caches
+      echo "Dropped caches."
+    '';
+  };
+  systemd.timers.runner-reclaim = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5min";
+      OnUnitInactiveSec = "5min";
+    };
   };
 
   environment.systemPackages = with pkgs; [

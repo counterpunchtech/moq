@@ -11,6 +11,7 @@ mod keylog;
 mod max_age;
 mod receive_credit;
 mod reconnect;
+mod reset_secret;
 mod stream_code;
 mod subscription_end_integrity;
 mod unannounce;
