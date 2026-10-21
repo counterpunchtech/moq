@@ -360,35 +360,44 @@ where
 		drop(established);
 		drop(live);
 		request.skips.lock().clear();
-		match cancelled {
-			// A refused update left its REQUEST_ERROR buffered, so flush before the FIN. The
-			// PUBLISHes keep running while the peer acknowledges, however slowly.
-			Ok(()) => {
-				let mut finished = false;
-				let _ = broadcasts
-					.drive(|waiter| {
-						let mut cx = waiter.context();
-						if !finished {
-							if let Err(err) =
-								ready!(stream.writer.poll_flush(&mut cx)).and_then(|()| stream.writer.finish())
-							{
-								return Poll::Ready(Err(err));
-							}
-							finished = true;
-						}
-						stream.writer.poll_close(&mut cx)
-					})
-					.await;
+		// A refused update left its REQUEST_ERROR buffered, so a cancel flushes before the FIN.
+		let mut closing = match cancelled {
+			Ok(()) => Some(stream.writer),
+			Err(err) => {
+				stream.writer.abort(&err);
+				None
 			}
-			Err(err) => stream.writer.abort(&err),
-		}
+		};
+		let mut fin = false;
 
 		// The PUBLISHes already sent are subscriptions of their own, on their own streams,
-		// each ending once its broadcast does.
+		// each ending once its broadcast does, even while the peer is slow to take the close.
 		loop {
 			let event = kio::wait(|waiter| {
 				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() || broadcasts.poll(waiter).is_ready() {
+				if let Some(writer) = closing.as_mut() {
+					let closed = 'close: {
+						if !fin {
+							match writer.poll_flush(&mut cx) {
+								Poll::Pending => break 'close Poll::Pending,
+								Poll::Ready(res) => {
+									if res.and_then(|()| writer.finish()).is_err() {
+										break 'close Poll::Ready(());
+									}
+								}
+							}
+							fin = true;
+						}
+						writer.poll_close(&mut cx).map(|_| ())
+					};
+					if closed.is_ready() {
+						closing = None;
+					}
+				}
+				if session.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(None);
+				}
+				if broadcasts.poll(waiter).is_ready() && closing.is_none() {
 					return Poll::Ready(None);
 				}
 				announced.poll_next(waiter)
@@ -997,6 +1006,25 @@ where
 		}
 	}
 
+	/// End a PUBLISH whose resume failed with `err` before it joined. A REQUEST_UPDATE that
+	/// asked for it is owed an answer, so it is refused, which fails the update (draft-22
+	/// section 9.5). `Err(())` when the subscriber cancelled.
+	async fn resume_failed(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		answer: bool,
+		err: Error,
+	) -> Result<Served, ()> {
+		if !answer {
+			return Ok(Served::Track(Err(err)));
+		}
+		self.write_subscribe_error(&mut stream.writer, request_id, &err, "resume failed")
+			.await
+			.map_err(|_| ())?;
+		Ok(Served::UpdateFailed(err))
+	}
+
 	/// Forward a paused PUBLISH subscription from the cache with `params`, as a SUBSCRIBE
 	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
@@ -1051,8 +1079,8 @@ where
 		.await?;
 		let mut subscriber = match subscribed {
 			Some(Ok(subscriber)) => subscriber,
-			Some(Err(err)) => return Ok(Served::Track(Err(err))),
-			None => return Ok(unlisted()),
+			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
+			None => return self.resume_failed(stream, request_id, how.answer, Error::NotFound).await,
 		};
 		let live = kio::wait(|waiter| {
 			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
@@ -1065,7 +1093,7 @@ where
 		})
 		.await?;
 		if !live {
-			return Ok(unlisted());
+			return self.resume_failed(stream, request_id, how.answer, Error::NotFound).await;
 		}
 
 		let edge = live_edge(track);
@@ -1210,13 +1238,17 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
+		harness_with(version, memory::Config::default())
+	}
+
+	fn harness_with(version: Version, config: memory::Config) -> Harness {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room/cam", crate::origin::Route::default()).unwrap();
 		let tracks = ["video", "audio"]
 			.into_iter()
 			.map(|name| (name, broadcast.create_track(name, crate::track::Info::timed()).unwrap()))
 			.collect();
-		let (session, peer) = memory::pair(memory::Config::default());
+		let (session, peer) = memory::pair(config);
 		let setup = peer::PeerSetup::default();
 		setup.set(peer::Peer::default());
 		let publisher = Publisher::new(
@@ -2129,6 +2161,39 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert!(done.end(version).is_err(), "{version}: ended cleanly");
+		}
+	}
+
+	/// A listing ending through a refused update still unlists its tracks while the peer
+	/// withholds the credit its REQUEST_ERROR needs.
+	#[moq_clock::test]
+	async fn a_closing_listing_still_unlists() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let config = memory::Config {
+				stream_buffer: 32,
+				..Default::default()
+			};
+			let mut h = harness_with(version, config);
+			// The REQUEST_OK stays unread, leaving no room for the REQUEST_ERROR.
+			let mut request = h.request(&listing(false)).await;
+			let (mut stream, ..) = h.publish().await;
+			publish_ok(&mut stream).await;
+			let refused = ietf::SubscribeUpdate {
+				filter: None,
+				forward: None,
+				..update(2, false)
+			};
+			send(&mut request, &refused).await;
+			moq_clock::sleep(Duration::from_millis(10)).await;
+
+			// A new instance takes the path while the old one goes on: only its route ends.
+			let _restarted = h._origin.publish("room/cam", crate::origin::Route::default()).unwrap();
+			let (id, body) = next(&mut stream).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert!(done.end(version).is_err(), "{version}: ended cleanly");
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			assert_eq!(next(&mut request).await.0, ietf::RequestError::ID, "{version}");
 		}
 	}
 
