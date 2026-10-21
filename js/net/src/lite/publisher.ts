@@ -1092,17 +1092,18 @@ export class Publisher {
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: Run[] = [];
+		const skipped: { start: number; end: number; error: Error }[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
-		const drop = async (start: number, end: number): Promise<boolean> => {
+		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
+		// yet, given up with `err`.
+		const drop = async (start: number, end: number, err: Error): Promise<boolean> => {
 			if (!served) return true;
 			for (const gap of runGaps(served, start, end)) {
 				insertRun(served, gap.start, gap.end);
-				const msg = new SubscribeDrop({ start: gap.start, end: gap.end - 1, error: 0 });
+				const msg = SubscribeDrop.given(gap.start, gap.end - 1, err, this.version);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 					return false;
 			}
@@ -1150,7 +1151,7 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
-						if (!(await drop(Math.max(range.start, startSequence), range.end))) return false;
+						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
 					}
 					skipped.length = 0;
 				}
@@ -1230,8 +1231,8 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!startSent) insertRun(skipped, recv.start, recv.end);
-						else if (!(await drop(recv.start, recv.end))) return false;
+						if (!startSent) skipped.push({ start: recv.start, end: recv.end, error: recv.error });
+						else if (!(await drop(recv.start, recv.end, recv.error))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1281,7 +1282,8 @@ export class Publisher {
 						if (startSequence !== undefined) {
 							const end =
 								bounds.endGroup === undefined ? boundary() : Math.min(boundary(), bounds.endGroup + 1);
-							if (!(await drop(startSequence, end))) return false;
+							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
+							if (!(await drop(startSequence, end, unserved))) return false;
 						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
@@ -1309,6 +1311,9 @@ export class Publisher {
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
 					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					// A group given up cannot be where the feed starts. Adjacent runs given up with
+					// different errors stay separate, so walk them in order.
+					skipped.sort((a, b) => a.start - b.start);
 					for (const range of skipped) {
 						if (range.start <= startSequence && range.end > startSequence)
 							startSequence = Math.min(range.end, group.sequence);
@@ -1350,7 +1355,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(new SubscribeDrop({ start: group.sequence, end: group.sequence, error: 0 }));
+						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
 						drops.update((revision) => revision + 1);
 					}
 				});
