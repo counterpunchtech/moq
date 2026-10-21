@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `deltas=False` where you passed `delta_ratio=0`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
+Replace `request.accept(broadcast)` with `prepared = request.prepare(moq.mint_epoch())`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains a `TIME` variant, the group containing a presentation time.
