@@ -26,8 +26,7 @@ this is under 0.01% of a core.
   are what matches payload billing, and wire bytes can't give that. Nothing
   reads them yet. Deleting them was rejected anyway: the cost is negligible,
   and removing them would be a breaking change to the stats wire that would
-  have to be redone once a per-key or per-bucket view wants them. Letting
-  customers choose their own labels was considered and set aside for now.
+  have to be redone once a per-key or per-bucket view wants them.
 - Cheap fix: in `read()`, use `Arc::strong_count(&arrival.traffic) == 1` plus
   an `Acquire` fence instead of `Arc::get_mut`. This is valid only while no
   `Weak<SessionTraffic>` exists, so check that first. Return
