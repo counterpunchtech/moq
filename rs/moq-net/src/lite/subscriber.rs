@@ -588,9 +588,11 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	/// Aborts whatever is still subscribed when the session ends.
 	cleanup: SubscriptionCleanup,
-	/// One machine per permitted prefix. Only an error ends the session; a
+	/// Which prefixes to ask the peer about.
+	discovery: crate::discovery::Discovery,
+	/// One machine per prefix asked about. Only an error ends the session; a
 	/// prefix finishing cleanly (publisher FIN) just retires.
-	prefixes: Vec<AnnouncePrefix<S>>,
+	prefixes: HashMap<PathOwned, AnnouncePrefix<S>>,
 	uni: UniAccept<S>,
 	/// PROBE feedback; finishes quietly when unsupported or given up on.
 	bandwidth: Option<RecvBandwidth<S>>,
@@ -601,16 +603,10 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
-	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>) -> Self {
-		// The wire speaks announce interest by prefix: ask for each granted
-		// pattern's literal head and let the origin's scope filter what arrives.
-		let prefixes = crate::model::interest_prefixes(&subscriber.origin.allowed())
-			.into_iter()
-			.map(|prefix| AnnouncePrefix::new(subscriber.clone(), prefix))
-			.collect();
-
+	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>, client: bool) -> Self {
 		Self {
-			prefixes,
+			discovery: crate::discovery::Discovery::new(&subscriber.origin, client, subscriber.runtime.clone()),
+			prefixes: HashMap::new(),
 			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
 			uni: UniAccept::new(subscriber.clone(), early),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
@@ -634,14 +630,34 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut i = 0;
-		while i < self.prefixes.len() {
-			match self.prefixes[i].poll(waiter) {
-				Poll::Ready(Ok(())) => {
-					self.prefixes.swap_remove(i);
+		loop {
+			while let Poll::Ready(change) = self.discovery.poll(waiter) {
+				match change {
+					crate::discovery::Change::Open(prefix, snapshot) => {
+						let machine = AnnouncePrefix::new(self.subscriber.clone(), prefix.clone(), snapshot);
+						self.prefixes.insert(prefix, machine);
+					}
+					// Dropping the machine resets its stream, which the peer reads as the
+					// request ending, and retracts every route it reported.
+					crate::discovery::Change::Close(prefix) => {
+						self.prefixes.remove(&prefix);
+					}
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => i += 1,
+			}
+			let mut ended = Vec::new();
+			for (prefix, machine) in &mut self.prefixes {
+				match machine.poll(waiter) {
+					Poll::Ready(Ok(())) => ended.push(prefix.clone()),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => {}
+				}
+			}
+			if ended.is_empty() {
+				break;
+			}
+			for prefix in ended {
+				self.prefixes.remove(&prefix);
+				self.discovery.ended(&prefix);
 			}
 		}
 		if let Poll::Ready(res) = self.uni.poll(waiter) {
@@ -1495,15 +1511,14 @@ struct PrefixRun {
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
-	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
-		// Taken now, while the session is being set up, so a consumer of the origin never
-		// reads as synced before the request even goes out.
-		let snapshot = Some(subscriber.origin.snapshot(&prefix));
+	/// `snapshot` was taken when the prefix was first wanted, so a consumer of the
+	/// origin never reads as synced before the request even goes out.
+	fn new(subscriber: Subscriber<S>, prefix: PathOwned, snapshot: crate::model::Snapshot) -> Self {
 		Self {
 			subscriber,
 			prefix,
 			state: PrefixState::Open,
-			snapshot,
+			snapshot: Some(snapshot),
 		}
 	}
 
@@ -5011,7 +5026,7 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut prefix = AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot(""));
 		let mut cursor = consumer.announced();
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
@@ -5078,7 +5093,7 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		(AnnouncePrefix::new(subscriber, Path::new("").to_owned()), consumer)
+		(AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot("")), consumer)
 	}
 
 	/// The origin's consumers sync once the counted starts are in and read, never before.
@@ -5251,7 +5266,7 @@ mod tests {
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
-		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut prefix = AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot(""));
 
 		let err = kio::wait(|waiter| prefix.poll(waiter))
 			.await

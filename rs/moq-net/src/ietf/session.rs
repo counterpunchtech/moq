@@ -1491,7 +1491,8 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	origin: origin::Consumer,
 	mut session: S,
 ) -> Result<(), Error> {
-	let mut announced = origin.announced();
+	// Checking what we publish is not a local reader asking to discover anything.
+	let mut announced = origin.clone().serving().announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());

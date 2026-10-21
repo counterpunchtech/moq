@@ -345,7 +345,7 @@ where
 		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early),
+		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
 	};
 

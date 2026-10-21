@@ -729,7 +729,8 @@ where
 			runtime,
 			session,
 			self_origin: origin.hop(),
-			origin,
+			// Serving the peer is not a local reader asking to discover anything.
+			origin: origin.serving(),
 			control,
 			peer_hop,
 			peer_setup,
