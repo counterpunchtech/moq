@@ -3,11 +3,14 @@
 //! Implement these traits for a transport, or wrap a backend at the application
 //! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
-//! The async helpers only drive the required poll methods. Thread-local transports
-//! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
+//! The async helpers only drive the required poll methods. Sessions take a
+//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
 
+#[cfg(feature = "async")]
+pub(crate) mod boxed;
 pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
@@ -393,14 +396,16 @@ pub mod poll {
 		/// A pending [`RecvStream::closed`].
 		RecvClosed, RecvStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport whose session, streams, and errors can be captured by the
-	/// boxed drivers (`Send` boxes on native): what the moq-transport path
-	/// requires until it too becomes named machines. Implemented automatically.
+	/// A transport that [`Client`](crate::Client) and [`Server`](crate::Server) can box:
+	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// Implemented automatically.
+	///
+	/// Boxing is what compiles the session code once per binary rather than once per
+	/// transport.
 	pub trait Boxable:
 		Session<
-			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend,
-			Error: MaybeSend,
+			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend + MaybeSync,
 		> + MaybeSend
 		+ MaybeSync
 	{
@@ -408,9 +413,8 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend,
-				Error: MaybeSend,
+				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend + MaybeSync,
 			> + MaybeSend
 			+ MaybeSync
 	{
