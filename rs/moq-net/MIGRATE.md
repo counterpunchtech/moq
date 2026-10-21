@@ -18,6 +18,15 @@ Dropping a fill with groups unanswered names them dropped, where the live feed w
 The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
 A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
 
+### A claim answers by publishing (#5678)
+
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
+`Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
+`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
+
 ### Anchors can name a time (#6074)
 
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.

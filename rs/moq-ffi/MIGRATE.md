@@ -16,6 +16,12 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 
 `max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
 
+### A claim answers by publishing (#5678)
+
+`MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
+`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+
 ### `MoqTrackInfo` gains `compress` (#5928)
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.

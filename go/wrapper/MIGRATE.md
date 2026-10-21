@@ -15,6 +15,12 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
+Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
+
 ### `TrackInfo` gains `Compress` (#5928)
 
 A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.

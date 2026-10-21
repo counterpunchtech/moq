@@ -10,6 +10,12 @@ The ABI is unchanged. A track's dynamic handler now also gets group requests for
 `moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
 
+### A claim answers by publishing (#5678)
+
+`moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_prepared_free` refuses an answer you will not publish.
+
 ### `moq_track_info` gains `compress` (#5928)
 
 The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
