@@ -345,12 +345,21 @@ export class Broadcast {
 			};
 		}
 
+		// The snapshot outlives a clean end of the catalog track, so it clears with this run.
+		effect.cleanup(() => this.#raw.set(undefined));
+
 		effect.spawn(async () => {
 			let status: Status = "offline";
+			let finished = false;
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
-					if (!update) break;
+					// A finished catalog only means no more edits. A finished broadcast keeps serving
+					// its tail until it closes or is withdrawn, which reruns this, so keep playing it.
+					if (!update) {
+						finished = true;
+						break;
+					}
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
@@ -363,8 +372,10 @@ export class Broadcast {
 					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
-				this.#raw.set(undefined);
-				this.#out.status.set(status);
+				if (!finished) {
+					this.#raw.set(undefined);
+					this.#out.status.set(status);
+				}
 			}
 		});
 	}
