@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### CMAF decoding loads on demand
+
+Allow your bundler to emit and serve the dynamic `@moq/hang/cmaf` chunk when using CMAF renditions.
+Legacy and LOC playback do not download it; player calls and catalog formats are unchanged.
+Replace access through `Watch.Hang.Container.Cmaf` with an import from `@moq/hang/cmaf`.
+
 ### A newer catalog reports `unsupported`
 
 Handle `"unsupported"` in `Broadcast.out.status` by asking the viewer to update their player.
