@@ -28,6 +28,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
+import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
@@ -35,6 +36,7 @@ import {
 	hasProbeRtt,
 	hasSetupStream,
 	hasTrackStream,
+	hasTracks,
 	Version,
 	versionName,
 } from "./version.ts";
@@ -362,6 +364,10 @@ export class Connection implements Established {
 					await this.#publisher.runTrackInfo(msg, stream);
 				})(),
 			);
+		} else if (typ === StreamId.Tracks) {
+			if (!hasTracks(this.#version)) throw new Error("TRACKS is not supported on this version");
+			const msg = await TracksMessage.decode(stream.reader, this.#version);
+			await this.#publisher.runTracks(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
 				throw new Error("PROBE is not supported on this version");

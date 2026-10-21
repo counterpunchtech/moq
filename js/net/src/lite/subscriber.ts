@@ -9,11 +9,22 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
-import { error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause, unauthorized } from "../error.ts";
+import {
+	error,
+	ProtocolViolation,
+	reason,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+	sessionCause,
+	unauthorized,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import { grace } from "../ledger.ts";
+import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
@@ -50,6 +61,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
+import { decodeTracksEventMaybe, Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAnnounceId,
 	hasAnnounceOk,
@@ -60,6 +72,7 @@ import {
 	hasRefresh,
 	hasSynced,
 	hasTrackStream,
+	hasTracks,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -627,6 +640,8 @@ export class Subscriber {
 			},
 		};
 		const consumer = new ConsumeBroadcast(this, path, consumed);
+		// Registered before anyone can list the broadcast, so no reader syncs without the peer.
+		void this.#runListing(path, consumed, wireOf(consumer).lister());
 
 		void (async () => {
 			for (;;) {
@@ -637,6 +652,99 @@ export class Subscriber {
 		})();
 
 		return this.#consumes.insert(path, instance, consumer);
+	}
+
+	// Answer listings of a consumed broadcast from the peer's TRACKS while anyone lists it, until
+	// the broadcast closes. Every listing of the broadcast shares one TRACKS stream.
+	async #runListing(broadcast: Path.Valid, consumed: Consumed, lister: Lister) {
+		try {
+			for (;;) {
+				while (!lister.used.peek()) {
+					if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
+					await untilAborted(race([Signal.race(lister.used, lister.ended)]), this.#closed.signal).catch(
+						() => {},
+					);
+				}
+				if (!hasTracks(this.version)) {
+					// An empty answer would claim the peer lists nothing.
+					lister.abort(new Error("track listing requires moq-lite-07 or newer"));
+					continue;
+				}
+				// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
+				// so the peer's tracks follow as live adds.
+				lister.synced();
+				await this.#listTracks(broadcast, consumed, lister);
+			}
+		} finally {
+			lister.close();
+		}
+	}
+
+	// Forward the peer's TRACKS listing of `broadcast` into `lister` until the peer ends it, it
+	// fails, or nobody lists the broadcast any more.
+	async #listTracks(broadcast: Path.Valid, consumed: Consumed, lister: Lister): Promise<void> {
+		// Each listed track holds an announces slot: discovery state the peer makes us hold.
+		const listed = new Set<string>();
+		const unused = new AbortController();
+		const stop = AbortSignal.any([unused.signal, this.#closed.signal]);
+		const disposeUsed = lister.used.subscribe((used) => {
+			if (!used) unused.abort(new StreamError(StreamCode.Cancel, { message: "listing unused" }));
+		});
+		let stream: Stream | undefined;
+		try {
+			const opening = Stream.open(this.#quic, { version: this.version, ...requestOptions });
+			void opening.then(
+				(late) => {
+					if (stop.aborted) late.abort(error(stop.reason));
+				},
+				() => {},
+			);
+			stream = await untilAborted(opening, stop);
+			await stream.writer.u53(StreamId.Tracks);
+			await new TracksMessage(broadcast, consumed.epoch).encode(stream.writer, this.version);
+			let synced = false;
+			for (;;) {
+				const event = await untilAborted(decodeTracksEventMaybe(stream.reader, this.version), stop);
+				if (!event) {
+					// The peer's broadcast ended, whether or not its retraction has arrived: end the
+					// listing and let go of what it listed.
+					lister.finish();
+					return;
+				}
+				if (event.kind === "added") {
+					if (listed.has(event.name)) throw new ProtocolViolation(`track listed twice: ${event.name}`);
+					if (!this.#announces.tryAcquire()) {
+						throw new SessionError(SessionCode.TooManyRequests, { reason: "too many listed tracks" });
+					}
+					listed.add(event.name);
+					lister.add(event.name, this.#toModelInfo(event.info));
+				} else if (event.kind === "removed") {
+					if (!listed.delete(event.name))
+						throw new ProtocolViolation(`unlisted track removed: ${event.name}`);
+					this.#announces.release();
+					lister.remove(event.name);
+				} else {
+					// This hop synced its readers when the listing began; only the order matters here.
+					if (synced) throw new ProtocolViolation("duplicate SYNCED");
+					synced = true;
+				}
+			}
+		} catch (err) {
+			if (unused.signal.aborted) {
+				// Nobody lists the broadcast any more: cancel the peer's listing.
+				stream?.close();
+				lister.clear();
+				return;
+			}
+			closeViolation(this.#quic, err);
+			const e = await sessionCause(this.#quic, err);
+			console.debug(`tracks failed: broadcast=${broadcast} error=${reason(e)}`);
+			stream?.abort(e);
+			lister.abort(e);
+		} finally {
+			disposeUsed();
+			this.#announces.release(listed.size);
+		}
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, consumed: Consumed, request: track.Request) {

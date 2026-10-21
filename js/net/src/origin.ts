@@ -1657,6 +1657,7 @@ export class Consumer {
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path, epoch) => this.#local(scope.path(path), epoch),
 			demand: (path, epoch, signal) => this.#demand(scope.path(path), epoch, signal),
+			covered: (path) => this.#covered(scope.path(path)),
 		});
 	}
 
@@ -2124,6 +2125,16 @@ export class Consumer {
 		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received))) return undefined;
 		if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch) return undefined;
 		return local;
+	}
+
+	/**
+	 * Whether the originated route that would serve `path` claims it only through a shorter
+	 * prefix. Such a route claims capability, not inventory, so it names no broadcast to list.
+	 */
+	#covered(path: Path.Valid): boolean {
+		if (this.#local(path)) return false;
+		const entry = this.#state.bestEntry(path, received);
+		return entry !== undefined && !this.#state.routes.peek()?.get(path)?.includes(entry);
 	}
 
 	/**
