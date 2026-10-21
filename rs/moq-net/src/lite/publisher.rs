@@ -5196,6 +5196,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			publisher: 0,
 			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
