@@ -358,7 +358,7 @@ impl ServerConfig {
     ///
     /// This exists to allow system time to be mocked in tests, or wherever else desired.
     ///
-    /// Defaults to [`StdSystemTime`], which simply calls [`SystemTime::now()`](SystemTime::now).
+    /// Defaults to [`StdSystemTime`], which reads the ambient clock's wall time.
     pub fn time_source(&mut self, time_source: Arc<dyn TimeSource>) -> &mut Self {
         self.time_source = time_source;
         self

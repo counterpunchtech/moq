@@ -829,9 +829,9 @@ fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Time
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 	use moq_mux::catalog::Stream as _;
 

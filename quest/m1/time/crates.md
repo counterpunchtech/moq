@@ -37,11 +37,25 @@ workspace-wide lint ratchet follow in m2.
 accounting, JWT checks, policy expiry), RTMP session timestamps and
 deadlines, archive retention, and listener stall accounting, and added the
 per-crate ratchet to moq-auth, moq-rtmp, and moq-archive. The ratchet also
-covers moq-net, moq-mux, moq-ffi, moq-room, moq-stats, and moq-uring; the
-rest of the workspace and public `SystemTime` fields still need migration. In particular,
-SRT and WebRTC hand instants to third-party APIs on std's clock, and audio/video
-device threads block outside an async runtime; those boundaries still need
-clock support rather than a second host-clock read at each call site.
+covers moq-net, moq-mux, moq-ffi, moq-room, moq-stats, and moq-uring.
+
+The `quest/m1/time/crates` PR moved every other crate's production reads and
+timers onto moq-clock (adding `timeout_at` and `interval_at`) and gave each a
+ratchet, except moq-ice and moq-rtc, which drive str0m on std instants. What
+remains:
+
+- Third-party APIs on std's clock still convert at an `#[allow]`ed boundary
+  with a second host read: str0m (moq-ice, moq-rtc, moq-tokio's `webrtc`),
+  srt-tokio (moq-srt's `host_instant`), and winit (moq-cli's player window).
+  They need clock support, such as a moq-clock conversion to and from
+  `std::time::Instant`.
+- Device threads (audio, video, moq-boy, moq-bench's sampler) block in
+  `std::thread::sleep` outside any runtime, under a per-site `#[allow]`.
+- Public wall times are still `SystemTime`: hang's `Clock::wall_clock` and
+  `echo::Arrival`, moq-mux's `Clock::at` and `Timebase::place`, moq-hls's
+  manifests, moq-quic's `TimeSource`, moq-relay's session start, and
+  moq-tokio's certificate expiry. Their ratchets allow the `SystemTime` type
+  until they move to `moq_clock::Wall`.
 
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.

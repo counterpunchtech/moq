@@ -370,9 +370,9 @@ impl Reader {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;
