@@ -324,3 +324,28 @@ test("advance drains one timer's tasks before firing the next at the same deadli
 	await clock.advance(Nano(10));
 	expect(order).toEqual(["first", "cancelled"]);
 });
+
+test("a timer armed while draining joins existing timers at the same deadline", async () => {
+	const clock = manual();
+	const order: string[] = [];
+	void sleep(Nano(10)).then(() => {
+		order.push("first");
+		void sleepUntil(Instant(10)).then(() => order.push("new"));
+	});
+	void sleep(Nano(10)).then(() => order.push("second"));
+	await clock.advance(Nano(10));
+	expect(order).toEqual(["first", "second", "new"]);
+});
+
+test("a past deadline armed while draining observes the current instant", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	void sleep(Nano(10)).then(async () => {
+		at.push(now());
+		await sleepUntil(Instant(3));
+		at.push(now());
+	});
+	await clock.advance(Nano(10));
+	expect(at).toEqual([10, 10]);
+	expect<number>(clock.now()).toBe(10);
+});

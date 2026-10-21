@@ -18,6 +18,7 @@ export class Manual {
 	#revision = 0;
 	#fired = 0;
 	#firing = false;
+	#advancing = 0;
 	#armed?: () => void;
 	#backend: Backend = {
 		now: () => this.#now,
@@ -28,7 +29,7 @@ export class Manual {
 			this.#timers.push(timer);
 			this.#up(timer.index);
 			this.#revision++;
-			if (at <= this.#now) this.#ready(timer);
+			if (at <= this.#now && this.#advancing === 0) this.#ready(timer);
 			this.#armed?.();
 			return () => {
 				this.#remove(timer);
@@ -60,18 +61,24 @@ export class Manual {
 	/** Advance through each due deadline, draining tasks before continuing to the target. */
 	async advance(duration: Nano): Promise<void> {
 		const target = Instant.add(this.#now, duration);
-		for (;;) {
-			const revision = this.#revision;
-			await drain();
-			const first = this.#timers[0];
-			if (first !== undefined && first.at <= target) {
-				this.#now = Instant(first.at);
-				this.#ready(first);
-			} else if (this.#now < target) {
-				this.#now = target;
-			} else if (revision === this.#revision) {
-				return;
+		// Reached timers armed while draining join the heap, behind existing peers.
+		this.#advancing++;
+		try {
+			for (;;) {
+				const revision = this.#revision;
+				await drain();
+				const first = this.#timers[0];
+				if (first !== undefined && first.at <= target) {
+					this.#now = Instant(Math.max(this.#now, first.at));
+					this.#ready(first);
+				} else if (this.#now < target) {
+					this.#now = target;
+				} else if (revision === this.#revision) {
+					return;
+				}
 			}
+		} finally {
+			this.#advancing--;
 		}
 	}
 
