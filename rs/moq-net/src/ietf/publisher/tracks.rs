@@ -135,8 +135,6 @@ struct Params {
 	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST, applied on the first resume.
 	new_group: Option<u64>,
-	/// FILL_PARAMETERS (draft-20+), applied on the first resume.
-	fill: Option<ietf::Fill>,
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
@@ -282,9 +280,8 @@ where
 				priority: msg.subscriber_priority.unwrap_or(128),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
-				max_age: msg.max_age,
+				max_age: None,
 				new_group: msg.new_group,
-				fill: msg.fill,
 			},
 			properties_wanted: msg.properties_wanted,
 			skips: Skips::default(),
@@ -797,9 +794,8 @@ where
 		})
 		.await;
 		// A NEW_GROUP_REQUEST on a PUBLISH_OK that leaves the subscription paused waits for
-		// the resume, as does the listing's FILL_PARAMETERS.
+		// the resume.
 		let mut new_group: Option<u64>;
-		let mut fill = params.fill.take();
 		let resume = match answer {
 			None => {
 				stream.writer.abort(&Error::Cancel);
@@ -962,7 +958,7 @@ where
 			match update.forward {
 				Some(true) => {
 					resume = Some(Resume {
-						fill: update.fill.or(fill.take()),
+						fill: update.fill,
 						new_group: update.new_group.or(new_group.take()),
 						answer: true,
 					})
@@ -1207,7 +1203,6 @@ mod tests {
 			filter: None,
 			fill: None,
 			properties_wanted: true,
-			max_age: None,
 			new_group: None,
 			range_filters: false,
 			track_filter: false,
@@ -1850,10 +1845,10 @@ mod tests {
 		}
 	}
 
-	/// The listing's FILL_PARAMETERS (draft-20+) apply on a PUBLISH's first resume, as its
-	/// Location Filter does, so a resume asking for neither still fills the current group.
+	/// A paused listing's FILL_PARAMETERS (draft-20+) open no fill, even once a PUBLISH
+	/// resumes without its own (draft-22 section 3.4.1).
 	#[moq_clock::test]
-	async fn a_listing_fill_applies_on_the_first_resume() {
+	async fn a_listing_fill_opens_nothing() {
 		for version in [Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
@@ -1884,18 +1879,24 @@ mod tests {
 			send(&mut stream, &resume).await;
 			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
 
-			let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
-				.await
-				.unwrap();
-			let mut reader = crate::coding::Reader::new(recv, version);
-			let mut bytes = Vec::new();
-			while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
-				.await
-				.unwrap()
-			{
-				bytes.extend_from_slice(&chunk);
+			// The joined group's own stream carries only what follows the join; a fill would
+			// carry the cached object.
+			group.finish().unwrap();
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			while let Poll::Ready(recv) = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx))) {
+				let mut reader = crate::coding::Reader::new(recv.unwrap(), version);
+				let mut bytes = Vec::new();
+				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+					.await
+					.unwrap()
+				{
+					bytes.extend_from_slice(&chunk);
+				}
+				assert!(
+					!bytes.windows(6).any(|w| w == b"cached"),
+					"{version}: the listing's fill opened"
+				);
 			}
-			assert!(bytes.windows(6).any(|w| w == b"cached"), "{version}: no fill");
 		}
 	}
 
