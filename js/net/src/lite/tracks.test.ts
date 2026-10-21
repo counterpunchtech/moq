@@ -385,7 +385,7 @@ test("a newer listing of a broadcast on one session replaces the older", async (
 
 test("a path served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamic(Path.from("room"));
+	const dynamic = origin.dynamicRoute(Path.from("room"));
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
@@ -402,7 +402,7 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 test("a local read through a covering prefix route is NOT_FOUND, and through its exact route lists", async () => {
 	const origin = new OriginProducer();
 	for (const prefix of ["room", "room/bob"]) {
-		const dynamic = origin.dynamic(Path.from(prefix));
+		const dynamic = origin.dynamicRoute(Path.from(prefix));
 		void (async () => {
 			for await (const request of dynamic.requested()) {
 				const served = new BroadcastProducer();
@@ -494,7 +494,9 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 
 test("an epoch-pinned front served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.dynamic(Path.from("room"), { epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
+	const dynamic = origin.dynamicRoute(Path.from("room"), {
+		epoch: Epoch.parse("01900000-0000-7000-8000-000000000001"),
+	});
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
