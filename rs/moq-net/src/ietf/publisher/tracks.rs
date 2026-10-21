@@ -417,25 +417,34 @@ where
 		while !*finished {
 			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate<true>>>(cx)) {
 				Ok(Some(Next::Message(update))) => {
-					// Its Request ID is spent like any other, and a bad one is the session's error.
-					if let Err(err) = self.control.accept(update.request_id)
-						&& !matches!(err, Error::GoingAway)
-					{
-						self.session.clone().close(
-							super::super::error::to_session_code(&crate::SessionError::from(&err)),
-							"invalid request ID",
-						);
-						return Poll::Ready(Err(err));
-					}
+					// Its Request ID is spent like any other: a bad one is the session's error,
+					// and one past our GOAWAY is refused as such.
+					let going_away = match self.control.accept(update.request_id) {
+						Err(Error::GoingAway) => true,
+						Err(err) => {
+							self.session.clone().close(
+								super::super::error::to_session_code(&crate::SessionError::from(&err)),
+								"invalid request ID",
+							);
+							return Poll::Ready(Err(err));
+						}
+						Ok(_) => false,
+					};
 					// A new prefix or FORWARD would change which later tracks are listed and
 					// how, which we do not support. Refusing it ends the request (section 10.9.1).
-					let err = update.refused.unwrap_or(Error::Unsupported);
+					let (err, reason) = match going_away {
+						true => (Error::GoingAway, "going away"),
+						false => (
+							update.refused.unwrap_or(Error::Unsupported),
+							"REQUEST_UPDATE on SUBSCRIBE_TRACKS is not supported",
+						),
+					};
 					let code = request::to_code(&err, request::Kind::SubscribeNamespace, self.version);
 					stream.writer.buffer_varint(ietf::RequestError::ID)?;
 					stream.writer.buffer(&ietf::RequestError {
 						request_id: None,
 						error_code: code,
-						reason_phrase: "REQUEST_UPDATE on SUBSCRIBE_TRACKS is not supported".into(),
+						reason_phrase: reason.into(),
 						retry_interval: 0,
 					})?;
 					return Poll::Ready(Ok(()));
@@ -1609,6 +1618,27 @@ mod tests {
 			let (id, body) = next(&mut request).await;
 			assert_eq!(id, ietf::RequestError::ID, "{version}");
 			assert_eq!(request_error(&body, version), request::NOT_SUPPORTED, "{version}");
+		}
+	}
+
+	/// A listing update past our GOAWAY is refused as GOING_AWAY, not as unsupported.
+	#[moq_clock::test]
+	async fn a_listing_update_after_goaway_is_going_away() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			h.publisher.control.goaway().unwrap();
+			let refused = ietf::SubscribeUpdate {
+				filter: None,
+				forward: None,
+				..update(2, false)
+			};
+			send(&mut request, &refused).await;
+			let (id, body) = next(&mut request).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}");
+			let going_away = request::to_code(&Error::GoingAway, request::Kind::SubscribeNamespace, version);
+			assert_eq!(request_error(&body, version), going_away, "{version}");
 		}
 	}
 
