@@ -393,7 +393,7 @@ impl<'a> Chunks<'a> {
     /// Keep the connection flow control credit for the bytes read so far, returning how many.
     ///
     /// Stream credit still advances on [`Self::finalize()`], but these bytes stay counted in
-    /// [`StreamsState::held`] until a lease consumes or drops them.
+    /// [`StreamsState::held`] until a lease releases or drops them.
     pub(super) fn withhold(&mut self) -> u64 {
         let bytes = mem::take(&mut self.read);
         self.streams.held += bytes;
@@ -404,7 +404,7 @@ impl<'a> Chunks<'a> {
     ///
     /// The number of read bytes will be released from the congestion window,
     /// allowing the remote peer to send more data if it was previously blocked.
-    /// Bytes a receive lease holds keep their connection credit until it consumes them.
+    /// Bytes a receive lease holds keep their connection credit until it releases them.
     ///
     /// If [`ShouldTransmit::should_transmit()`] returns `true`,
     /// a packet needs to be sent to the peer informing them that the stream is unblocked.

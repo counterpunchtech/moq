@@ -21,7 +21,7 @@ use std::{
 
 use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use moq_quic::{
     ConnectionId, RandomConnectionIdGenerator,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -1947,8 +1947,8 @@ async fn stuck_window_evicts_the_lower_priority() {
     low.set_priority(-1);
     high.set_priority(1);
     let leased = tokio::join!(
-        poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.len())),
-        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|lease| lease.len())),
+        poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
     );
     assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
@@ -1964,14 +1964,17 @@ async fn stuck_window_evicts_the_lower_priority() {
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.
 async fn leased(recv: &mut RecvStream, want: usize) -> usize {
-    poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.len()))
+    poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
         .await
         .unwrap()
 }
 
 /// Consume the first `n` leased bytes of `recv`.
 async fn consume(recv: &mut RecvStream, n: usize) {
-    poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|lease| lease.consume(n)))
+    poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|mut lease| {
+			lease.advance(n);
+			lease.release();
+		}))
         .await
         .unwrap()
 }

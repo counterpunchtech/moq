@@ -373,6 +373,11 @@ impl Connection {
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.shared.wire.clone()
 	}
+
+	/// Receive streams evicted to free a stuck receive window.
+	pub(crate) fn streams_evicted(&self) -> u64 {
+		self.shared.conn.borrow().stats().credit.evicted
+	}
 }
 
 impl Clone for Connection {

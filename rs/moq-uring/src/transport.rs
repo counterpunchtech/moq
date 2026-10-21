@@ -22,6 +22,10 @@ impl Grouped for quic::web::Session {
 		Some(quic::web::Session::wire(self))
 	}
 
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(quic::web::Session::streams_evicted(self))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
 		Some(quic::web::Session::send_group(self, priority))
 	}
@@ -81,19 +85,13 @@ impl moq_net::transport::poll::RecvStream for quic::web::RecvStream {
 
 #[cfg(feature = "quic")]
 impl moq_net::transport::poll::Lease for quic::Lease<'_> {
-	fn len(&self) -> usize {
-		quic::Lease::len(self)
-	}
 	fn is_fin(&self) -> bool {
 		quic::Lease::is_fin(self)
 	}
 	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
 		quic::Lease::chunks(self)
 	}
-	fn take(&mut self, max: usize) -> bytes::Bytes {
-		quic::Lease::take(self, max)
-	}
-	fn consume(self, n: usize) {
-		quic::Lease::consume(self, n)
+	fn release(self) {
+		quic::Lease::release(self)
 	}
 }

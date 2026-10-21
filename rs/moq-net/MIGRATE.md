@@ -8,7 +8,8 @@ How to update your code for each breaking change, newest first.
 
 `transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
 `poll_read`, `poll_read_buf`, `poll_closed`, `read`, `read_buf`, `closed`, `Read`, and `ReadBuf` are gone.
-A lease borrows the stream's unconsumed bytes and keeps their flow-control credit until `Lease::consume(n)`; dropping it consumes nothing, and `is_fin` replaces `closed`.
+A lease borrows the stream's unreleased bytes as a `bytes::Buf`: reading moves past bytes for good, but they keep their flow-control credit until `Lease::release()`.
+Bytes not read stay for the next lease, `Lease::chunks()` peeks without reading, and `is_fin` replaces `closed`.
 A transport that can only hand out chunks implements `transport::poll::Chunks` (`poll_read_chunk` and `stop`) and wraps each stream in `transport::poll::Buffered`.
 
 ```rust
@@ -16,13 +17,14 @@ A transport that can only hand out chunks implements `transport::poll::Chunks` (
 let n = stream.read(&mut buf).await?;
 
 // After: copy what arrived, then return its credit
-let lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
-let n = lease.len().min(buf.len()); // 0 with `lease.is_fin()` is the end
-lease.buf().copy_to_slice(&mut buf[..n]);
-lease.consume(n);
+let mut lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
+let n = lease.remaining().min(buf.len()); // 0 with `lease.is_fin()` is the end
+lease.copy_to_slice(&mut buf[..n]);
+lease.release();
 ```
 
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
+`transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
 ### Each group has one writer (#6020)
 

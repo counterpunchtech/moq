@@ -6563,7 +6563,9 @@ fn lease_spends_connection_window_only() {
 
     // Too little to announce while the peer has room, so the peer blocks at the window, and the
     // frame that spends the last of its room is what announces it.
-    let _ = pair.server_recv(server_ch, s).consume(100);
+    let mut recv = pair.server_recv(server_ch, s);
+    recv.advance(100);
+    let _ = recv.release();
     let all = msg.len();
     assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 1050);
     assert_eq!(sent, msg.len());
@@ -6576,7 +6578,9 @@ fn lease_spends_connection_window_only() {
     );
     assert!(pair.server_conn_mut(server_ch).leased(s).unwrap().is_fin());
     let all = leased(&mut pair, server_ch, s);
-    let _ = pair.server_recv(server_ch, s).consume(all);
+    let mut recv = pair.server_recv(server_ch, s);
+    recv.advance(all);
+    let _ = recv.release();
     assert_eq!(pair.server_conn_mut(server_ch).stats().credit.leased, 0);
 }
 

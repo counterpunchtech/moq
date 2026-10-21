@@ -12,7 +12,7 @@ use std::net::UdpSocket;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
@@ -53,7 +53,7 @@ async fn leased(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, want: u
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| (lease.len(), lease.is_fin()))),
+		std::future::poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| (lease.remaining(), lease.is_fin()))),
 	)
 	.await
 	.expect("lease")
@@ -64,7 +64,10 @@ async fn consume(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, n: usi
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|lease| lease.consume(n))),
+		std::future::poll_fn(|cx| recv.poll_lease(cx, n).map_ok(|mut lease| {
+			lease.advance(n);
+			lease.release();
+		})),
 	)
 	.await
 	.expect("lease")
@@ -146,7 +149,7 @@ fn leases_spend_the_connection_window() {
 			assert_eq!(leased(&handle, &mut recv, WINDOW).await, (WINDOW, false));
 			let mut cx = Context::from_waker(Waker::noop());
 			assert!(matches!(
-				recv.poll_lease(&mut cx, WINDOW + 1).map_ok(|lease| lease.len()),
+				recv.poll_lease(&mut cx, WINDOW + 1).map_ok(|lease| lease.remaining()),
 				Poll::Ready(Err(quic::Error::TooLarge))
 			));
 
@@ -194,12 +197,12 @@ fn stuck_window_evicts_the_lower_priority() {
 				"an eviction",
 				std::future::poll_fn(|cx| {
 					if low_done.is_none()
-						&& let Poll::Ready(res) = low.poll_lease(cx, WINDOW).map_ok(|lease| lease.len())
+						&& let Poll::Ready(res) = low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())
 					{
 						low_done = Some(res);
 					}
 					if high_done.is_none()
-						&& let Poll::Ready(res) = high.poll_lease(cx, WINDOW).map_ok(|lease| lease.len())
+						&& let Poll::Ready(res) = high.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())
 					{
 						high_done = Some(res);
 					}

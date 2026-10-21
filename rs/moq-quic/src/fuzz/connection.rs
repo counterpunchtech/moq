@@ -854,7 +854,9 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
         }
     }
     *offset += n as u64;
-    let _ = conn.recv_stream(id).consume(n);
+    let mut recv = conn.recv_stream(id);
+    recv.advance(n);
+    let _ = recv.release();
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.

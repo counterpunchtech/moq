@@ -20,31 +20,37 @@ impl<E: wt::Error> moq::Error for Error<E> {
 	}
 }
 
-struct Stats<S>(S);
+struct Stats<S> {
+	inner: S,
+	streams_evicted: Option<u64>,
+}
 impl<S: wt::Stats> moq::Stats for Stats<S> {
 	fn bytes_sent(&self) -> Option<u64> {
-		self.0.bytes_sent()
+		self.inner.bytes_sent()
 	}
 	fn bytes_received(&self) -> Option<u64> {
-		self.0.bytes_received()
+		self.inner.bytes_received()
 	}
 	fn bytes_lost(&self) -> Option<u64> {
-		self.0.bytes_lost()
+		self.inner.bytes_lost()
 	}
 	fn packets_sent(&self) -> Option<u64> {
-		self.0.packets_sent()
+		self.inner.packets_sent()
 	}
 	fn packets_received(&self) -> Option<u64> {
-		self.0.packets_received()
+		self.inner.packets_received()
 	}
 	fn packets_lost(&self) -> Option<u64> {
-		self.0.packets_lost()
+		self.inner.packets_lost()
 	}
 	fn rtt(&self) -> Option<std::time::Duration> {
-		self.0.rtt()
+		self.inner.rtt()
 	}
 	fn estimated_send_rate(&self) -> Option<u64> {
-		self.0.estimated_send_rate()
+		self.inner.estimated_send_rate()
+	}
+	fn streams_evicted(&self) -> Option<u64> {
+		self.streams_evicted
 	}
 }
 /// A backend session whose send streams may join send groups, as native QUIC's do.
@@ -66,6 +72,12 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 
 	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
 	fn wire(&self) -> Option<moq::Wire> {
+		None
+	}
+
+	/// Receive streams evicted to free a stuck receive window, or `None` when the backend never
+	/// evicts.
+	fn streams_evicted(&self) -> Option<u64> {
 		None
 	}
 
@@ -177,7 +189,10 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 		backend::Session::poll_closed(&mut self.0, cx).map(Error)
 	}
 	fn stats(&self) -> impl moq::Stats {
-		Stats(backend::Session::stats(&self.0))
+		Stats {
+			inner: backend::Session::stats(&self.0),
+			streams_evicted: Grouped::streams_evicted(&self.0),
+		}
 	}
 	fn wire(&self) -> Option<moq::Wire> {
 		Grouped::wire(&self.0)

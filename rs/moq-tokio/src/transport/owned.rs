@@ -20,31 +20,37 @@ impl<E: wt::Error> moq::Error for Error<E> {
 	}
 }
 
-struct Stats<S>(S);
+struct Stats<S> {
+	inner: S,
+	streams_evicted: Option<u64>,
+}
 impl<S: wt::Stats> moq::Stats for Stats<S> {
 	fn bytes_sent(&self) -> Option<u64> {
-		self.0.bytes_sent()
+		self.inner.bytes_sent()
 	}
 	fn bytes_received(&self) -> Option<u64> {
-		self.0.bytes_received()
+		self.inner.bytes_received()
 	}
 	fn bytes_lost(&self) -> Option<u64> {
-		self.0.bytes_lost()
+		self.inner.bytes_lost()
 	}
 	fn packets_sent(&self) -> Option<u64> {
-		self.0.packets_sent()
+		self.inner.packets_sent()
 	}
 	fn packets_received(&self) -> Option<u64> {
-		self.0.packets_received()
+		self.inner.packets_received()
 	}
 	fn packets_lost(&self) -> Option<u64> {
-		self.0.packets_lost()
+		self.inner.packets_lost()
 	}
 	fn rtt(&self) -> Option<std::time::Duration> {
-		self.0.rtt()
+		self.inner.rtt()
 	}
 	fn estimated_send_rate(&self) -> Option<u64> {
-		self.0.estimated_send_rate()
+		self.inner.estimated_send_rate()
+	}
+	fn streams_evicted(&self) -> Option<u64> {
+		self.streams_evicted
 	}
 }
 impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session for super::Session<S> {
@@ -114,7 +120,10 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 		backend::Session::poll_closed(self, cx).map(Error)
 	}
 	fn stats(&self) -> impl moq::Stats {
-		Stats(backend::Session::stats(self))
+		Stats {
+			inner: backend::Session::stats(self),
+			streams_evicted: super::Grouped::streams_evicted(&self.session),
+		}
 	}
 	fn wire(&self) -> Option<moq::Wire> {
 		super::Grouped::wire(&self.session)
@@ -174,20 +183,14 @@ impl poll::RecvStream for crate::quic::web::RecvStream {
 
 #[cfg(feature = "quic")]
 impl poll::Lease for crate::quic::driver::Lease<'_> {
-	fn len(&self) -> usize {
-		crate::quic::driver::Lease::len(self)
-	}
 	fn is_fin(&self) -> bool {
 		crate::quic::driver::Lease::is_fin(self)
 	}
 	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
 		crate::quic::driver::Lease::chunks(self)
 	}
-	fn take(&mut self, max: usize) -> Bytes {
-		crate::quic::driver::Lease::take(self, max)
-	}
-	fn consume(self, n: usize) {
-		crate::quic::driver::Lease::consume(self, n)
+	fn release(self) {
+		crate::quic::driver::Lease::release(self)
 	}
 }
 

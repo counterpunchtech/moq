@@ -1,4 +1,4 @@
-//! Receive leases: bytes a reader has seen but not consumed, which keep their connection credit,
+//! Receive leases: bytes a reader has seen but not released, which keep their connection credit,
 //! and the eviction that recovers a connection window nobody can make progress in.
 
 use std::cmp::Reverse;
@@ -11,9 +11,9 @@ use super::{Chunks, ReadError, ReadableError, RecvStream, ShouldTransmit, Stream
 use super::{StreamsState, state::get_or_insert_recv};
 use crate::{VarInt, frame};
 
-/// The bytes of a receive stream read in order but not yet consumed.
+/// The bytes of a receive stream read in order but not yet released.
 ///
-/// They keep their connection flow control credit until consumed, so the connection receive
+/// They keep their connection flow control credit until released, so the connection receive
 /// window bounds what every lease on the connection holds together. Borrowed with
 /// [`RecvStream::lease()`] or [`Connection::leased()`](crate::Connection::leased).
 #[derive(Debug, Default)]
@@ -24,7 +24,8 @@ pub struct Leased {
     /// The trailing chunks that still slice the datagram buffers they arrived in, which a byte
     /// of them keeps whole.
     fresh: usize,
-    /// Bytes whose connection credit is withheld: `len`, plus taken bytes not yet consumed.
+    /// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
+    /// not yet released.
     held: u64,
     /// How the stream ended, once the last byte is leased.
     end: Option<End>,
@@ -70,7 +71,7 @@ impl Leased {
 
     /// Hand out up to `max` leading bytes without copying, stopping at a chunk boundary.
     ///
-    /// Their credit stays held until the next [`Self::consume()`].
+    /// Their credit stays held until the next [`Self::release()`].
     fn take(&mut self, max: usize) -> Bytes {
         let Some(front) = self.chunks.front_mut() else {
             return Bytes::new();
@@ -84,12 +85,12 @@ impl Leased {
         chunk
     }
 
-    /// Drop the first `n` leased bytes, returning the credit they and every taken byte free.
-    fn consume(&mut self, n: usize) -> u64 {
+    /// Drop the first `n` leased bytes, keeping their credit until the next [`Self::release()`].
+    fn advance(&mut self, n: usize) {
         let mut left = n;
         assert!(
             n as u64 <= self.len,
-            "consumed {n} of {} leased bytes",
+            "advanced {n} past {} leased bytes",
             self.len
         );
         self.len -= n as u64;
@@ -103,6 +104,10 @@ impl Leased {
             self.chunks.pop_front();
         }
         self.fresh = self.fresh.min(self.chunks.len());
+    }
+
+    /// Return the credit of every byte taken or advanced past.
+    fn release(&mut self) -> u64 {
         let freed = self.held - self.len;
         self.held = self.len;
         freed
@@ -162,11 +167,12 @@ pub enum LeaseError {
 }
 
 impl RecvStream<'_> {
-    /// Lease the stream's unconsumed bytes once at least `want` have arrived in order, or the
+    /// Lease the stream's unreleased bytes once at least `want` have arrived in order, or the
     /// stream ended, then read them with [`Connection::leased()`](crate::Connection::leased).
     ///
-    /// The bytes stay buffered, with their connection credit, until [`Self::consume()`]; leasing
-    /// again without consuming returns them again. If [`ShouldTransmit::should_transmit()`]
+    /// The bytes stay buffered, with their connection credit, until [`Self::advance()`] or
+    /// [`Self::take()`] moves past them, and keep that credit until [`Self::release()`]; leasing
+    /// again without moving returns them again. If [`ShouldTransmit::should_transmit()`]
     /// returns `true`, here or in [`LeaseError::Blocked`], transmit soon.
     ///
     /// [`LeaseError::Blocked`] records the `want`, so
@@ -220,7 +226,7 @@ impl RecvStream<'_> {
 
     /// Hand out up to `max` leading leased bytes without copying, stopping at a chunk boundary.
     ///
-    /// They leave the lease but keep their connection credit until the next [`Self::consume()`],
+    /// They leave the lease but keep their connection credit until the next [`Self::release()`],
     /// which is how a message reaches its consumer before the whole of it has arrived. Empty when
     /// nothing is leased.
     pub fn take(&mut self, max: usize) -> Bytes {
@@ -230,20 +236,29 @@ impl RecvStream<'_> {
         }
     }
 
-    /// Release the first `n` leased bytes, and the connection credit of every byte taken so far.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, transmit soon so the peer learns
-    /// of the larger window.
+    /// Drop the first `n` leased bytes, which keep their connection credit until the next
+    /// [`Self::release()`].
     ///
     /// # Panics
     /// If `n` exceeds the leased bytes.
-    pub fn consume(&mut self, n: usize) -> ShouldTransmit {
+    pub fn advance(&mut self, n: usize) {
+        match self.state.leases.get_mut(&self.id) {
+            Some(lease) => lease.advance(n),
+            None => assert_eq!(n, 0, "advanced {n} past an empty lease"),
+        }
+    }
+
+    /// Return the connection credit of every byte taken or advanced past, once the units they
+    /// belong to are complete.
+    ///
+    /// If [`ShouldTransmit::should_transmit()`] returns `true`, transmit soon so the peer learns
+    /// of the larger window.
+    pub fn release(&mut self) -> ShouldTransmit {
         let Some(lease) = self.state.leases.get_mut(&self.id) else {
-            assert_eq!(n, 0, "consumed {n} bytes of an empty lease");
             return ShouldTransmit(false);
         };
-        let freed = lease.consume(n);
-        let transmit = self.release(freed);
+        let freed = lease.release();
+        let transmit = self.return_credit(freed);
         ShouldTransmit(transmit.should_transmit() || self.unstick())
     }
 
@@ -297,7 +312,7 @@ impl RecvStream<'_> {
     }
 
     /// Return `bytes` of withheld connection credit to the peer.
-    fn release(&mut self, bytes: u64) -> ShouldTransmit {
+    fn return_credit(&mut self, bytes: u64) -> ShouldTransmit {
         if bytes == 0 {
             return ShouldTransmit(false);
         }
@@ -326,7 +341,7 @@ impl RecvStream<'_> {
         let Some(lease) = self.state.leases.remove(&self.id) else {
             return false;
         };
-        let _ = self.release(lease.held);
+        let _ = self.return_credit(lease.held);
         if !lease.evicted {
             return false;
         }

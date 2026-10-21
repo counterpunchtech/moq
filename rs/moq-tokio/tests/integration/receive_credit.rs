@@ -282,6 +282,13 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
+	let session =
+		moq_tokio::transport::Session::new(web::Session::raw(setup.conn.clone()), moq_net::transport::Binding::InBand);
+	assert_eq!(
+		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
+		Some(1),
+		"moq-net sees the eviction count, {version}"
+	);
 	setup.verify();
 }
 

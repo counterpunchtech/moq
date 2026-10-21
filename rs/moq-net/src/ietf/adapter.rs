@@ -520,14 +520,37 @@ pub enum AdapterLease<'a, S: crate::transport::poll::Session + 'a> {
 	Virtual(crate::transport::poll::BufferedLease<'a>),
 }
 
-impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for AdapterLease<'_, S> {
-	fn len(&self) -> usize {
+impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
+	fn remaining(&self) -> usize {
 		match self {
-			Self::Real(l) => l.len(),
-			Self::Virtual(l) => l.len(),
+			Self::Real(l) => l.remaining(),
+			Self::Virtual(l) => l.remaining(),
 		}
 	}
 
+	fn chunk(&self) -> &[u8] {
+		match self {
+			Self::Real(l) => l.chunk(),
+			Self::Virtual(l) => l.chunk(),
+		}
+	}
+
+	fn advance(&mut self, n: usize) {
+		match self {
+			Self::Real(l) => l.advance(n),
+			Self::Virtual(l) => l.advance(n),
+		}
+	}
+
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		match self {
+			Self::Real(l) => l.copy_to_bytes(n),
+			Self::Virtual(l) => l.copy_to_bytes(n),
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for AdapterLease<'_, S> {
 	fn is_fin(&self) -> bool {
 		match self {
 			Self::Real(l) => l.is_fin(),
@@ -543,17 +566,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for Adapt
 		real.into_iter().flatten().chain(virt.into_iter().flatten())
 	}
 
-	fn take(&mut self, max: usize) -> Bytes {
+	fn release(self) {
 		match self {
-			Self::Real(l) => l.take(max),
-			Self::Virtual(l) => l.take(max),
-		}
-	}
-
-	fn consume(self, n: usize) {
-		match self {
-			Self::Real(l) => l.consume(n),
-			Self::Virtual(l) => l.consume(n),
+			Self::Real(l) => l.release(),
+			Self::Virtual(l) => l.release(),
 		}
 	}
 }

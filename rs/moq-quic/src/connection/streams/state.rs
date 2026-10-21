@@ -132,9 +132,9 @@ pub(crate) struct StreamsState {
     /// Sum of end offsets of all receive streams. Includes gaps, so it's an upper bound.
     pub(super) data_recvd: u64,
     /// Bytes leased from receive streams, taken or not, whose connection credit the application
-    /// has not consumed yet
+    /// has not released yet
     pub(super) held: u64,
-    /// The unconsumed bytes of each receive stream read through a lease, outliving its `recv`
+    /// The unreleased bytes of each receive stream read through a lease, outliving its `recv`
     /// state once the last byte is read
     pub(super) leases: FxHashMap<StreamId, Leased>,
     /// Streams evicted to free a stuck receive window, ever
@@ -3254,9 +3254,11 @@ mod tests {
         recv(client, &mut pending, id).lease(want).map(|_| ())
     }
 
-    fn consume(client: &mut StreamsState, id: StreamId, n: usize) {
+    fn release(client: &mut StreamsState, id: StreamId, n: usize) {
         let mut pending = Retransmits::default();
-        let _ = recv(client, &mut pending, id).consume(n);
+        let mut recv = recv(client, &mut pending, id);
+        recv.advance(n);
+        let _ = recv.release();
     }
 
     fn stop(client: &mut StreamsState, id: StreamId, code: u32) -> Retransmits {
@@ -3265,10 +3267,10 @@ mod tests {
         pending
     }
 
-    /// Leased bytes keep their connection credit until consumed, even across a gap; taken bytes
-    /// keep theirs until the next consume.
+    /// Leased bytes keep their connection credit until released, even across a gap, and so do
+    /// bytes taken or advanced past.
     #[test]
-    fn lease_holds_credit_until_consumed() {
+    fn lease_holds_credit_until_released() {
         let mut client = make(Side::Client);
         let initial = client.local_max_data;
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
@@ -3288,9 +3290,9 @@ mod tests {
         let taken = recv(&mut client, &mut pending, id).take(10);
         assert_eq!(taken.len(), 10);
         assert_eq!(client.leased(id).unwrap().len(), 22);
-        assert_eq!(client.local_max_data, initial, "taken, not consumed");
+        assert_eq!(client.local_max_data, initial, "taken, not released");
 
-        consume(&mut client, id, 2);
+        release(&mut client, id, 2);
         assert_eq!(client.local_max_data, initial + 12);
         assert_eq!(client.credit_stats().leased, 20);
     }
@@ -3313,7 +3315,7 @@ mod tests {
             "a FIN ends the wait short"
         );
 
-        consume(&mut client, id, 32);
+        release(&mut client, id, 32);
         assert_eq!(client.local_max_data, initial + 32);
         assert_eq!(client.credit_stats().leased, 0);
         let _ = stop(&mut client, id, 0);
@@ -3369,7 +3371,7 @@ mod tests {
         data(&mut client, id, 0, 32, false);
         assert_eq!(lease(&mut client, id), 32);
         client.set_receive_window((client.receive_window - 16).try_into().unwrap());
-        consume(&mut client, id, 32);
+        release(&mut client, id, 32);
         assert_eq!(client.local_max_data, initial + 16);
     }
 
@@ -3520,7 +3522,7 @@ mod tests {
 
         // Its reader finishes a unit and parks; the credit only pays the debt.
         assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
-        consume(&mut client, ids[0], WINDOW as usize);
+        release(&mut client, ids[0], WINDOW as usize);
         assert_eq!(client.credit_stats().evicted, 1);
         assert_eq!(readable(&mut client), [ids[2]]);
         assert_eq!(client.local_max_data, max_data + WINDOW);
@@ -3748,7 +3750,7 @@ mod tests {
         data(&mut client, a, 0, WINDOW as usize, false);
         data(&mut client, b, 0, WINDOW as usize, false);
         assert_eq!(lease(&mut client, a), WINDOW as usize);
-        consume(&mut client, a, 1);
+        release(&mut client, a, 1);
         assert!(matches!(
             wait(&mut client, b, 2000),
             Err(LeaseError::Blocked(_))
@@ -3782,7 +3784,7 @@ mod tests {
         let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
     }
 
-    /// Ingest and read rounds across many streams, with a plain read or a lease consumed whole.
+    /// Ingest and read rounds across many streams, with a plain read or a lease released whole.
     /// The lease cost must stay flat as the stream count grows.
     #[test]
     #[ignore = "release benchmark, run by nightly"]
@@ -3823,7 +3825,7 @@ mod tests {
                             if leased {
                                 let _ = recv.lease(1).unwrap();
                                 std::hint::black_box(recv.take(usize::MAX));
-                                let _ = recv.consume(0);
+                                let _ = recv.release();
                             } else {
                                 let mut chunks = recv.read(true).unwrap();
                                 std::hint::black_box(chunks.next(usize::MAX).unwrap());

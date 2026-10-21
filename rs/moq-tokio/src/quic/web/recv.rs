@@ -25,7 +25,7 @@ impl RecvStream {
 		map_error(&self.close, e)
 	}
 
-	/// Lease the stream's unconsumed bytes. See [`crate::quic::driver::RecvStream::poll_lease`].
+	/// Lease the stream's unreleased bytes. See [`crate::quic::driver::RecvStream::poll_lease`].
 	pub fn poll_lease(
 		&mut self,
 		cx: &mut Context<'_>,

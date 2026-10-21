@@ -132,6 +132,11 @@ pub trait Stats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		None
 	}
+
+	/// Total receive streams evicted because incomplete messages exhausted the receive window.
+	fn streams_evicted(&self) -> Option<u64> {
+		None
+	}
 }
 
 /// Default stats implementation that returns `None` for all metrics.
@@ -195,7 +200,7 @@ pub mod poll {
 	use std::collections::VecDeque;
 
 	use super::{Error, MaybeSend, MaybeSync, Stats};
-	use bytes::{Buf, Bytes};
+	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A cloneable transport session with independent progress on each handle.
 	///
@@ -635,16 +640,16 @@ pub mod poll {
 	/// An incoming stream, read through leases of the bytes its transport buffers.
 	///
 	/// Leased bytes stay in the transport, counted against its flow control, until
-	/// [`Lease::consume`] releases them, so an incomplete message holds receive credit
-	/// rather than memory of its own. When incomplete messages leave no credit for any of
-	/// them to finish, a transport that bounds them evicts the lowest
-	/// [priority](Self::set_priority) holder, whose next lease fails. A transport that
-	/// returns credit as it reads, adapted with [`Buffered`], is not bounded this way.
+	/// [`Lease::release`] returns the credit of those read, so an incomplete message holds
+	/// receive credit rather than memory of its own. When incomplete messages leave no credit for
+	/// any of them to finish, a transport that bounds them evicts the lowest
+	/// [priority](Self::set_priority) holder, whose next lease fails. A transport that returns
+	/// credit as it reads, adapted with [`Buffered`], is not bounded this way.
 	pub trait RecvStream: 'static {
 		/// The error type for every operation on this stream.
 		type Error: Error;
 
-		/// The unconsumed bytes borrowed from this stream.
+		/// The unreleased bytes borrowed from this stream.
 		type Lease<'a>: Lease
 		where
 			Self: 'a;
@@ -652,10 +657,10 @@ pub mod poll {
 		/// Poll until at least `want` bytes are leased, or the peer finished the stream with
 		/// fewer.
 		///
-		/// The bytes keep their flow-control credit until [`Lease::consume`]. Dropping the
-		/// lease consumes nothing, so the next poll leases them again. A `want` the stream's
-		/// receive window can never hold is an error rather than a wait, and a `want` of 0
-		/// never waits.
+		/// Reading the lease as a [`Buf`] moves past bytes for good, but they keep their
+		/// flow-control credit until [`Lease::release`]. Bytes not read stay for the next lease.
+		/// A `want` the stream's receive window can never hold is an error rather than a wait, and
+		/// a `want` of 0 never waits.
 		///
 		/// A lease may borrow the transport's connection state, so release it before
 		/// touching any other stream of the session.
@@ -685,11 +690,11 @@ pub mod poll {
 				return Poll::Ready(Ok(Some(Bytes::new())));
 			}
 			let mut lease = ready!(self.poll_lease(cx, 1))?;
-			if lease.is_empty() {
+			if !lease.has_remaining() {
 				return Poll::Ready(Ok(None));
 			}
-			let chunk = lease.take(max);
-			lease.consume(0);
+			let chunk = lease.copy_to_bytes(lease.chunk().len().min(max));
+			lease.release();
 			Poll::Ready(Ok(Some(chunk)))
 		}
 
@@ -699,94 +704,21 @@ pub mod poll {
 		}
 	}
 
-	/// Unconsumed bytes borrowed from a [`RecvStream`] by [`poll_lease`](RecvStream::poll_lease).
-	pub trait Lease {
-		/// The number of leased bytes.
-		fn len(&self) -> usize;
+	/// Unreleased bytes borrowed from a [`RecvStream`] by [`poll_lease`](RecvStream::poll_lease),
+	/// read as a [`Buf`].
+	///
+	/// Bytes read keep their credit until [`release`](Self::release), which is how a frame
+	/// reaches its consumer before the whole of it has arrived. Implementations override
+	/// [`Buf::copy_to_bytes`] to hand out bytes within one chunk without copying.
+	pub trait Lease: Buf {
+		/// The bytes not yet read, in order, one contiguous chunk at a time, without reading them.
+		fn chunks(&self) -> impl Iterator<Item = &[u8]>;
 
 		/// Whether the peer finished the stream right after the leased bytes.
 		fn is_fin(&self) -> bool;
 
-		/// The leased bytes in order, one contiguous chunk at a time.
-		fn chunks(&self) -> impl Iterator<Item = &[u8]>;
-
-		/// Hand out up to `max` leading bytes without copying, stopping at a chunk boundary.
-		///
-		/// They leave the lease but keep their credit until [`consume`](Self::consume), which
-		/// is how a frame reaches its consumer before the whole of it has arrived.
-		fn take(&mut self, max: usize) -> Bytes;
-
-		/// Release the first `n` leased bytes, and the credit of every byte taken so far.
-		///
-		/// # Panics
-		/// If `n` exceeds [`len`](Self::len).
-		fn consume(self, n: usize);
-
-		/// Whether nothing is leased.
-		fn is_empty(&self) -> bool {
-			self.len() == 0
-		}
-
-		/// The first contiguous chunk, empty when nothing is leased.
-		fn chunk(&self) -> &[u8] {
-			self.chunks().next().unwrap_or_default()
-		}
-
-		/// The leased bytes as a [`Buf`], across chunk boundaries.
-		fn buf(&self) -> impl Buf + '_ {
-			let mut buf = LeaseBuf {
-				chunk: &[],
-				rest: self.chunks(),
-				remaining: self.len(),
-			};
-			buf.fill();
-			buf
-		}
-	}
-
-	/// A [`Lease`] read as a [`Buf`].
-	struct LeaseBuf<'a, I> {
-		chunk: &'a [u8],
-		rest: I,
-		remaining: usize,
-	}
-
-	impl<'a, I: Iterator<Item = &'a [u8]>> LeaseBuf<'a, I> {
-		/// Move to the next non-empty chunk once this one is spent, so `chunk` is never empty
-		/// while bytes remain.
-		fn fill(&mut self) {
-			while self.chunk.is_empty() {
-				match self.rest.next() {
-					Some(chunk) => self.chunk = chunk,
-					None => return,
-				}
-			}
-		}
-	}
-
-	impl<'a, I: Iterator<Item = &'a [u8]>> Buf for LeaseBuf<'a, I> {
-		fn remaining(&self) -> usize {
-			self.remaining
-		}
-
-		fn chunk(&self) -> &[u8] {
-			self.chunk
-		}
-
-		fn advance(&mut self, mut cnt: usize) {
-			assert!(cnt <= self.remaining, "advanced past the lease");
-			self.remaining -= cnt;
-			loop {
-				self.fill();
-				let step = cnt.min(self.chunk.len());
-				self.chunk = &self.chunk[step..];
-				cnt -= step;
-				if cnt == 0 {
-					self.fill();
-					return;
-				}
-			}
-		}
+		/// Return the credit of every byte read so far, by this lease or an earlier one.
+		fn release(self);
 	}
 
 	/// A pending [`RecvStream::read_chunk`].
@@ -896,33 +828,17 @@ pub mod poll {
 		fin: bool,
 	}
 
-	impl Lease for BufferedLease<'_> {
-		fn len(&self) -> usize {
+	impl Buf for BufferedLease<'_> {
+		fn remaining(&self) -> usize {
 			*self.len
 		}
 
-		fn is_fin(&self) -> bool {
-			self.fin
+		fn chunk(&self) -> &[u8] {
+			self.chunks.front().map_or(&[], |chunk| &chunk[..])
 		}
 
-		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-			self.chunks.iter().map(|chunk| &chunk[..])
-		}
-
-		fn take(&mut self, max: usize) -> Bytes {
-			let Some(front) = self.chunks.front_mut() else {
-				return Bytes::new();
-			};
-			let chunk = match front.len() > max {
-				true => front.split_to(max),
-				false => self.chunks.pop_front().expect("front exists"),
-			};
-			*self.len -= chunk.len();
-			chunk
-		}
-
-		fn consume(self, mut n: usize) {
-			assert!(n <= *self.len, "consumed {n} of {} leased bytes", *self.len);
+		fn advance(&mut self, mut n: usize) {
+			assert!(n <= *self.len, "advanced {n} past {} leased bytes", *self.len);
 			*self.len -= n;
 			while n > 0 {
 				let front = self.chunks.front_mut().expect("counted above");
@@ -934,6 +850,38 @@ pub mod poll {
 				self.chunks.pop_front();
 			}
 		}
+
+		fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+			assert!(n <= *self.len, "copied {n} of {} leased bytes", *self.len);
+			let Some(front) = self.chunks.front_mut().filter(|front| front.len() >= n) else {
+				// Spans chunks, so it needs a contiguous copy.
+				let mut bytes = BytesMut::with_capacity(n);
+				while bytes.len() < n {
+					let take = self.chunk().len().min(n - bytes.len());
+					bytes.extend_from_slice(&self.chunk()[..take]);
+					self.advance(take);
+				}
+				return bytes.freeze();
+			};
+			*self.len -= n;
+			match front.len() > n {
+				true => front.split_to(n),
+				false => self.chunks.pop_front().expect("front exists"),
+			}
+		}
+	}
+
+	impl Lease for BufferedLease<'_> {
+		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+			self.chunks.iter().map(|chunk| &chunk[..])
+		}
+
+		fn is_fin(&self) -> bool {
+			self.fin
+		}
+
+		// The transport returned the credit as it read.
+		fn release(self) {}
 	}
 }
 
@@ -980,9 +928,9 @@ mod tests {
 		})
 	}
 
-	/// A lease waits for `want` across chunks, and dropping it keeps every byte for the next.
+	/// A lease waits for `want` across chunks, and dropping it keeps every unread byte for the next.
 	#[test]
-	fn lease_waits_for_want_and_drop_consumes_nothing() {
+	fn lease_waits_for_want_and_drop_keeps_unread() {
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		let mut stream = buffered(&[b"ab", b"cd"], false);
 
@@ -990,19 +938,19 @@ mod tests {
 			let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 3) else {
 				panic!("both chunks were ready")
 			};
-			assert_eq!(lease.len(), 4);
+			assert_eq!(lease.remaining(), 4);
 			assert_eq!(lease.chunk(), b"ab");
-			let mut all = [0u8; 4];
-			lease.buf().copy_to_slice(&mut all);
-			assert_eq!(&all, b"abcd");
+			assert_eq!(lease.chunks().collect::<Vec<_>>(), [b"ab", b"cd"]);
 		}
 
 		assert!(stream.poll_lease(&mut cx, 5).is_pending(), "nothing more arrived");
 		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 1) else {
 			panic!("the dropped lease's bytes are still there")
 		};
-		assert_eq!(lease.len(), 4);
-		lease.consume(3);
+		let mut lease = lease;
+		assert_eq!(lease.remaining(), 4);
+		lease.advance(3);
+		lease.release();
 
 		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 0) else {
 			panic!("want 0 never waits")
@@ -1011,9 +959,10 @@ mod tests {
 		assert!(!lease.is_fin());
 	}
 
-	/// Taken bytes leave the lease, and a finished stream leases what is left with its FIN.
+	/// Bytes within a chunk are handed out without a copy, bytes across chunks are joined, and a
+	/// finished stream leases what is left with its FIN.
 	#[test]
-	fn take_hands_out_chunks_and_fin_ends_short() {
+	fn copy_to_bytes_and_fin_ends_short() {
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		let mut stream = buffered(&[b"abc", b"de"], true);
 
@@ -1021,18 +970,14 @@ mod tests {
 			panic!("a finished stream leases short")
 		};
 		assert!(lease.is_fin());
-		assert_eq!(lease.take(2), Bytes::from_static(b"ab"));
-		assert_eq!(
-			lease.take(10),
-			Bytes::from_static(b"c"),
-			"take stops at a chunk boundary"
-		);
-		assert_eq!(lease.len(), 2);
-		lease.consume(0);
+		assert_eq!(lease.copy_to_bytes(2), Bytes::from_static(b"ab"));
+		assert_eq!(lease.copy_to_bytes(2), Bytes::from_static(b"cd"), "joined across chunks");
+		assert_eq!(lease.remaining(), 1);
+		lease.release();
 
 		assert_eq!(
 			stream.read_chunk(10).now_or_never_ready(),
-			Some(Bytes::from_static(b"de"))
+			Some(Bytes::from_static(b"e"))
 		);
 		assert_eq!(stream.read_chunk(10).now_or_never_ready(), None);
 		assert_eq!(stream.read_chunk(0).now_or_never_ready(), Some(Bytes::new()));
@@ -1049,7 +994,7 @@ mod tests {
 		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 1) else {
 			panic!("the chunk was ready")
 		};
-		let chunk = lease.take(usize::MAX);
+		let chunk = lease.copy_to_bytes(FRAME.len());
 		assert_eq!(chunk.len(), FRAME.len());
 		assert_eq!(chunk.as_ptr(), FRAME.as_ptr(), "the chunk was not copied");
 	}

@@ -75,19 +75,24 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		loop {
 			let want = self.want.max(1);
 			let version = &self.version;
-			let lease = ready!(self.stream.poll_lease(cx, want)).map_err(|err| version.transport_error(err))?;
+			let mut lease = ready!(self.stream.poll_lease(cx, want)).map_err(|err| version.transport_error(err))?;
 
 			// Decode against the first chunk, or a copy of as much as the last attempt needed
 			// when that spans chunks. Only a message cut across chunks pays for the copy.
-			let mut size = lease.chunk().len().max(want.min(lease.len()));
+			let mut size = lease.chunk().len().max(want.min(lease.remaining()));
 			loop {
 				let chunk = lease.chunk();
 				let buf: &[u8] = match chunk.len() >= size {
 					true => chunk,
 					false => {
 						self.scratch.clear();
-						self.scratch.resize(size, 0);
-						lease.buf().copy_to_slice(&mut self.scratch);
+						for chunk in lease.chunks() {
+							let take = chunk.len().min(size - self.scratch.len());
+							self.scratch.extend_from_slice(&chunk[..take]);
+							if self.scratch.len() == size {
+								break;
+							}
+						}
 						&self.scratch
 					}
 				};
@@ -101,7 +106,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 							self.scratch = Vec::new();
 						}
 						if consume {
-							lease.consume(used);
+							lease.advance(used);
+							lease.release();
 						}
 						return Poll::Ready(Ok(value));
 					}
@@ -111,7 +117,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					Err(e) => return Poll::Ready(Err(e.into())),
 				};
 
-				if need <= lease.len() {
+				if need <= lease.remaining() {
 					size = need;
 					continue;
 				}
@@ -293,12 +299,12 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 			// One chunk per lease: a lease may hold the transport's lock, so the frame is
 			// written, and its consumers woken, only once the lease is gone.
-			let chunk = lease.take(frame.remaining());
+			let chunk = lease.copy_to_bytes(lease.chunk().len().min(frame.remaining()));
 			let complete = chunk.len() == frame.remaining();
-			let ended = lease.is_fin() && lease.is_empty();
+			let ended = lease.is_fin() && !lease.has_remaining();
 			if complete {
 				// Every byte of the frame is in hand, so its credit returns.
-				lease.consume(0);
+				lease.release();
 			} else {
 				drop(lease);
 			}
@@ -329,18 +335,11 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	pub fn poll_read_exact(&mut self, cx: &mut Context<'_>, size: usize) -> Poll<Result<Bytes, Error>> {
 		self.want = 0;
 		let mut lease = ready!(self.poll_lease(cx, size))?;
-		if lease.len() < size {
+		if lease.remaining() < size {
 			return Poll::Ready(Err(DecodeError::Short.into()));
 		}
-		let bytes = match lease.chunk().len() >= size {
-			true => lease.take(size),
-			false => {
-				let bytes = lease.buf().copy_to_bytes(size);
-				lease.consume(size);
-				return Poll::Ready(Ok(bytes));
-			}
-		};
-		lease.consume(0);
+		let bytes = lease.copy_to_bytes(size);
+		lease.release();
 		Poll::Ready(Ok(bytes))
 	}
 
@@ -349,12 +348,13 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
 		self.want = 0;
 		while *remaining > 0 {
-			let lease = ready!(self.poll_lease(cx, 1))?;
-			if lease.is_empty() {
+			let mut lease = ready!(self.poll_lease(cx, 1))?;
+			if !lease.has_remaining() {
 				return Poll::Ready(Err(DecodeError::Short.into()));
 			}
-			let skipped = lease.len().min(*remaining);
-			lease.consume(skipped);
+			let skipped = lease.remaining().min(*remaining);
+			lease.advance(skipped);
+			lease.release();
 			*remaining -= skipped;
 		}
 		Poll::Ready(Ok(()))
@@ -377,7 +377,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll for whether data is available on the stream: `false` once it finishes.
 	pub(crate) fn poll_has_more(&mut self, cx: &mut Context<'_>) -> Poll<Result<bool, Error>> {
 		let lease = ready!(self.poll_lease(cx, 1))?;
-		Poll::Ready(Ok(!lease.is_empty()))
+		Poll::Ready(Ok(lease.has_remaining()))
 	}
 
 	/// Rank the stream for eviction under receive pressure. See [`RecvStream::set_priority`].
@@ -567,7 +567,7 @@ mod tests {
 	fn leased<V: StreamCodes>(reader: &mut Reader<Buffered<Queue>, V>) -> usize {
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		match reader.stream.poll_lease(&mut cx, 0) {
-			Poll::Ready(Ok(lease)) => lease.len(),
+			Poll::Ready(Ok(lease)) => lease.remaining(),
 			_ => panic!("a lease of nothing never waits"),
 		}
 	}

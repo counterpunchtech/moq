@@ -25,6 +25,12 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 		None
 	}
 
+	/// Receive streams evicted to free a stuck receive window, or `None` when the backend never
+	/// evicts.
+	fn streams_evicted(&self) -> Option<u64> {
+		None
+	}
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;

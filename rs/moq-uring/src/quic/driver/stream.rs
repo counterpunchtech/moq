@@ -9,7 +9,7 @@ use std::task::{Context, Poll, ready};
 
 use std::cell::RefMut;
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use moq_quic::{LeaseError, StreamId, VarInt};
 
 use super::super::Error;
@@ -257,13 +257,14 @@ impl RecvStream {
 		}
 	}
 
-	/// Lease the stream's unconsumed bytes once at least `want` have arrived
+	/// Lease the stream's unreleased bytes once at least `want` have arrived
 	/// in order, or the stream ended.
 	///
 	/// The bytes stay in moq-quic's receive buffer, keeping their connection
-	/// flow control credit, until [`Lease::consume`]; dropping the lease
-	/// consumes nothing. Stream credit still advances, so a stream window
-	/// smaller than a message keeps the message flowing.
+	/// flow control credit, until read through the lease as a [`Buf`] and
+	/// then [`Lease::release`]d; bytes not read stay for the next lease.
+	/// Stream credit still advances, so a stream window smaller than a
+	/// message keeps the message flowing.
 	///
 	/// When the peer has spent the connection window and no reader can make
 	/// progress, the stream ranked lowest by [`Self::set_priority`] is
@@ -471,7 +472,8 @@ impl std::fmt::Debug for RecvStream {
 	}
 }
 
-/// Unconsumed bytes borrowed from a [`RecvStream`] by [`RecvStream::poll_lease`].
+/// Unreleased bytes borrowed from a [`RecvStream`] by [`RecvStream::poll_lease`],
+/// read as a [`Buf`].
 ///
 /// Borrows the connection for as long as it lives.
 pub struct Lease<'a> {
@@ -485,40 +487,51 @@ impl Lease<'_> {
 		self.conn.leased(self.id).expect("a lease outlives nothing it borrows")
 	}
 
-	/// The number of leased bytes.
-	pub fn len(&self) -> usize {
-		self.leased().len()
-	}
-
-	/// Whether nothing is leased.
-	pub fn is_empty(&self) -> bool {
-		self.leased().is_empty()
-	}
-
 	/// Whether the peer finished the stream right after the leased bytes.
 	pub fn is_fin(&self) -> bool {
 		self.leased().is_fin()
 	}
 
-	/// The leased bytes in order, one contiguous chunk at a time.
+	/// The bytes not yet read, in order, one contiguous chunk at a time.
 	pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
 		self.leased().chunks()
 	}
 
-	/// Hand out up to `max` leading bytes without copying, stopping at a
-	/// chunk boundary. They keep their credit until the next [`Self::consume`].
-	pub fn take(&mut self, max: usize) -> Bytes {
-		self.conn.recv_stream(self.id).take(max)
-	}
-
-	/// Release the first `n` leased bytes, and the credit of every byte taken
-	/// so far.
-	pub fn consume(self, n: usize) {
+	/// Return the credit of every byte read so far, by this lease or an
+	/// earlier one.
+	pub fn release(self) {
 		let Self { mut conn, shared, id } = self;
-		let transmit = conn.recv_stream(id).consume(n).should_transmit();
+		let transmit = conn.recv_stream(id).release().should_transmit();
 		drop(conn);
 		if transmit {
 			shared.kick();
+		}
+	}
+}
+
+/// Reading moves past bytes for good, but they keep their credit until
+/// [`Lease::release`].
+impl Buf for Lease<'_> {
+	fn remaining(&self) -> usize {
+		self.leased().len()
+	}
+
+	fn chunk(&self) -> &[u8] {
+		self.leased().chunks().next().unwrap_or_default()
+	}
+
+	fn advance(&mut self, n: usize) {
+		self.conn.recv_stream(self.id).advance(n);
+	}
+
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		match n <= self.chunk().len() {
+			true => self.conn.recv_stream(self.id).take(n),
+			false => {
+				let mut bytes = BytesMut::with_capacity(n);
+				bytes.put((&mut *self).take(n));
+				bytes.freeze()
+			}
 		}
 	}
 }

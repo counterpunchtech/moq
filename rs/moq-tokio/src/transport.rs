@@ -894,6 +894,10 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::Connection::wire(self))
 	}
 
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
+	}
+
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
 		Some(Self::send_group(self, priority))
 	}
