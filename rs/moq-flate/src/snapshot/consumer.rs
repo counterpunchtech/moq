@@ -99,16 +99,9 @@ impl Consumer {
 					err @ (moq_net::Error::Old
 					| moq_net::Error::Evicted
 					| moq_net::Error::Lagged
-					| moq_net::Error::GroupTooLarge
-					| moq_net::Error::Stream(
-						moq_net::StreamError::Old
-						| moq_net::StreamError::Evicted
-						| moq_net::StreamError::TooFarBehind
-						| moq_net::StreamError::GroupTooLarge,
-					)),
+					| moq_net::Error::GroupTooLarge),
 				)) => {
-					// Lost here or by a relay, whose reset arrives as its stream code. A later group
-					// starts a fresh snapshot and compression window.
+					// A later group starts a fresh snapshot and compression window.
 					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
 						"snapshot group lost; waiting for a newer one");
 					self.group = None;
