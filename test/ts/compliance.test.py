@@ -3,7 +3,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import compliance  # noqa: E402
+import compliance
 
 
 def eac3(stream: int) -> bytes:
