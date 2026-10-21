@@ -461,6 +461,64 @@ test("datagrams a new copy replays are handed out once", async () => {
 	close();
 });
 
+test("a replacement delivers unseen datagrams below the newest sequence", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ maxDelay: Milli(100) });
+		ta.producer.insertDatagram(10, undefined, enc.encode("10"));
+		expect((await sub.recvDatagram())?.sequence).toBe(10);
+		await swap();
+		tb.producer.insertDatagram(10, undefined, enc.encode("10"));
+		tb.producer.insertDatagram(5, undefined, enc.encode("5"));
+		const next = hooks.tryRecvDatagram(sub);
+		expect(next.kind).toBe("datagram");
+		if (next.kind === "datagram") expect(next.datagram.sequence).toBe(5);
+		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+		sub.close();
+		close();
+	} finally {
+		restore();
+	}
+});
+
+test.each([0, 100])("datagram identities stay within the reader's %p ms budget", (budget) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(budget) });
+		const send = (sequence: number) => ta.producer.insertDatagram(sequence, undefined, enc.encode("d"));
+		const recv = () => hooks.tryRecvDatagram(sub);
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		clock.advance(Nano(60_000_000_000));
+		send(10);
+		expect(recv().kind).toBe("idle");
+		send(5);
+		expect(recv().kind).toBe("datagram");
+		if (budget > 0) {
+			clock.advance(Nano(budget * 500_000));
+			send(10);
+			expect(recv().kind).toBe("idle");
+			clock.advance(Nano(budget * 500_000));
+		}
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		sub.close();
+		front.consumer.close();
+		a.close();
+	} finally {
+		restore();
+	}
+});
+
 test("a route that goes for good ends the track as its last copy does", async () => {
 	const { a, active, disposeA, request, close } = await setup();
 	const ta = copy(a);

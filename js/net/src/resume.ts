@@ -222,8 +222,6 @@ interface Copy {
 	done?: Error | null;
 	/** The datagram channel ran out. */
 	datagramsDone?: Error | null;
-	/** The newest datagram handed out before this copy was subscribed, which it may replay. */
-	datagramsSeen?: number;
 	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
@@ -266,8 +264,10 @@ class Reader implements ResumeSource {
 	#copies: Copy[] = [];
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
-	/** The newest datagram handed out. */
+	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
+	/** Previously handed-out identities, in the order they were superseded. */
+	#datagrams = new Map<number, Instant>();
 	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
@@ -334,7 +334,6 @@ class Reader implements ResumeSource {
 			// demand only once.
 			sub: subscribe(source.wire, route.name, this.#wire({ floor })),
 			floor,
-			datagramsSeen: this.#datagram,
 			replaced: false,
 			lease: 0,
 		});
@@ -509,6 +508,14 @@ class Reader implements ResumeSource {
 
 	tryDatagram(delivered: Delivered): RecvDatagram {
 		this.sync();
+		// Like groups, the last delivery stays fresh; earlier identities cost memory only
+		// while the reader's budget still covers their successor's arrival.
+		const at = now();
+		const budget = this.#budget() * 1_000_000;
+		for (const [sequence, since] of this.#datagrams) {
+			if (at - since < budget) break;
+			this.#datagrams.delete(sequence);
+		}
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			// A replaced copy's datagrams are the serving one's to deliver.
@@ -517,8 +524,9 @@ class Reader implements ResumeSource {
 				const recv = hooks.tryRecvDatagram(copy.sub);
 				if (recv.kind === "datagram") {
 					const sequence = recv.datagram.sequence;
-					if (copy.datagramsSeen !== undefined && sequence <= copy.datagramsSeen) continue;
-					this.#datagram = Math.max(this.#datagram ?? 0, sequence);
+					if (sequence === this.#datagram || this.#datagrams.has(sequence)) continue;
+					if (this.#datagram !== undefined) this.#datagrams.set(this.#datagram, at);
+					this.#datagram = sequence;
 					return recv;
 				}
 				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;

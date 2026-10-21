@@ -3645,12 +3645,13 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
-	/// The readers' aggregate demand, or `None` while nobody subscribes.
-	pub(super) fn subscription(&self) -> Option<Subscription> {
+	/// The readers' aggregate demand and contribution count, or `None` without one.
+	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
-		snapshot_subscription(&subs, bound)
+		let subs = subs.lock();
+		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
 	}
 
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a
