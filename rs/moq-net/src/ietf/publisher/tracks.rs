@@ -106,6 +106,8 @@ struct Params {
 	order: Option<GroupOrder>,
 	filter: Filter,
 	max_age: Option<u64>,
+	/// NEW_GROUP_REQUEST, applied on the first resume.
+	new_group: Option<u64>,
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
@@ -252,6 +254,7 @@ where
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: msg.max_age,
+				new_group: msg.new_group,
 			},
 			properties_wanted: msg.properties_wanted,
 			skips: Skips::default(),
@@ -722,7 +725,7 @@ where
 					}
 					params.order = ok.group_order.or(params.order);
 					params.filter = ok.filter.unwrap_or(params.filter);
-					new_group = ok.new_group;
+					new_group = ok.new_group.or(params.new_group);
 					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
@@ -750,6 +753,7 @@ where
 						params,
 						how,
 						join.as_ref(),
+						&listed,
 						&mut gate,
 						&mut finished,
 						&mut goaways,
@@ -889,6 +893,7 @@ where
 		params: Params,
 		how: Resume,
 		join: Option<&Join<GroupOf<S>>>,
+		listed: &kio::Consumer<()>,
 		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
 		goaways: &mut super::super::request_stream::Messages<S>,
@@ -978,9 +983,16 @@ where
 				}
 			};
 			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
-			crate::auth::until(serving, |waiter| match gate.poll_denied(waiter) {
-				Poll::Ready(()) => Poll::Ready(Error::Unauthorized.into()),
-				Poll::Pending => Poll::Pending,
+			// A track no longer listed ends its PUBLISH even while the track itself goes on,
+			// as when its broadcast's route is withdrawn.
+			crate::auth::until(serving, |waiter| {
+				if listed.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Error::Cancel.into());
+				}
+				match gate.poll_denied(waiter) {
+					Poll::Ready(()) => Poll::Ready(Error::Unauthorized.into()),
+					Poll::Pending => Poll::Pending,
+				}
 			})
 			.await
 		};
@@ -997,6 +1009,8 @@ where
 				*opened += serve.opened();
 				return Err(());
 			}
+			// Unlisted: the track has not ended, so no END_OF_TRACK, but it is gone here.
+			Err(_) if listed.is_closed() => Served::Track(Ok(())),
 			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
@@ -1076,6 +1090,7 @@ mod tests {
 			filter: None,
 			properties_wanted: true,
 			max_age: None,
+			new_group: None,
 			range_filters: false,
 			track_filter: false,
 			authorization_token: None,
@@ -1479,9 +1494,16 @@ mod tests {
 	}
 
 	/// NEW_GROUP_REQUEST resuming a paused PUBLISH is a join under the track's refresh
-	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not.
+	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not. The listing's
+	/// own is each PUBLISH's default.
 	#[moq_clock::test]
 	async fn a_resume_asks_for_a_new_group() {
+		for on_listing in [false, true] {
+			resume_asks_for_a_new_group(on_listing).await;
+		}
+	}
+
+	async fn resume_asks_for_a_new_group(on_listing: bool) {
 		let version = Version::Draft22;
 		let mut h = harness(version);
 		let live = h
@@ -1492,7 +1514,11 @@ mod tests {
 		group.write_frame(crate::Timestamp::ZERO, b"key".as_slice()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"delta".as_slice()).unwrap();
 
-		let mut request = h.request(&listing(false)).await;
+		let request = ietf::SubscribeTracks {
+			new_group: on_listing.then_some(0),
+			..listing(false)
+		};
+		let mut request = h.request(&request).await;
 		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
 		let mut stream = loop {
 			let (stream, _, name, _) = h.publish().await;
@@ -1508,13 +1534,45 @@ mod tests {
 					start: Location { group: 4, object: 0 },
 					end: None,
 				}),
-				new_group: Some(0),
+				new_group: (!on_listing).then_some(0),
 				..update(2, true)
 			},
 		)
 		.await;
 		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
-		assert_eq!(live.demand().wanted(), Some(5), "the join never reached the track");
+		assert_eq!(
+			live.demand().wanted(),
+			Some(5),
+			"on_listing={on_listing}: the join never reached the track"
+		);
+	}
+
+	/// A forwarding PUBLISH ends with PUBLISH_DONE once its track is no longer listed, here
+	/// because its broadcast's route went, even while the track itself goes on.
+	#[moq_clock::test]
+	async fn an_unlisted_forwarding_publish_ends() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let video = h.tracks.remove("video").unwrap();
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = loop {
+				let (stream, _, name, _) = h.publish().await;
+				if name == "video" {
+					break stream;
+				}
+			};
+			publish_ok(&mut stream).await;
+			send(&mut stream, &update(2, true)).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+
+			drop(h.broadcast);
+			let mut group = video.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"after".as_slice()).unwrap();
+			group.finish().unwrap();
+			let (id, _) = next(&mut stream).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+		}
 	}
 
 	/// Tracks under a namespace our grant does not cover are not listed until it does, and

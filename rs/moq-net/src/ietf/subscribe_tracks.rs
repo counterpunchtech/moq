@@ -34,6 +34,8 @@ pub struct SubscribeTracks<'a> {
 	pub properties_wanted: bool,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
+	/// NEW_GROUP_REQUEST, which each PUBLISH applies as it first forwards.
+	pub new_group: Option<u64>,
 	/// Whether a Range Filter (0x25-0x28) narrows each subscription. We advertise no
 	/// MAX_FILTER_RANGES, so the request is refused. Never encoded.
 	pub range_filters: bool,
@@ -61,6 +63,7 @@ impl Message for SubscribeTracks<'_> {
 			0x20 => self.subscriber_priority,
 			0x21 => self.filter,
 			0x22 => self.group_order,
+			0x32 => self.new_group,
 			0x35 => include_properties,
 			super::max_age::PARAMETER => self.max_age,
 		);
@@ -91,7 +94,7 @@ impl Message for SubscribeTracks<'_> {
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 			0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
-			0x32 => _new_group: Option<u64>,
+			0x32 => new_group: Option<u64>,
 			0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
@@ -115,6 +118,7 @@ impl Message for SubscribeTracks<'_> {
 			filter,
 			properties_wanted: include_properties.unwrap_or(true),
 			max_age: super::max_age::validate(max_age)?,
+			new_group,
 			range_filters,
 			track_filter: !track_property_filter.is_empty(),
 			authorization_token,
@@ -196,6 +200,7 @@ mod tests {
 			filter: None,
 			properties_wanted: true,
 			max_age: None,
+			new_group: None,
 			range_filters: false,
 			track_filter: false,
 			authorization_token: None,
