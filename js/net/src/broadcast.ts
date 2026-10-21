@@ -3,7 +3,8 @@
  *
  * @module
  */
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Milli, sleep } from "@moq/clock";
+import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
@@ -488,6 +489,74 @@ export class Producer {
 		this.#announcer?.unannounce();
 		this.#announcer = undefined;
 		closeState(this.#state);
+	}
+
+	/**
+	 * End the broadcast cleanly, keeping it servable until its media goes stale.
+	 *
+	 * A subscriber still catching up, one that read the final catalog late or is draining a
+	 * backlog, can still request and drain the tracks closed cleanly by now. The returned
+	 * {@link Finish} keeps the broadcast announced: keep it for its {@link Finish.linger}, then
+	 * {@link Finish.close} it, or let {@link Finish.wait} do both. Closing it early is the
+	 * interrupt. Close the tracks first; one still open, or created afterward, adds nothing.
+	 */
+	finish(): Finish {
+		let linger = Milli.zero;
+		for (const track of this.#state.tracks.values()) linger = Milli(Math.max(linger, hooks.linger(track)));
+		return makeFinish(this, linger);
+	}
+}
+
+let makeFinish: (producer: Producer, linger: Milli) => Finish;
+
+/**
+ * A cleanly ended broadcast, still announced and serving its finished tracks.
+ *
+ * Returned by {@link Producer.finish}. Closing it closes the broadcast.
+ *
+ * @public
+ */
+export class Finish {
+	/**
+	 * How long to keep this handle: the longest {@link track.Info.maxAge} of the tracks closed
+	 * cleanly before {@link Producer.finish}, each capped by the cache window. Open or aborted
+	 * tracks, and tracks without a max-age, add nothing.
+	 */
+	readonly linger: Milli;
+
+	#producer: Producer;
+
+	private constructor(producer: Producer, linger: Milli) {
+		this.#producer = producer;
+		this.linger = linger;
+	}
+
+	static {
+		makeFinish = (producer, linger) => new Finish(producer, linger);
+	}
+
+	/** Settles with `null` once the broadcast closes, here or elsewhere, which ends the linger early. */
+	get closed(): GetPromise<null> {
+		return this.#producer.closed;
+	}
+
+	/**
+	 * Keep the broadcast up for {@link linger} on the installed clock, or until it closes
+	 * elsewhere, then close it. The linger counts from this call.
+	 */
+	async wait(): Promise<void> {
+		const timer = new AbortController();
+		try {
+			await race([sleep(Milli.toNano(this.linger), { signal: timer.signal }), this.closed]);
+		} finally {
+			timer.abort();
+			this.close();
+		}
+	}
+
+	/** Close the broadcast now, ending the linger early. Idempotent. */
+	close(): void {
+		this.#producer.close();
 	}
 }
 

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Turning `announce` off finishes the broadcast
+
+Turning the `announce` input off after an announce now finishes the network broadcast cleanly instead of unannouncing it: it stays announced until its media is stale, then closes, and `broadcast.net` is `undefined` meanwhile.
+Turning it back on publishes a new network broadcast under a new epoch, so re-insert your own tracks when `net` changes rather than relying on the old one.
+
 ### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
 
 `Encoder.cut()` no longer spaces keyframes 500 ms apart: every call forces one on the next frame, so frequent calls produce all-keyframe video.

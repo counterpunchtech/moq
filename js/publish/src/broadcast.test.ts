@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Origin, Path, Track } from "@moq/net";
+import { Origin, Path, Time, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
@@ -228,9 +228,63 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	broadcast.close();
 });
 
+// A source that stops ends the publish cleanly: the finished broadcast stays announced while its
+// media is fresh, so a viewer still catching up drains the tail, then it closes.
+test("stopping the announce serves the finished broadcast until its media is stale", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const origin = new Origin.Producer();
+	try {
+		const announce = new Signal(true);
+		const broadcast = new Broadcast({ enabled: true, origin, name: Path.from("test.hang"), announce });
+		const video = broadcast.video("video");
+		video.config.set(videoConfig);
+		await settle();
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+		const subscriber = net.track("video").subscribe();
+		await settle();
+		const track = video.track.peek();
+		if (!track) throw new Error("expected the rendition track once subscribed");
+		const group = track.appendGroup();
+		group.writeFrame({ payload: new Uint8Array([1]), timestamp: Time.Timestamp.now() });
+		group.close();
+
+		announce.set(false);
+		await settle();
+		expect(broadcast.net.peek()).toBeUndefined();
+		expect(net.route).toBeDefined();
+		const late = net.track("video").subscribe().ordered();
+		expect((await late.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		const catalog = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		expect(
+			(await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalog }).latest())?.value.video,
+		).toBeDefined();
+
+		await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+		expect(net.closed.peek()).toBeNull();
+		expect(net.route).toBeUndefined();
+		// A fresh broadcast waits unannounced for the next announce.
+		const next = broadcast.net.peek();
+		expect(next).toBeDefined();
+		expect(next).not.toBe(net);
+		expect(next?.route).toBeUndefined();
+
+		late.close();
+		catalog.close();
+		subscriber.close();
+		broadcast.close();
+	} finally {
+		origin.close();
+		restore();
+	}
+});
+
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same epoch, so a resumed viewer mistook the new catalog for the old one.
-test("a re-announce continues the catalog's group sequence", async () => {
+// same epoch, so a resumed viewer mistook the new catalog for the old one. A re-announce now
+// publishes a new broadcast under a new epoch, replacing the finished one at once.
+test("announcing again replaces a finished broadcast with a new one", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
 		enabled: true,
@@ -243,25 +297,59 @@ test("a re-announce continues the catalog's group sequence", async () => {
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
-	expect((await first.nextGroup())?.sequence).toBe(0);
+	const epoch = net.route?.epoch;
+	expect(epoch).toBeDefined();
 
 	announce.set(false);
 	await settle();
 	broadcast.audio("audio").config.set(audioConfig);
 	await settle();
+	expect(net.closed.peek()).toBeUndefined();
 	announce.set(true);
 	await settle();
 
-	// The same track keeps serving, and its newest group is past the first.
-	expect(broadcast.net.peek()).toBe(net);
-	const group = await first.nextGroup();
-	expect(group?.sequence).toBeGreaterThan(0);
+	expect(net.closed.peek()).toBeNull();
+	const next = broadcast.net.peek();
+	if (!next) throw new Error("expected a new network producer");
+	expect(next).not.toBe(net);
+	expect(next.route?.epoch).toBeDefined();
+	expect(next.route?.epoch).not.toBe(epoch);
+	const group = await next.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
 
-	first.close();
 	broadcast.close();
+});
+
+// Disabling or closing the publisher is abrupt: it ends a finished broadcast's linger at once.
+test("disabling or closing ends a finished broadcast at once", async () => {
+	const enabled = new Signal(true);
+	const announce = new Signal(true);
+	const origin = new Origin.Producer();
+	const broadcast = new Broadcast({ enabled, origin, name: Path.from("test.hang"), announce });
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+
+	const first = broadcast.net.peek();
+	if (!first) throw new Error("expected a network producer once connected");
+	announce.set(false);
+	await settle();
+	expect(first.closed.peek()).toBeUndefined();
+	enabled.set(false);
+	await settle();
+	expect(first.closed.peek()).toBeNull();
+
+	enabled.set(true);
+	announce.set(true);
+	await settle();
+	const second = broadcast.net.peek();
+	if (!second) throw new Error("expected a network producer once re-enabled");
+	announce.set(false);
+	await settle();
+	expect(second.closed.peek()).toBeUndefined();
+	broadcast.close();
+	expect(second.closed.peek()).toBeNull();
+	origin.close();
 });
 
 // Regression: any rendition change re-created every rendition's track, so the next append restarted
