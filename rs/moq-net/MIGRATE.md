@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Timestamps stop at 2^61 - 1
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
+
 ### Anchors can name a time (#6074)
 
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
