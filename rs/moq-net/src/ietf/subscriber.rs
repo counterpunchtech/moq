@@ -2994,10 +2994,9 @@ where
 					self.remove_subscribe(request_id);
 					return None;
 				};
-				let request = match live {
-					true => request.resolving_start(),
-					false => request,
-				};
+				// Pending until the answer is written in below, so a relay serving the copy
+				// never reads the requested floor as where the feed starts.
+				let request = request.request_start(start.map(|start| start.group));
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
 				let dynamic = request.dynamic();
@@ -3005,13 +3004,6 @@ where
 			}
 		};
 		track.received();
-		// A live join starts at the publisher's edge; an absolute one where it asked. With
-		// no Largest the join skips nothing, so every group is owed: a lower one's stream
-		// may still arrive after a higher one's.
-		let _ = match live {
-			true => track.start_at(largest.map_or(0, |largest| largest.group)),
-			false => track.start_at(start.map(|start| start.group)),
-		};
 		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
@@ -3020,6 +3012,13 @@ where
 				frame: 0,
 			});
 		}
+		// A live join starts at the publisher's edge; an absolute one where it asked. With
+		// no Largest the join skips nothing, so every group is owed: a lower one's stream
+		// may still arrive after a higher one's. This resolves the pending start.
+		let _ = match live {
+			true => track.start_at(largest.map_or(0, |largest| largest.group)),
+			false => track.start_at(start.map(|start| start.group)),
+		};
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -3864,10 +3863,10 @@ where
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
-		let mut track = request.accept(accepted_info(&ok.properties));
+		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
+		// from the accept, so no reader takes it as live in between.
+		let track = request.idle().accept(accepted_info(&ok.properties));
 		track.received();
-		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
-		track.set_idle();
 		Some(Idle {
 			demand: track.demand(),
 			track,

@@ -2640,6 +2640,8 @@ impl Producer {
 	/// earlier, and a narrowed subscription skips groups an earlier declaration
 	/// still promised. Pass `None` to clear it, for demand at the live edge:
 	/// its floor is unknown until the feed declares one.
+	///
+	/// Resolves a start left pending by [`Request::request_start`].
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
 		Ok(())
@@ -2713,12 +2715,10 @@ impl Producer {
 		state.idle_newest.filter(|_| state.feed == Feed::Idle)
 	}
 
-	/// Declare the floor a subscription asked for while the serving session has yet to
-	/// resolve its start: nothing below `sequence` arrives, exactly as [`Self::start_at`],
-	/// but [`Subscriber::poll_start`] keeps waiting until a later [`Self::start_at`]
-	/// resolves it.
+	/// [`Request::request_start`] for a copy already accepted, which a held copy's next
+	/// subscription asks for again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
+	// private: capability gap
 	pub(crate) fn request_start(&mut self, sequence: Option<u64>) -> Result<()> {
 		self.modify()?.set_start(sequence, true);
 		Ok(())
@@ -6539,9 +6539,12 @@ pub struct Request {
 	// unless this request was reserved on a tagged broadcast.
 	stats: stats::Scope,
 
-	// The serving session resolves the start of each subscription itself, so the
-	// accepted track's start is unknown until it says (see [`Self::resolving_start`]).
-	resolving_start: bool,
+	// The floor the accepted track's start is pending at, until the source resolves it
+	// (see [`Self::request_start`]).
+	requested_start: Option<Option<u64>>,
+
+	// Whether the accepted track starts idle; see [`Self::idle`].
+	idle: bool,
 
 	// Served from a front's routes; see [`Self::routes`].
 	routes: Option<super::resume::Consumer>,
@@ -6561,7 +6564,8 @@ impl Request {
 			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
-			resolving_start: false,
+			requested_start: None,
+			idle: false,
 			routes: None,
 		}
 	}
@@ -6574,14 +6578,25 @@ impl Request {
 		self
 	}
 
-	/// Mark the track as served by a session that resolves each subscription's start
-	/// (lite-06+), so [`Subscriber::poll_start`] waits for its declaration instead of
-	/// reading the requested floor as the start. Applied atomically with
-	/// [`Self::accept`], before any reader can see the track.
+	/// Accept the track with its start pending at `floor`, the first group its source was
+	/// asked for (`None` for the live edge), until the source says where its feed starts
+	/// with [`Producer::start_at`].
+	///
+	/// Nothing below `floor` arrives, as with [`Producer::start_at`], and groups are read
+	/// as they arrive, but a relay serving the track waits for the resolved start before
+	/// declaring its own. Applied atomically with [`Self::accept`], before any reader can
+	/// see the track.
+	pub fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
+		self.requested_start = Some(floor.into());
+		self
+	}
+
+	/// Accept the track idle, as a copy that no live feed fills yet: readers get nothing
+	/// from it until the feed goes live. Applied atomically with [`Self::accept`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn resolving_start(mut self) -> Self {
-		self.resolving_start = true;
+	// private: capability gap
+	pub(crate) fn idle(mut self) -> Self {
+		self.idle = true;
 		self
 	}
 
@@ -6668,7 +6683,12 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
 			state.accept(info.clone());
-			state.start_pending = self.resolving_start;
+			if let Some(floor) = self.requested_start {
+				state.set_start(floor, true);
+			}
+			if self.idle {
+				state.set_idle();
+			}
 			state.routes = self.routes;
 		}
 		// Accepting the request creates the track producer: count it as one ingress
@@ -10126,6 +10146,39 @@ mod test {
 			matches!(result, Err(Error::Old)),
 			"a drained but unfinished group fails: {result:?}"
 		);
+	}
+
+	/// A start requested before the accept holds a reader of the start from the moment the
+	/// track is visible, while its groups are read as they arrive, until the source
+	/// resolves it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_requested_start_waits_for_the_source() {
+		let waiter = kio::Waiter::noop();
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let consumer = request.consume();
+		let mut producer = request.request_start(2).accept(None);
+		let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
+		assert!(subscriber.poll_start(&waiter).is_pending(), "the floor is not the start");
+
+		// Nothing below the floor is waited for, and a group above it reads at once.
+		producer.create_group(group::Info { sequence: 3 }).unwrap().finish().unwrap();
+		assert_eq!(subscriber.assert_group().sequence, 3);
+		assert!(subscriber.poll_start(&waiter).is_pending());
+
+		producer.start_at(3).unwrap();
+		assert_eq!(subscriber.poll_start(&waiter), Poll::Ready(Some(3)));
+	}
+
+	/// A copy accepted idle is never readable as live in between.
+	#[test]
+	fn an_idle_accept_is_not_live() {
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let consumer = request.consume();
+		let mut producer = request.idle().accept(None);
+		assert!(!consumer.is_live(), "idle from the accept");
+		producer.set_live(None);
+		assert!(consumer.is_live());
 	}
 
 	/// A fetched group installs metadata but never accepts the track's live feed.

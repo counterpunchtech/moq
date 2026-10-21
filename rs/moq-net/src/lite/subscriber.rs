@@ -6496,7 +6496,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		// Lite-06+ resolves each subscription's start from its budget, so the floor
 		// the SUBSCRIBE asks for is not where delivery begins until SUBSCRIBE_START says.
 		let request = match serve.subscriber.version.resolves_start() {
-			true => request.resolving_start(),
+			true => request.request_start(None),
 			false => request,
 		};
 		let serving = request.accept(info);
