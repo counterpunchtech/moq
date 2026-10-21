@@ -4,6 +4,7 @@ import { Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
+import type { Lister } from "./listing.ts";
 import { Route } from "./hop.ts";
 import { hooks } from "./internal.ts";
 import { Producer } from "./origin.ts";
@@ -1610,3 +1611,41 @@ test.each([Milli(100), Milli(3_600_000)])(
 		}
 	},
 );
+
+test.each([
+	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
+	["ends", (answer: Lister) => answer.finish()],
+	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
+])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const from = a.consume();
+	// The old source's listing is answered, as a session answers its peer's.
+	const answer = wireOf(from).lister();
+	answer.synced();
+	b.createTrack("seq");
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		expect(await tracks.next()).toMatchObject({ kind: "synced" });
+
+		// The new source takes over just as the old source's listing settles, which a later
+		// reader of it sees at the same moment the front's reader does.
+		const witness = from.tracks();
+		expect(await witness.next()).toMatchObject({ kind: "synced" });
+		const takeover = () => front.serve(b.consume());
+		const settled = witness.next().then(takeover, takeover);
+		end(answer);
+		await settled;
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "seq" });
+		b.createTrack("late");
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "late" });
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});

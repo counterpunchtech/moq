@@ -1173,6 +1173,8 @@ export class Front {
 				const result = await race([listing.next, wait().then(() => undefined)]);
 				if (!result) continue;
 				listing.next = undefined;
+				// The source was replaced as its answer arrived: the new source's listing supersedes it.
+				if (listing.source !== this.#source) continue;
 				const { event, err } = result;
 				if (err) {
 					// Its readers fail, and a later reader asks again.
