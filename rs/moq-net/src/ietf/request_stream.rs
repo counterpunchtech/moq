@@ -480,7 +480,8 @@ impl Decode<Version> for Update {
 }
 
 /// The namespace-only parameters of a modern REQUEST_UPDATE. `TRACKS` marks one on a
-/// SUBSCRIBE_TRACKS, which from draft-20 may also carry FORWARD.
+/// SUBSCRIBE_TRACKS, which from draft-19 may also carry TRACK_PROPERTY_FILTER and from
+/// draft-20 FORWARD.
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
@@ -512,6 +513,7 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
 				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
+				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
 			if !data.is_empty() {
@@ -662,6 +664,23 @@ mod tests {
 				0x03
 			);
 		}
+	}
+
+	/// From draft-19 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
+	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
+	#[test]
+	fn track_property_filter_on_listing_update_decodes() {
+		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
+		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
+		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
+			assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
+		}
+		let mut buf = bytes::Bytes::from_static(FRAME);
+		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, NamespaceUpdate::<true>::decode).is_err());
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,
