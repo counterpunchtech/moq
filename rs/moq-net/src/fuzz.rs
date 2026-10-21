@@ -27,7 +27,17 @@ pub type Target = fn(&[u8]) -> bool;
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("objects", None).unwrap();
+	// Object properties come from a moq-transport publisher, whose draft serialized them.
+	let info = track::Info {
+		properties: properties.then(|| {
+			std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: ietf::Version::Draft22,
+				values: Vec::new(),
+			})
+		}),
+		..Default::default()
+	};
+	let track = broadcast.create_track("objects", info).unwrap();
 	let mut group = track.append_group().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
@@ -35,10 +45,14 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			std::sync::Arc::new(crate::model::object::Fields {
 				id: id as u64,
 				properties: crate::model::object::Properties {
-					values: vec![crate::model::object::Property {
-						id: 0x80,
-						value: crate::model::object::Value::Int(96_000),
-					}],
+					block: crate::ietf::object::block(
+						&[crate::model::object::Property {
+							id: 0x80,
+							value: crate::model::object::Value::Int(96_000),
+						}],
+						ietf::Version::Draft22,
+					)
+					.unwrap(),
 					..Default::default()
 				},
 			})
@@ -49,6 +63,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 				timestamp: None,
 			},
 			fields,
+			inflated: None,
 		};
 		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
 		frame.write(payload.clone()).unwrap();
@@ -99,7 +114,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 ];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 21;
+const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 40;
@@ -146,20 +161,40 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
+	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
+	// session negotiated the `ietf` extension, or which draft its track came from, so try
+	// every reading.
+	let negotiated: &[bool] = match version.has_ietf() {
+		true => &[false, true],
+		false => &[false],
+	};
 	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
+	for &negotiated in negotiated {
+		for timescale in [Some(crate::Timescale::MILLI), None] {
+			for ietf in [None, Some(ietf::Version::Draft14), Some(ietf::Version::Draft22)] {
+				for compressed in [false, true] {
+					let framing = lite::Framing {
+						timescale,
+						ietf,
+						compressed,
+					};
+					let Ok(decoded) =
+						lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
+					else {
+						continue;
+					};
+					any = true;
 
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
+					let Ok(first) = decoded.encode_bytes(version) else {
+						continue;
+					};
 
-		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
-		assert_eq!(echo, decoded, "datagram did not survive a round trip");
+					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
+						.expect("could not decode our own encoding");
+					assert_eq!(echo, decoded, "datagram did not survive a round trip");
+				}
+			}
+		}
 	}
 	any
 }
@@ -197,6 +232,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		18 => roundtrip::<lite::Probe, _>(rest, version),
 		19 => datagram(rest, version),
 		20 => roundtrip::<lite::Parameters, _>(rest, version),
+		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -431,7 +467,9 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
+				inflated: None,
 				payload: bytes::Bytes::new(),
+				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -463,9 +501,15 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => {
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
+					timescale: Some(crate::Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				})
 				.map(|_| 1)
-				.unwrap(),
+				.unwrap()
+			}
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}
@@ -629,6 +673,7 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
+				compress: false,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,

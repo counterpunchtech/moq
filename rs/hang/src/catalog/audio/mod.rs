@@ -1,8 +1,10 @@
 mod aac;
 mod codec;
+mod layout;
 
 pub use aac::*;
 pub use codec::*;
+pub use layout::*;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -111,6 +113,16 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The publisher instance the reference names, when the catalog knows it. Absent names
+	/// whichever instance the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader on an epoch-aware route refuses another instance rather than fall back to it;
+	/// on an epochless route it is best effort, since the route cannot prove the instance.
+	/// Without [`broadcast`](Self::broadcast), it names the catalog's own instance.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub epoch: Option<moq_net::Epoch>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -126,6 +138,13 @@ pub struct AudioConfig {
 	/// The number of channels in the audio.
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
+
+	/// What the decoded channels carry, or the codec's own channel order when absent.
+	///
+	/// Live state, like video `color`.
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub layout: Option<AudioLayout>,
 
 	/// The maximum bitrate of the audio track in bits per second.
 	#[serde(default)]
@@ -195,10 +214,12 @@ impl AudioConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			epoch: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,
 			channel_count,
+			layout: None,
 			bitrate: None,
 			enabled: true,
 			description: None,

@@ -90,5 +90,4 @@ source withdraws without waiting on an unfinished media stream.
 
 ## Related
 
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

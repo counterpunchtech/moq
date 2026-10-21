@@ -84,14 +84,11 @@ is published; older versions are unchanged.
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what lite-07's DROP Error Code means
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
-- [TRACKS](/quest/m1/archive/tracks.md) - lite-07 carries the request listing a broadcast's tracks as they appear
+- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
 
 ## Related
 
-- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension targets lite-07 wip and does not gate the cut
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this
