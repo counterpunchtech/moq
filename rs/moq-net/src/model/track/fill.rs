@@ -457,9 +457,9 @@ impl Fill {
 		self.inner.result.poll_unused(waiter).map(|_| ())
 	}
 
-	/// The next group to fill in the fill's order, skipping what was answered.
-	// private: capability gap
-	pub(crate) fn next(&self) -> Option<u64> {
+	/// The next group still owed in the fill's order: neither answered nor delivered live
+	/// since it was asked. `None` once every group is answered.
+	pub fn next(&self) -> Option<u64> {
 		loop {
 			let resolved = self.inner.result.read().resolved();
 			let span = self.inner.start.group..self.inner.end;
