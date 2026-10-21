@@ -230,6 +230,17 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's
+	/// reader as a reset keeping its header would. Added in lite-07; earlier versions carry
+	/// an application-specific code there.
+	#[cfg(feature = "async")]
+	pub(crate) fn has_drop_code(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether announcements and track requests carry the publisher epoch, the
 	/// identity that says two routes serve the same bytes. Added in lite-07.
 	/// Older versions carry nothing, so a received route has no epoch and is

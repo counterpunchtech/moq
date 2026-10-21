@@ -36,13 +36,21 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_audio_sample_format {
+	/// Unsigned 8-bit PCM samples, interleaved by channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_U8 = 0,
+	/// Signed 16-bit PCM samples, interleaved by channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_S16 = 1,
+	/// Signed 32-bit PCM samples, interleaved by channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_S32 = 2,
+	/// 32-bit floating-point PCM samples, interleaved by channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_F32 = 3,
+	/// Unsigned 8-bit PCM samples, one plane per channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_U8_PLANAR = 4,
+	/// Signed 16-bit PCM samples, one plane per channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_S16_PLANAR = 5,
+	/// Signed 32-bit PCM samples, one plane per channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_S32_PLANAR = 6,
+	/// 32-bit floating-point PCM samples, one plane per channel.
 	MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR = 7,
 }
 
@@ -66,8 +74,9 @@ fn audio_format_from_u32(value: u32) -> Result<moq_audio::Format, Error> {
 pub struct moq_audio_encoder_input {
 	/// `moq_audio_sample_format` discriminant.
 	pub format: u32,
+	/// The number of PCM samples per second.
 	pub sample_rate: u32,
-	/// Interleaved channel count, which also names the speaker layout by the
+	/// The channel count, which also names the speaker layout by the
 	/// WAVE convention: 1 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1,
 	/// 8 7.1, in front left, front right, center, LFE, back, side order.
 	pub channels: u32,
@@ -81,6 +90,7 @@ pub struct moq_audio_encoder_output {
 	/// Codec id, UTF-8: "opus", "pcm", or "aac". AAC encodes through the
 	/// platform's encoder, so a host without one refuses it.
 	pub codec: *const c_char,
+	/// The length in bytes of `codec`.
 	pub codec_len: usize,
 	/// 0 = derive from input.
 	pub sample_rate: u32,
@@ -97,6 +107,7 @@ pub struct moq_audio_encoder_output {
 /// PCM layout the caller wants out of [`moq_decode_audio`].
 #[repr(C)]
 pub struct moq_audio_decoder_output {
+	/// The moq_audio_sample_format discriminant.
 	pub format: u32,
 	/// 0 = deliver at the codec's native sample rate.
 	pub sample_rate: u32,
@@ -108,9 +119,8 @@ pub struct moq_audio_decoder_output {
 	/// microseconds. Same congestion-control knob as
 	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
 	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip. Named
-	/// `_max` to leave room for a future `min_buffer_us`, a
-	/// jitter-buffer floor rather than a staleness bound.
+	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
+	/// group staleness rather than setting a minimum playout delay.
 	pub max_delay_us: u64,
 }
 
@@ -121,8 +131,11 @@ pub struct moq_audio_decoder_output {
 /// (the publisher copies before returning).
 #[repr(C)]
 pub struct moq_audio_frame {
+	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
+	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
+	/// The length in bytes of `data`.
 	pub data_size: usize,
 }
 
@@ -138,6 +151,7 @@ pub(crate) struct AudioEncoder {
 type AudioProducer = Shared<AudioEncoder>;
 
 #[derive(Default)]
+/// The audio encoder, decoder, and decoded frame handle tables.
 pub struct Audio {
 	producers: NonZeroSlab<AudioProducer>,
 	consumer_tasks: NonZeroSlab<Task>,
@@ -145,6 +159,7 @@ pub struct Audio {
 }
 
 impl Audio {
+	/// Encode PCM frames into an audio track and return its handle.
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::broadcast::Producer,
@@ -195,6 +210,7 @@ impl Audio {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
+	/// Decode a rendition and deliver frame handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::AudioConfig>,
@@ -255,10 +271,12 @@ impl Audio {
 		}
 	}
 
+	/// Stop decoding and release the consumer handle.
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
+	/// Borrow a decoded frame and its metadata until its handle is freed.
 	pub fn frame_info(&self, id: Id, dst: &mut moq_audio_frame) -> Result<(), Error> {
 		let frame = self.frames.get(id).ok_or(Error::FrameNotFound)?;
 		*dst = moq_audio_frame {
@@ -273,6 +291,7 @@ impl Audio {
 		Ok(())
 	}
 
+	/// Release a decoded frame handle.
 	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
 		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())

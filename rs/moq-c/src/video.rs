@@ -104,6 +104,7 @@ pub struct moq_video_encoder_output {
 	/// Backend name, UTF-8, e.g. `"videotoolbox"`, `"nvenc"`, `"mediafoundation"`,
 	/// `"openh264"`. Read only when `kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
 	pub encoder: *const c_char,
+	/// The length in bytes of `encoder`.
 	pub encoder_len: usize,
 }
 
@@ -118,7 +119,9 @@ pub struct moq_video_encoder_output {
 pub struct moq_video_encoder_frame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
+	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
+	/// The length in bytes of `data`.
 	pub data_size: usize,
 }
 
@@ -164,10 +167,15 @@ pub struct moq_video_decoder_output {
 /// dimensions because the encoder already fixed them.
 #[repr(C)]
 pub struct moq_video_frame {
+	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
+	/// The decoded width in pixels.
 	pub width: u32,
+	/// The decoded height in pixels.
 	pub height: u32,
+	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
+	/// The length in bytes of `data`.
 	pub data_size: usize,
 }
 
@@ -516,6 +524,7 @@ impl Video {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
+	/// Decode a rendition and deliver frame handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
@@ -573,6 +582,7 @@ impl Video {
 		}
 	}
 
+	/// Stop decoding and release the consumer handle.
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
@@ -583,6 +593,7 @@ impl Video {
 		self.frames.get(id).cloned().ok_or(Error::FrameNotFound)
 	}
 
+	/// Release a decoded frame handle.
 	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
 		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
