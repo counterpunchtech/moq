@@ -290,7 +290,6 @@ export class Request {
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
-		hooks.pendingTrackProducer = (request) => request.#producer;
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -730,9 +729,6 @@ export class Producer {
 			producer.#served = served;
 			producer.#owe();
 		};
-		hooks.receiveTrack = (producer) => {
-			producer.#remote = true;
-		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
@@ -766,7 +762,25 @@ export class Producer {
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
 		};
-		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
+	}
+
+	/**
+	 * Mark this track as a copy received from a remote publisher, before writing to it,
+	 * mirroring the Rust `received`. Its groups are never checked for a timestamp rewind,
+	 * which only a local publisher's writes refuse, since a received timestamp may not be
+	 * media time.
+	 */
+	received(): void {
+		this.#remote = true;
+	}
+
+	/**
+	 * Record that the publisher gave up the groups `[start, end)`, mirroring the Rust
+	 * `drop_groups`: none will arrive, so a reader waiting on one moves past it, the declared
+	 * end does not wait for them, and a relay serving this track forwards the drop.
+	 */
+	dropGroups(start: number, end: number): void {
+		this.#drop(start, end);
 	}
 
 	#drop(start: number, end: number): void {
@@ -1648,21 +1662,37 @@ export class Subscriber {
 		};
 	}
 
-	// The group after `sequence` that bounds it: the first servable one below `end`,
-	// stamped or not, empty or not.
+	// The group after `sequence` that bounds it: the first servable one below `end` that
+	// counts as content (its first frame landed, or it ended), stamped or not.
 	//
 	// Its first timestamp is the furthest presentation time `sequence` could still reach.
 	// An upper bound, deliberately: a frame's duration is not on the wire, so a group's own
-	// last timestamp says where it starts presenting, not where it ends. The bound is the
-	// *immediate* successor's start, so an unstamped successor leaves the reach unbounded
-	// until it presents a frame.
+	// last timestamp says where it starts presenting, not where it ends. A group whose header
+	// landed without a frame is not content yet, so the next one is the bound; an unstamped
+	// successor leaves the reach unbounded.
 	#successor(sequence: number, end?: number): GroupConsumer | undefined {
+		return this.#after(sequence, end, hooks.groupStarted);
+	}
+
+	// The group after `sequence` that starts its wall clock: like {@link #successor}, but
+	// counting a group before its first frame. Its header arrived, so a relay ages the group
+	// before it as the origin does, even if its first frame never comes.
+	#arrival(sequence: number, end?: number): GroupConsumer | undefined {
+		return this.#after(sequence, end, () => true);
+	}
+
+	// The first servable group after `sequence` below `end` that `counts`.
+	#after(
+		sequence: number,
+		end: number | undefined,
+		counts: (group: GroupConsumer) => boolean,
+	): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, sequence + 1); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.sequence >= end) break;
 			if (successor.closed.peek() instanceof Error) continue;
-			return successor;
+			if (counts(successor)) return successor;
 		}
 		return undefined;
 	}
@@ -1695,13 +1725,15 @@ export class Subscriber {
 
 	// The drift verdict for `sequence` by its successor alone, whether or not this track holds it.
 	#staleAt(sequence: number, drift: Drift, wake = false): boolean {
-		const successor = this.#successor(sequence, drift.end);
-		if (!successor) return false;
+		const arrival = this.#arrival(sequence, drift.end);
+		if (!arrival) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = hooks.groupArrived(successor) + drift.budget * 1_000_000;
+		const deadline = hooks.groupArrived(arrival) + drift.budget * 1_000_000;
 		if (now() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 
+		const successor = this.#successor(sequence, drift.end);
+		if (!successor) return false;
 		const reach = hooks.groupTimestamp(successor)?.asMillis();
 		return (
 			drift.presentation !== undefined &&

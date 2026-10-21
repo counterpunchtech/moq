@@ -4,6 +4,43 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Frame writers own their group (#6111)
+
+`group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
+`frame::Producer::finish` hands the group writer back, and `frame::Producer::group()` returns `&group::Producer` instead of a `group::Info` copy.
+A frame the group refuses (closed, or past its size) now aborts the group.
+
+```rust
+// Before
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+frame.finish()?;
+// After
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+group = frame.finish()?;
+```
+
+A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
+
+### A received track's end waits for groups in flight (#6111)
+
+Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
+On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range)` marks groups the peer said it skipped, so readers stop waiting for them.
+`finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
+
+`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
+
+### A frameless group is not the live edge (#6111)
+
+Every group reaches readers as soon as it is created, but the live edge, `largest()`, and the judgment of whether a group was succeeded count a group only once its first frame opens or it finishes.
+A group followed by a frameless one is judged against the next group that has a frame.
+
+### `track::Producer::abort` aborts open groups (#6111)
+
+Aborting a track now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
+`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.

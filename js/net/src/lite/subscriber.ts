@@ -863,7 +863,7 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
-		hooks.receiveTrack(producer);
+		producer.received();
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -1253,7 +1253,7 @@ export class Subscriber {
 				}
 			} else if ("drop" in resp) {
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
+				entry.track.dropGroups(resp.drop.start, resp.drop.end + 1);
 			}
 		}
 	}

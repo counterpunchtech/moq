@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A frameless group is not a successor (#6111)
+
+A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
+`Track.Producer.received()` marks a track as written from a peer, and `Track.Producer.dropGroups(start, end)` marks groups the peer said it skipped.
+
 ### `largest()` reports within a reader's `setGroups` bounds
 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.

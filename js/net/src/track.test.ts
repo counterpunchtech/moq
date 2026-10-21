@@ -630,10 +630,10 @@ test("the latency budget skips a buffered timeline on either cursor", async () =
 	expect((await replay.nextGroup())?.sequence).toBe(2);
 });
 
-// An unstamped immediate successor leaves a group's reach unbounded: a later stamped
-// group proves nothing about where the successor will begin, and shrinking the bound
-// is the unsafe direction.
-test("an unstamped immediate successor leaves reach unbounded", async () => {
+// A frameless successor is not content, so the next started group bounds the group before
+// it. That bound is sound: the frameless group's first frame is checked to start at or below
+// the next group's, so the true reach can only be earlier.
+test("a frameless successor leaves the next started group as the bound", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	// Any budget, so only media time judges: the wall clock barely moves here.
 	const track = producer.subscribe({ maxDelay: Milli(500) });
@@ -643,9 +643,8 @@ test("an unstamped immediate successor leaves reach unbounded", async () => {
 	producer.writeFrame({ payload: enc.encode("2"), timestamp: Timestamp.fromMillis(10_000) });
 	producer.writeFrame({ payload: enc.encode("3"), timestamp: Timestamp.fromMillis(11_000) });
 
-	// Group 1's reach is group 2's start, a second behind the edge: stale.
-	// Group 0's reach is unknown until group 1 presents its first frame, so it is kept.
-	expect(drain(track)).toEqual([0, 2, 3]);
+	// Groups 0 and 1 both reach at most group 2's start, a second behind the edge: stale.
+	expect(drain(track)).toEqual([2, 3]);
 });
 
 // Groups can arrive out of sequence order; the immediate successor bounds reach even when it
@@ -2697,7 +2696,7 @@ test("an explicit start floors an untimed track", () => {
 test("explicit and producer-cut drops survive outside the group cache", async () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
-	hooks.dropTrackGroups(producer, 3, 4);
+	producer.dropGroups(3, 4);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 3, end: 4 });
 
 	const group = new GroupProducer(4);
@@ -2713,7 +2712,7 @@ test("explicit and producer-cut drops survive outside the group cache", async ()
 test("a drop below the window is reported once the window lowers to it", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 5 } } });
-	hooks.dropTrackGroups(producer, 2, 3);
+	producer.dropGroups(2, 3);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 
 	hooks.replaceGroups(reader, { start: { included: 0 } });
@@ -2744,11 +2743,11 @@ test("a re-created cut group is served, not dropped", async () => {
 test("a wide drop is held and reported as one run", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
-	hooks.dropTrackGroups(producer, 2, 2 ** 40);
+	producer.dropGroups(2, 2 ** 40);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 2 ** 40 });
 
 	// A wider drop reports only what this cursor has not reported yet.
-	hooks.dropTrackGroups(producer, 1, 2 ** 40 + 2);
+	producer.dropGroups(1, 2 ** 40 + 2);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1, end: 2 });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2 ** 40, end: 2 ** 40 + 2 });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
@@ -3239,7 +3238,7 @@ for (const abort of [false, true]) {
 		const next = reader.recvGroup();
 		expect(await settled(next)).toBe(false);
 
-		hooks.dropTrackGroups(producer, 0, 2);
+		producer.dropGroups(0, 2);
 		if (abort) producer.close(new Error("dropped"));
 		expect(await next).toBeUndefined();
 		if (abort) expect(await reader.closed).toBeNull();

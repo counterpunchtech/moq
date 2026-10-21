@@ -365,17 +365,8 @@ export const hooks: {
 	 * `track.ts`.
 	 */
 	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
-	 * rewind, since a received timestamp may not be media time.
-	 */
-	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
-	// pending: /quest/m1/public-model/ingest.md
-	/** Access the existing producer while a request awaits immutable wire metadata. */
-	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
@@ -391,9 +382,6 @@ export const hooks: {
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
-	// pending: /quest/m1/public-model/ingest.md
-	/** Record sequences `[start, end)` an upstream publisher explicitly gave up. */
-	dropTrackGroups: (producer: Producer, start: number, end: number) => void;
 	// pending: /quest/m1/public-model/serve.md
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
@@ -473,6 +461,8 @@ export const hooks: {
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
+	/** Whether a group counts as content: its first frame landed, or it ended. */
+	groupStarted: (group: GroupConsumer) => boolean;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
@@ -497,9 +487,6 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
-	receiveTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -516,9 +503,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	pendingTrackProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindSequence: () => {
@@ -538,9 +522,6 @@ export const hooks: {
 	},
 	groupProgress: () => {
 		throw new Error("group.ts not loaded");
-	},
-	dropTrackGroups: () => {
-		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {
 		throw new Error("track.ts not loaded");
@@ -621,6 +602,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupArrived: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
