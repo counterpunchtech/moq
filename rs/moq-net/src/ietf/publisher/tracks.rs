@@ -252,6 +252,11 @@ where
 			.unwrap_or_default();
 		let peer = self.peer().await;
 		let declared = self.peer_setup.get().await;
+		// With MoQ Auth, wait for the answer to the credential we presented at setup, so no
+		// track is listed before our grant says which ones the peer may see.
+		if declared.auth {
+			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
+		}
 		let origin = self
 			.origin
 			.scope(&prefix, &scope)
@@ -1884,6 +1889,38 @@ mod tests {
 		assert_eq!(request_error(&body, version), request::NOT_SUPPORTED);
 	}
 
+	/// A paused subscription opens no groups, so an update that pauses may not ask for one,
+	/// while forwarding as while paused.
+	#[moq_clock::test]
+	async fn a_pausing_new_group_is_refused() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let _live = h
+				.broadcast
+				.create_track("live", crate::track::Info::timed().with_refresh(Some(1)))
+				.unwrap();
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = loop {
+				let (stream, _, name, _) = h.publish().await;
+				if name == "live" {
+					break stream;
+				}
+			};
+			publish_ok(&mut stream).await;
+			send(&mut stream, &update(2, true)).await;
+			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+			let ask = ietf::SubscribeUpdate {
+				new_group: Some(0),
+				..update(4, false)
+			};
+			send(&mut stream, &ask).await;
+			let (id, body) = next(&mut stream).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}");
+			assert_eq!(request_error(&body, version), request::NOT_SUPPORTED, "{version}");
+		}
+	}
+
 	/// An update taken while forwarding outlives a pause: the next resume keeps it.
 	#[moq_clock::test]
 	async fn a_forwarding_update_outlives_a_pause() {
@@ -2092,6 +2129,41 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert!(done.end(version).is_err(), "{version}: ended cleanly");
+		}
+	}
+
+	/// With MoQ Auth, no track is listed until the peer answers our setup credential, whose
+	/// grant may narrow what the listing shows.
+	#[moq_clock::test]
+	async fn a_listing_waits_for_the_setup_answer() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let auth = crate::auth::Handle::new(true);
+			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+			let setup = peer::PeerSetup::default();
+			setup.set(peer::Peer {
+				auth: true,
+				..Default::default()
+			});
+			h.publisher = Publisher::new(
+				crate::time::sim(),
+				h.session.clone(),
+				h._origin.consume(),
+				Control::new(None, false),
+				None,
+				setup,
+				version,
+			)
+			.with_auth(auth.clone());
+
+			let _request = h.request(&listing(false)).await;
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			assert!(opened.is_pending(), "{version}: listed a track before the setup answer");
+
+			auth.granted(0, crate::auth::Grant::all());
+			let (mut stream, ..) = h.publish().await;
+			publish_ok(&mut stream).await;
 		}
 	}
 

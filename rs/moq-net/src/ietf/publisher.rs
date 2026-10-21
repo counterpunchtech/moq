@@ -1802,6 +1802,10 @@ where
 				"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 				Error::Unsupported,
 			)),
+			// A paused subscription opens no groups, so one is asked for only as it resumes.
+			None if update.new_group.is_some() && update.forward == Some(false) => {
+				Some(("NEW_GROUP_REQUEST while pausing", Error::Unsupported))
+			}
 			None => None,
 		};
 		if let Some((reason, err)) = refused {
