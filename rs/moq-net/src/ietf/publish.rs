@@ -239,7 +239,12 @@ pub struct Publish<'a> {
 
 	/// Metadata about the track, sent as Track Properties (draft-17+).
 	pub properties: Properties,
-	// pub parameters: Parameters,
+	/// The subscription's SUBSCRIBER_PRIORITY (draft-20+), `None` when absent: 128.
+	pub subscriber_priority: Option<u8>,
+	/// The subscription's GROUP_ORDER (draft-20+), `None` when absent: the track's own.
+	pub group_order: Option<GroupOrder>,
+	/// The subscription's Location Filter (draft-20+), `None` when absent: unfiltered.
+	pub filter: Option<Filter>,
 }
 
 impl Message for Publish<'_> {
@@ -272,18 +277,24 @@ impl Message for Publish<'_> {
 				w.u8(0);
 			}
 			_ => {
-				// GROUP_ORDER is a legal PUBLISH parameter only through draft-15; a later peer
-				// closes the session with PROTOCOL_VIOLATION when it sees one. The publisher's
-				// preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property instead, which we
-				// write from draft-17 on. Draft-16 gets neither form; see Properties::encode.
+				// GROUP_ORDER is the publisher's preference on a draft-15 PUBLISH, illegal from
+				// draft-16 to draft-19 (a peer closes the session with PROTOCOL_VIOLATION), and
+				// from draft-20 one of the subscription's parameters, which moved here. The
+				// publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property
+				// instead, which we write from draft-17 on. Draft-16 gets neither form; see
+				// Properties::encode.
+				let draft20 = Filter::is_draft20(version);
 				let group_order = match version {
 					Version::Draft15 => self.properties.group_order,
+					_ if draft20 => self.group_order,
 					_ => None,
 				};
 
 				encode_params!(w, version,
 					0x09 => self.largest_location,
 					0x10 => self.forward,
+					0x20 => self.subscriber_priority.filter(|_| draft20),
+					0x21 => self.filter.filter(|_| draft20),
 					0x22 => group_order,
 				);
 
@@ -327,6 +338,9 @@ impl Message for Publish<'_> {
 						group_order: Some(group_order),
 						..Default::default()
 					},
+					subscriber_priority: None,
+					group_order: None,
+					filter: None,
 				})
 			}
 			_ => {
@@ -337,7 +351,7 @@ impl Message for Publish<'_> {
 				// The draft-20 parameters have to parse even though reverse publishing is
 				// unsupported: an unlisted parameter fails the whole message, which would
 				// kill the session instead of letting the request reach NOT_SUPPORTED.
-				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The values are dropped.
+				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The timeouts are dropped.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft20(version),
 					0x03 => authorization_token: Vec<super::token::RequestToken>,
@@ -345,14 +359,20 @@ impl Message for Publish<'_> {
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
-					0x20 => _subscriber_priority: Option<u8> where Filter::is_draft20(version),
-					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
+					0x20 => subscriber_priority: Option<u8> where Filter::is_draft20(version),
+					0x21 => filter: Option<Filter> where Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft20(version),
 				);
 				let mut properties = Properties::decode(r, version)?;
 				// Last, so a malformed field closes the session before a token refusal.
 				super::token::single(authorization_token)?;
-				properties.group_order = properties.group_order.or(group_order);
+				// Draft-15's GROUP_ORDER is the publisher's preference; draft-20's is the
+				// subscription's.
+				let (publisher_order, group_order) = match version {
+					Version::Draft15 => (group_order, None),
+					_ => (None, group_order),
+				};
+				properties.group_order = properties.group_order.or(publisher_order);
 
 				let forward = forward.unwrap_or(true);
 
@@ -364,6 +384,9 @@ impl Message for Publish<'_> {
 					largest_location,
 					forward,
 					properties,
+					subscriber_priority,
+					group_order,
+					filter,
 				})
 			}
 		}
@@ -592,6 +615,9 @@ mod tests {
 				group_order: Some(GroupOrder::Descending),
 				..Default::default()
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -618,6 +644,9 @@ mod tests {
 				group_order: Some(GroupOrder::Descending),
 				..Default::default()
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -682,6 +711,9 @@ mod tests {
 				group_order: Some(GroupOrder::Descending),
 				..Default::default()
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -843,6 +875,9 @@ mod tests {
 				group_order: Some(GroupOrder::Descending),
 				..Default::default()
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -877,6 +912,9 @@ mod tests {
 				largest_location: None,
 				forward: true,
 				properties: Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
 			};
 			let baseline = encode_message(&msg, version);
 			msg.properties.priority = Some(37);
@@ -917,6 +955,9 @@ mod tests {
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		#[rustfmt::skip]
@@ -955,6 +996,9 @@ mod tests {
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		#[rustfmt::skip]
@@ -989,6 +1033,9 @@ mod tests {
 				group_order: Some(GroupOrder::Descending),
 				..Default::default()
 			},
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let v17 = encode_message(&msg, Version::Draft17);

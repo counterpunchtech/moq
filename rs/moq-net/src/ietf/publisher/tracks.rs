@@ -138,8 +138,6 @@ struct Listed {
 	namespace: crate::PathOwned,
 	name: Arc<str>,
 	properties: ietf::Properties,
-	/// Whether the track opted in to DYNAMIC_GROUPS, so NEW_GROUP_REQUEST applies.
-	dynamic: bool,
 	/// Closes once the track is no longer listed.
 	listed: kio::Consumer<()>,
 	/// Closes once the request is cancelled, which a PUBLISH not yet sent heeds.
@@ -608,7 +606,6 @@ where
 						namespace: namespace.clone(),
 						name: name.clone(),
 						properties,
-						dynamic: info.refresh.is_some(),
 						listed: entry.consume(),
 						live: request.live.clone(),
 						slot,
@@ -634,13 +631,15 @@ where
 			namespace,
 			name,
 			properties,
-			dynamic,
 			listed,
 			live,
 			slot,
 			mut params,
 		} = task;
 		let _slot = slot;
+		// An update may ask for a new group only if the PUBLISH sent DYNAMIC_GROUPS, which
+		// INCLUDE_PROPERTIES=0 leaves out.
+		let dynamic = properties.dynamic_groups;
 		let absolute = self.origin.absolute(&namespace).to_owned();
 
 		// Every wait on the peer's credit, for the stream, a Request ID, or the PUBLISH's
@@ -690,6 +689,11 @@ where
 			largest_location: live_edge(&track).largest,
 			forward: false,
 			properties,
+			// Draft-20 and later state the listing's subscription parameters on each PUBLISH;
+			// earlier drafts carry them on PUBLISH_OK.
+			subscriber_priority: Some(params.priority),
+			group_order: params.order,
+			filter: Some(params.filter),
 		};
 		let written = {
 			let mut writing = std::pin::pin!(stream.writer.encode(&publish));
@@ -1579,6 +1583,77 @@ mod tests {
 			Some(5),
 			"on_listing={on_listing}: the join never reached the track"
 		);
+	}
+
+	/// From draft-20 an update may ask for a new group only if its PUBLISH sent
+	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out even for a dynamic track.
+	#[moq_clock::test]
+	async fn a_new_group_needs_the_advertised_dynamic_groups() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut h = harness(version);
+			let live = h
+				.broadcast
+				.create_track("live", crate::track::Info::timed().with_refresh(Some(1)))
+				.unwrap();
+			let request = ietf::SubscribeTracks {
+				properties_wanted: false,
+				..listing(false)
+			};
+			let mut request = h.request(&request).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = loop {
+				let (stream, _, name, _) = h.publish().await;
+				if name == "live" {
+					break stream;
+				}
+			};
+			publish_ok(&mut stream).await;
+			send(
+				&mut stream,
+				&ietf::SubscribeUpdate {
+					new_group: Some(0),
+					..update(2, true)
+				},
+			)
+			.await;
+			let (id, body) = next(&mut stream).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}");
+			assert_eq!(request_error(&body, version), request::NOT_SUPPORTED, "{version}");
+			assert_eq!(
+				live.demand().wanted(),
+				None,
+				"{version}: the refused join reached the track"
+			);
+		}
+	}
+
+	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
+	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
+	#[moq_clock::test]
+	async fn a_listing_states_its_parameters_on_each_publish() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let request = ietf::SubscribeTracks {
+				subscriber_priority: Some(7),
+				group_order: Some(GroupOrder::Ascending),
+				filter: Some(Filter::NextObject),
+				..listing(false)
+			};
+			let mut request = h.request(&request).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let publish: ietf::Publish = body.message(version).unwrap();
+			let stated = Filter::is_draft20(version);
+			assert_eq!(publish.subscriber_priority, stated.then_some(7), "{version}");
+			assert_eq!(
+				publish.group_order,
+				stated.then_some(GroupOrder::Ascending),
+				"{version}"
+			);
+			assert_eq!(publish.filter, stated.then_some(Filter::NextObject), "{version}");
+		}
 	}
 
 	/// A forwarding PUBLISH ends with PUBLISH_DONE once its track is no longer listed, here
