@@ -15784,6 +15784,37 @@ mod range_tests {
 		);
 	}
 
+	/// A relay holding groups of a requested track stages them before committing, so the
+	/// Largest Location that SUBSCRIBE_OK snapshots as soon as the subscribe resolves always
+	/// names the replayed group (#5862). Raced on real threads, many times.
+	#[test]
+	fn subscribe_ok_reports_a_staged_replay() {
+		for _ in 0..500 {
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let cache = broadcast.consume().track("video").unwrap();
+			let snapshot = std::thread::spawn(move || {
+				futures::executor::block_on(async {
+					let mut track = cache.subscribe(None).await.unwrap();
+					kio::wait(|waiter| track.poll_live(waiter)).await;
+					live_edge(&cache).largest
+				})
+			});
+			let staged = request.stage(crate::track::Info::timed());
+			for sequence in 0..3 {
+				let mut group = staged.create_group(group::Info { sequence }).unwrap();
+				for _ in 0..2 {
+					group
+						.write_frame(crate::Timestamp::from_millis(sequence).unwrap(), b"frame".as_slice())
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			let _track = staged.commit();
+			assert_eq!(snapshot.join().unwrap(), Some(Location { group: 2, object: 1 }));
+		}
+	}
+
 	/// Group numbering may legally skip sequences, so the walk follows the cache's own
 	/// order rather than decrementing by one.
 	#[test]

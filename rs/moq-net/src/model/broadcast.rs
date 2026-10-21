@@ -2067,6 +2067,43 @@ mod test {
 		assert!(stale.append_group().is_err());
 	}
 
+	/// A staged track resolves no subscriber until it commits, and then with what was
+	/// written meanwhile.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_staged_track_resolves_subscribers_at_commit() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let mut subscribing = std::pin::pin!(track.subscribe(None));
+		assert!(futures::poll!(subscribing.as_mut()).is_pending());
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		moq_clock::sim::yield_now().await;
+		assert!(futures::poll!(subscribing.as_mut()).is_pending(), "still staged");
+
+		let _track = staged.commit();
+		let mut subscriber = subscribing.await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+	}
+
+	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail
+	/// rather than wait on a track nobody will publish.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn dropping_a_staged_track_rejects_the_request() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let subscribing = track.subscribe(None);
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		drop(staged);
+		assert!(matches!(subscribing.await, Err(Error::Dropped)));
+	}
+
 	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps
 	/// its cache and its publisher decides when it ends. Only a new lookup is refused.
 	#[moq_clock::test]

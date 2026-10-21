@@ -161,13 +161,31 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     atomically with `accept`, gates `poll_start` (the lite publisher's
     resolved start) until `start_at`. The IETF TRACK_STATUS race is fixed
     with a crate-private `Request::idle()` applied in the same accept.
-  - Still open: the public way to accept with content. Gating `poll_live`
-    on a pending start makes an IETF SUBSCRIBE_OK for an empty lite-06 track
-    wait for its first group (lite-06 resolves its start only with the first
-    served group), and a public runtime `set_live` is unwanted. Candidates:
-    write through the request before `accept`; a staged accept whose
-    `commit(self) -> Producer` publishes the track, rejecting if dropped; or
-    `accept` taking the initial content.
+  - ✅ Decided 2026-10-20 by the maintainer and landed in #6111: a staged
+    accept. `Request::stage(info) -> Staged` (`#[must_use]`, derefs to the
+    `Producer`), `Staged::commit(self) -> Producer` resolves the waiting
+    subscribers with what was written, and dropping it uncommitted rejects
+    the request with `Error::Dropped`. `accept(info)` is `stage(info).commit()`.
+    The IETF subscriber stages, reports Largest, resolves its start, then
+    commits. JS mirrors it (`Request.stage`, `Staged.producer`, `commit`,
+    disposal rejects). Everything else, lite-fed copies included, keeps
+    answering SUBSCRIBE_OK and TRACK_STATUS from the cache at once: the relay
+    never waits on a peer for Largest, and the subscriber filters old content.
+    Rejected:
+    - Gating `poll_live` on a pending start: an IETF SUBSCRIBE_OK for an
+      empty lite-06 track would wait for its first group.
+    - A public idle accept plus `Producer::set_live`: a runtime flag the
+      caller must remember to flip.
+    - A public `report_largest(Option<Position>)` that SUBSCRIBE_OK waits on:
+      it makes the relay wait on a peer for Largest, which for lite-fed copies
+      means the first group, and a quiet track would time out the JS IETF
+      subscriber's 10 s request deadline.
+    - `Request::producer(info)` plus an info-less `accept()`: no less API
+      than `stage`, breaks every `accept` caller, and loses the drop-rejects
+      guarantee. A `Request` cannot write before it knows its `Info`, since
+      every write checks the timescale and groups copy the info.
+    - `accept` taking the initial content: breaks every caller, adopts groups
+      from another track, and cannot carry a group still being written.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
   `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups

@@ -309,24 +309,73 @@ export class Request {
 
 	/**
 	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if `info` is invalid.
+	 * request, if `info` is invalid. The same as {@link stage} followed by {@link Staged.commit}.
 	 */
 	accept(info: Partial<Info> = {}): Producer {
+		return this.stage(info).commit();
+	}
+
+	/**
+	 * Take the track's {@link Producer} without resolving any subscriber yet, so content written
+	 * through {@link Staged.producer} is there when the first reader looks. For a relay that
+	 * already holds groups of the track: write them, then {@link Staged.commit}. Disposing the
+	 * {@link Staged} uncommitted rejects the request.
+	 */
+	stage(info: Partial<Info> = {}): Staged {
 		this.#pending.delete(this);
-		try {
-			bindProducerSequence(this.#producer, this.#sequences.get(this.name));
-			return this.#producer.accept(info);
-		} catch (err) {
-			// Refused, so its subscribers see the error instead of waiting on an open request.
-			this.#producer.close(err instanceof Error ? err : new Error(String(err)));
-			throw err;
-		}
+		bindProducerSequence(this.#producer, this.#sequences.get(this.name));
+		return new Staged(this.#producer, info);
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
 		this.#pending.delete(this);
 		this.#producer.close(err);
+	}
+}
+
+/**
+ * A requested track being written before any subscriber sees it; see {@link Request.stage}.
+ *
+ * Write through {@link producer}. Subscribers waiting on the request resolve only at
+ * {@link commit}, with everything written by then. Disposing it uncommitted rejects the request,
+ * so hold it with `using` or commit it.
+ *
+ * @public
+ */
+export class Staged {
+	/** The track's writer. */
+	readonly producer: Producer;
+
+	#info: Partial<Info>;
+	#done = false;
+
+	/** @internal */
+	constructor(producer: Producer, info: Partial<Info>) {
+		this.producer = producer;
+		this.#info = info;
+	}
+
+	/**
+	 * Publish the track: every waiting subscriber resolves now, with what was written. Throws,
+	 * rejecting the request, if the info is invalid or something written does not match it.
+	 */
+	commit(): Producer {
+		this.#done = true;
+		try {
+			return this.producer.accept(this.#info);
+		} catch (err) {
+			// Refused, so its subscribers see the error instead of waiting on an open request.
+			this.producer.close(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
+	}
+
+	/** Reject the request unless it was committed. */
+	[Symbol.dispose](): void {
+		if (this.#done) return;
+		this.#done = true;
+		this.producer.close(new Error("staged track dropped"));
 	}
 }
 

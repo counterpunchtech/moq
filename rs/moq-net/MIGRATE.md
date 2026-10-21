@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Stage a requested track before subscribers see it (#6111)
+
+`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF SUBSCRIBE_OK's Largest Location) sees them.
+Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+```rust
+let mut staged = request.stage(info);
+for group in retained { /* staged.create_group(..), write, finish */ }
+let producer = staged.commit();
+```
+
 ### Frame writers own their group (#6111)
 
 `group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.

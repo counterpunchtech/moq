@@ -1206,13 +1206,16 @@ export class Subscriber {
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("largest group exceeds safe integers");
 		}
-		const producer = request.accept({
+		// Staged until the answer is written in below, so no reader sees the track before its
+		// Largest and start.
+		const staged = request.stage({
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
+		const producer = staged.producer;
 		producer.received();
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 		state.subscription = subscription;
@@ -1229,6 +1232,7 @@ export class Subscriber {
 			start: ok.largest ? Number(ok.largest.groupId) : 0,
 			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
 		});
+		staged.commit();
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name, epoch });

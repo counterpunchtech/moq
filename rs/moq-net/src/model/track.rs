@@ -278,6 +278,9 @@ pub(crate) struct TrackState {
 	// Whether a live Producer was minted. A reverse fetch may install `info`
 	// before acceptance, so the two states are deliberately separate.
 	published: bool,
+	// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
+	// subscribers resolve only at `Staged::commit`, with everything written by then.
+	staged: bool,
 	// Whether a dynamic handler took the request. Its answer is the handler's call,
 	// so ending the broadcast leaves it pending rather than rejecting it.
 	claimed: bool,
@@ -774,7 +777,7 @@ impl TrackState {
 	}
 
 	fn poll_info(&self) -> Poll<Result<Info>> {
-		if let Some(info) = &self.info {
+		if let Some(info) = self.info.as_ref().filter(|_| !self.staged) {
 			Poll::Ready(Ok(info.clone()))
 		} else if let Some(err) = &self.abort {
 			// Aborted before anyone served it, so the info can never arrive: fail the
@@ -6506,12 +6509,62 @@ impl Ordered {
 	}
 }
 
+/// A requested track being written before any subscriber sees it; see [`Request::stage`].
+///
+/// Write through it as through the [`Producer`] it derefs to. Subscribers waiting on the
+/// request resolve only at [`Self::commit`], with everything written by then. Dropping it
+/// uncommitted rejects the request with [`Error::Dropped`].
+#[must_use = "a staged track is rejected unless committed"]
+pub struct Staged {
+	// Taken only by `commit`.
+	producer: Option<Producer>,
+	// The request's fetch claim, held until the track is published like an unanswered
+	// request's: a cache miss meanwhile waits rather than racing its own handler.
+	_dynamic: Dynamic,
+}
+
+impl Staged {
+	/// Publish the track: every waiting subscriber resolves now, with what was written.
+	pub fn commit(mut self) -> Producer {
+		let producer = self.producer.take().expect("taken only by commit");
+		if let Ok(mut state) = producer.state.write() {
+			state.staged = false;
+		}
+		producer
+	}
+}
+
+impl ops::Deref for Staged {
+	type Target = Producer;
+
+	fn deref(&self) -> &Producer {
+		self.producer.as_ref().expect("taken only by commit")
+	}
+}
+
+impl ops::DerefMut for Staged {
+	fn deref_mut(&mut self) -> &mut Producer {
+		self.producer.as_mut().expect("taken only by commit")
+	}
+}
+
+impl Drop for Staged {
+	fn drop(&mut self) {
+		if let Some(producer) = self.producer.take()
+			&& let Ok(state) = producer.state.write()
+		{
+			commit_abort(state, Error::Dropped);
+		}
+	}
+}
+
 /// A subscriber asked for a track this broadcast doesn't have yet.
 ///
 /// Yielded by [`poll_requested_track`](crate::broadcast::Dynamic::poll_requested_track),
 /// or created up front with [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track).
 /// Subscribers block until the request is
-/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`], or
+/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`] (or
+/// [`stage`](Self::stage) to write content before they see it), or
 /// [`reject`](Self::reject) to fail them. Dropping it without either rejects with
 /// [`Error::Dropped`].
 ///
@@ -6678,12 +6731,25 @@ impl Request {
 	/// (`None` for the defaults). If the track was already aborted, the returned
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
+	///
+	/// The same as [`Self::stage`] followed by [`Staged::commit`].
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
+		self.stage(info).commit()
+	}
+
+	/// Mint the track's [`Producer`] without resolving any subscriber yet, so content
+	/// written through the returned [`Staged`] is there when the first reader looks.
+	///
+	/// For a relay that already holds groups of the track: write them, then
+	/// [`Staged::commit`]. Dropping the [`Staged`] uncommitted rejects the request with
+	/// [`Error::Dropped`].
+	pub fn stage(self, info: impl Into<Option<Info>>) -> Staged {
 		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
 			state.accept(info.clone());
+			state.staged = true;
 			if let Some(floor) = self.requested_start {
 				state.set_start(floor, true);
 			}
@@ -6695,15 +6761,18 @@ impl Request {
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
 		self.alive.publish(Some(&self.stats));
-		Producer {
-			name: self.name,
-			info,
-			broadcast: self.broadcast,
-			state: self.state,
-			prev_subscription: None,
-			alive: self.alive,
-			stats: self.stats,
-			largest: None,
+		Staged {
+			producer: Some(Producer {
+				name: self.name,
+				info,
+				broadcast: self.broadcast,
+				state: self.state,
+				prev_subscription: None,
+				alive: self.alive,
+				stats: self.stats,
+				largest: None,
+			}),
+			_dynamic: self._dynamic,
 		}
 	}
 

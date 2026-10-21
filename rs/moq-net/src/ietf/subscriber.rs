@@ -2980,6 +2980,9 @@ where
 				frame: largest.object,
 			})
 		});
+		// A fresh copy is staged until the answer is written in below, so no reader sees it
+		// before its Largest and start.
+		let mut staged = None;
 		let (mut track, dynamic) = match resumed {
 			Some(idle) => {
 				if !self.state.lock().subscribes.contains_key(&request_id) {
@@ -3000,7 +3003,10 @@ where
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
 				let dynamic = request.dynamic();
-				(request.accept(info), dynamic)
+				let copy = request.stage(info);
+				let track = track::Producer::clone(&copy);
+				staged = Some(copy);
+				(track, dynamic)
 			}
 		};
 		track.received();
@@ -3019,6 +3025,9 @@ where
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
+		if let Some(staged) = staged {
+			staged.commit();
+		}
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
