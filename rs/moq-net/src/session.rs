@@ -750,6 +750,30 @@ impl Limits {
 	}
 }
 
+/// How a session shares its bandwidth between the broadcasts it serves.
+///
+/// Priority orders streams only within one scheduling domain. Where one party owns both
+/// ends of a session, like a publisher and its ingest relay or an edge relay and a viewer,
+/// that domain is the whole session. A relay-to-relay session carries every tenant's
+/// broadcasts, so there each broadcast is its own domain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Schedule {
+	/// One strict order across the session: each subscription's priority, the publisher's
+	/// [`track::Info::priority`](crate::track::Info::priority) breaking ties.
+	#[default]
+	Strict,
+	/// Each broadcast gets an equal share of bytes, however many subscriptions or fetches it
+	/// carries, and the publisher's [`track::Info::priority`](crate::track::Info::priority)
+	/// orders the streams inside it. The peer's subscriber priority is ignored, neither
+	/// ranking its streams nor forwarded upstream.
+	///
+	/// Only moq-lite sessions on a transport with send domains (QUIC and WebTransport over
+	/// moq-quic) can share by broadcast. Any other session, over WebSocket, iroh, or
+	/// moq-transport, serves [`Self::Strict`].
+	Broadcast,
+}
+
 /// A count of live entries shared across a session, refused past its cap.
 #[derive(Clone)]
 pub(crate) struct Slots {

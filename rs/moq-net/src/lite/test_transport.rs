@@ -60,6 +60,10 @@ pub struct Log {
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Hands each send domain its id.
+	domain_ids: Arc<AtomicUsize>,
+	/// The domain each send group opened in, by group id.
+	domains: Arc<Mutex<Vec<Option<usize>>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 }
@@ -117,6 +121,12 @@ impl Log {
 	/// each move.
 	pub fn groups(&self) -> Vec<(usize, i64)> {
 		self.groups.lock().unwrap().clone()
+	}
+
+	/// The send domain each send group opened in, indexed by group id: `None` for the
+	/// session's default domain.
+	pub fn domains(&self) -> Vec<Option<usize>> {
+		self.domains.lock().unwrap().clone()
 	}
 
 	/// Every send group a stream joined, as (stream, group) in call order.
@@ -205,14 +215,36 @@ pub struct SinkGroup {
 }
 
 impl SinkGroup {
-	fn open(log: Log, priority: i64) -> Self {
+	fn open(log: Log, domain: Option<usize>, priority: i64) -> Self {
 		let id = log.group_ids.fetch_add(1, Ordering::Relaxed);
 		log.groups.lock().unwrap().push((id, priority));
+		let mut domains = log.domains.lock().unwrap();
+		if domains.len() <= id {
+			domains.resize(id + 1, None);
+		}
+		domains[id] = domain;
+		drop(domains);
 		Self { id, log }
 	}
 }
 
+/// A send domain of a [`SinkSession::with_groups`], identified by its opening order.
+#[derive(Clone)]
+pub struct SinkDomain {
+	id: usize,
+}
+
+impl SinkDomain {
+	fn open(log: &Log) -> Self {
+		Self {
+			id: log.domain_ids.fetch_add(1, Ordering::Relaxed),
+		}
+	}
+}
+
 impl poll::SendGroup for SinkGroup {
+	type Domain = SinkDomain;
+
 	fn set_priority(&mut self, priority: i64) {
 		self.log.groups.lock().unwrap().push((self.id, priority));
 	}
@@ -506,7 +538,11 @@ impl poll::Session for DeadStreamSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
+	fn send_domain(&mut self) -> Option<SinkDomain> {
+		None
+	}
+
+	fn send_group(&mut self, _: Option<&SinkDomain>, _: i64) -> Option<SinkGroup> {
 		None
 	}
 
@@ -727,8 +763,13 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok(send.opened(options)))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
-		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
+	fn send_domain(&mut self) -> Option<SinkDomain> {
+		self.groups.then(|| SinkDomain::open(&self.log))
+	}
+
+	fn send_group(&mut self, domain: Option<&SinkDomain>, priority: i64) -> Option<SinkGroup> {
+		self.groups
+			.then(|| SinkGroup::open(self.log.clone(), domain.map(|domain| domain.id), priority))
 	}
 
 	fn send_datagram(
@@ -882,6 +923,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
@@ -908,7 +951,14 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send domains and groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -1065,8 +1115,13 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_domain(&mut self) -> Option<SinkDomain> {
+		self.groups.then(|| SinkDomain::open(&self.log))
+	}
+
+	fn send_group(&mut self, domain: Option<&SinkDomain>, priority: i64) -> Option<SinkGroup> {
+		self.groups
+			.then(|| SinkGroup::open(self.log.clone(), domain.map(|domain| domain.id), priority))
 	}
 
 	fn send_datagram(

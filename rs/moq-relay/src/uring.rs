@@ -808,7 +808,8 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	}
 	let mut request = request
 		.with_stats(stats.clone())
-		.with_limits(serve.cluster.limits(&lease));
+		.with_limits(serve.cluster.limits(&lease))
+		.with_schedule(serve.cluster.schedule(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}

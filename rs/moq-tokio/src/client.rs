@@ -210,6 +210,12 @@ impl Client {
 		self
 	}
 
+	/// Share each session's bandwidth between broadcasts; see [`moq_net::Client::with_schedule`].
+	pub fn with_schedule(mut self, schedule: moq_net::session::Schedule) -> Self {
+		self.moq = self.moq.with_schedule(schedule);
+		self
+	}
+
 	/// Attach a per-connection [`moq_net::stats::Session`] context to all sessions
 	/// opened by this client.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

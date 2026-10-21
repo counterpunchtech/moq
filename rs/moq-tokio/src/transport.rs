@@ -878,8 +878,16 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::Connection::wire(self))
 	}
 
-	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
-		Some(Self::send_group(self, priority))
+	fn send_domain(&self) -> Option<crate::quic::driver::SendDomain> {
+		Some(Self::send_domain(self))
+	}
+
+	fn send_group(
+		&self,
+		domain: Option<&crate::quic::driver::SendDomain>,
+		priority: i64,
+	) -> Option<crate::quic::driver::SendGroup> {
+		Some(Self::send_group(self, domain, priority))
 	}
 
 	fn send_datagram(
@@ -911,6 +919,8 @@ impl GroupedSend for crate::quic::web::SendStream {
 
 #[cfg(feature = "quic")]
 impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
+	type Domain = crate::quic::driver::SendDomain;
+
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
 	}
@@ -1030,6 +1040,8 @@ mod tests {
 	struct FakeGroup(u32);
 
 	impl moq_net::transport::poll::SendGroup for FakeGroup {
+		type Domain = moq_net::transport::poll::Ungrouped;
+
 		fn set_priority(&mut self, _: i64) {}
 	}
 

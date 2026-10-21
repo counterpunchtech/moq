@@ -90,7 +90,7 @@ impl Sender {
     }
 
     fn group(&mut self, priority: i64) -> SendGroup {
-        self.groups().open(priority)
+        self.groups().open(None, priority)
     }
 
     fn send(&mut self, id: StreamId) -> SendStream<'_> {
@@ -448,13 +448,13 @@ fn domains_share_bytes_and_confine_priority() {
     let quiet = sender.groups().open_domain();
 
     let crowded_groups: Vec<_> = (0..10)
-        .map(|priority| sender.groups().open_in(priority, &crowded))
+        .map(|priority| sender.groups().open(Some(&crowded), priority))
         .collect();
     let crowded_streams: Vec<_> = crowded_groups
         .iter()
         .map(|group| sender.open(Some(group), 0, 1_000_000))
         .collect();
-    let quiet_group = sender.groups().open_in(-100, &quiet);
+    let quiet_group = sender.groups().open(Some(&quiet), -100);
     let quiet_stream = sender.open(Some(&quiet_group), 0, 1_000_000);
 
     sender.drain(200);
@@ -472,7 +472,7 @@ fn domains_share_bytes_and_confine_priority() {
 fn the_default_domain_is_one_share() {
     let mut sender = Sender::new();
     let domain = sender.groups().open_domain();
-    let inside = sender.groups().open_in(0, &domain);
+    let inside = sender.groups().open(Some(&domain), 0);
     let outside: Vec<SendGroup> = (0..3).map(|_| sender.group(0)).collect();
     let inside = sender.open(Some(&inside), 0, 1_000_000);
     let outside: Vec<_> = outside
@@ -490,7 +490,7 @@ fn the_default_domain_is_one_share() {
 fn reset_frees_a_released_group() {
     let mut sender = Sender::new();
     let domain: SendDomain = sender.groups().open_domain();
-    let group = sender.groups().open_in(0, &domain);
+    let group = sender.groups().open(Some(&domain), 0);
     let reset = sender.open(Some(&group), 0, 10_000);
     let finished = sender.open(Some(&group), 1, 100);
     sender.send(finished).finish().unwrap();
@@ -673,8 +673,8 @@ fn saturated_datagram_domains_share_bytes() {
     let mut sender = Sender::new();
     let small = sender.groups().open_domain();
     let large = sender.groups().open_domain();
-    let small = sender.groups().open_in(0, &small);
-    let large = sender.groups().open_in(9, &large);
+    let small = sender.groups().open(Some(&small), 0);
+    let large = sender.groups().open(Some(&large), 9);
     let small: Vec<_> = (0..2_000)
         .map(|seq| sender.datagram(Some(&small), seq, 50))
         .collect();

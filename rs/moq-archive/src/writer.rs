@@ -1247,7 +1247,7 @@ mod tests {
 		assert_eq!(object.groups[0].frames[1].payload, "2@2500");
 		assert_eq!(
 			store.get_info("video").await.unwrap(),
-			Info::new(127, Some(1000)).unwrap()
+			Info::new(0, Some(1000)).unwrap()
 		);
 		store.get_info(&timeline("video")).await.unwrap();
 		assert!(store.get_info("ignored").await.is_err());
@@ -1304,7 +1304,7 @@ mod tests {
 		assert!(object.groups[0].frames.iter().all(|frame| frame.timestamp.is_none()));
 		assert_eq!(object.groups[0].frames[2].payload, "3/2");
 
-		assert_eq!(store.get_info("data").await.unwrap(), Info::new(127, None).unwrap());
+		assert_eq!(store.get_info("data").await.unwrap(), Info::new(0, None).unwrap());
 		let timeline = timeline("data");
 		assert_eq!(store.get_info(&timeline).await.unwrap().timescale, None);
 		let stored = store.get_segments(&timeline, 0, false).await.unwrap();
@@ -1754,7 +1754,7 @@ mod tests {
 			control.track("video", media()).await,
 			Err(Error::Priority {
 				existing: 7,
-				intended: 127
+				intended: 0
 			})
 		);
 	}

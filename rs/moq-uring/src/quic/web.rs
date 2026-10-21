@@ -450,11 +450,16 @@ impl Session {
 		self.conn.wire()
 	}
 
-	/// Open a send group at `priority`, for streams to join with
-	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
+	/// Open a send domain. See [`super::SendDomain`].
+	pub fn send_domain(&self) -> super::SendDomain {
+		self.conn.send_domain()
+	}
+
+	/// Open a send group at `priority` in `domain`, or the connection's default domain, for
+	/// streams to join with [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
-	pub fn send_group(&self, priority: i64) -> super::SendGroup {
-		self.conn.send_group(priority)
+	pub fn send_group(&self, domain: Option<&super::SendDomain>, priority: i64) -> super::SendGroup {
+		self.conn.send_group(domain, priority)
 	}
 
 	/// Send a datagram scheduled by `options`, like one of its group's streams.

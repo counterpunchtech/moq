@@ -469,7 +469,7 @@ impl Message for PublishOk {
 				);
 
 				let forward = forward.unwrap_or(true);
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let filter = filter.unwrap_or(Filter::Unfiltered);
 

@@ -102,6 +102,8 @@ pub mod path;
 #[cfg(feature = "async")]
 mod priority;
 #[cfg(feature = "async")]
+mod scheduler;
+#[cfg(feature = "async")]
 mod recv;
 pub mod setup;
 #[cfg(feature = "async")]

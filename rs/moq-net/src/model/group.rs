@@ -2221,6 +2221,12 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The parent track's publisher priority, [`track::Info::priority`].
+	#[cfg(feature = "async")]
+	pub(crate) fn track_priority(&self) -> i8 {
+		self.track.priority
+	}
+
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has
@@ -2624,8 +2630,8 @@ impl Cursor {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Fetch {
-	/// Delivery priority for the fetched group's stream. Defaults to 0.
-	pub priority: u8,
+	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
+	pub priority: i8,
 
 	/// Maximum age behind the live edge this caller accepts.
 	///
@@ -2648,7 +2654,7 @@ pub struct Fetch {
 
 impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}
@@ -2681,7 +2687,7 @@ pub struct Request {
 	pub(crate) state: kio::Producer<track::TrackState>,
 	pub(super) fetch: kio::Shared<track::FetchState>,
 	pub(super) sequence: u64,
-	pub(super) priority: u8,
+	pub(super) priority: i8,
 	pub(super) max_delay: Option<std::time::Duration>,
 	pub(super) frame_start: u64,
 	// pending: /quest/m1/public-model/deferred.md

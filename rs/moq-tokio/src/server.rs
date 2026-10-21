@@ -1779,6 +1779,13 @@ impl Request {
 		self
 	}
 
+	/// Share the session's bandwidth between broadcasts, after authorizing the peer and
+	/// before answering SETUP; see [`moq_net::session::Schedule`].
+	pub fn with_schedule(mut self, schedule: moq_net::session::Schedule) -> Self {
+		self.kind = request_map!(self.kind, request => request.with_schedule(schedule));
+		self
+	}
+
 	/// The QUIC connection under this request, to change its limits before answering
 	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]

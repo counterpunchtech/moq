@@ -6,6 +6,9 @@
 
 use moq_net::transport::poll::SendOptions;
 
+/// A backend session's send domain.
+pub type Domain<S> = <<<S as web_transport_trait::Session>::SendStream as GroupedSend>::Group as moq_net::transport::poll::SendGroup>::Domain;
+
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
 /// The async interface has no groups or wire counters, so moq-net's
@@ -18,9 +21,14 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 		None
 	}
 
-	/// Open a send group at `priority`, or `None` when the backend has none.
-	fn send_group(&self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
-		let _ = priority;
+	/// Open a send domain, or `None` when the backend has none.
+	fn send_domain(&self) -> Option<Domain<Self>> {
+		None
+	}
+
+	/// Open a send group at `priority` in `domain`, or `None` when the backend has none.
+	fn send_group(&self, domain: Option<&Domain<Self>>, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
+		let _ = (domain, priority);
 		None
 	}
 
@@ -38,7 +46,7 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 /// A backend send stream that may join its [`Grouped`] session's send groups.
 pub trait GroupedSend: web_transport_trait::SendStream {
 	/// The backend's send group, [`Ungrouped`](moq_net::transport::poll::Ungrouped) when it has none.
-	type Group: moq_net::transport::poll::SendGroup + Send + Sync;
+	type Group: moq_net::transport::poll::SendGroup<Domain: Send + Sync> + Send + Sync;
 
 	/// Move the stream into `group`.
 	fn set_group(&mut self, group: &Self::Group);

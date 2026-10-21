@@ -302,7 +302,15 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+	fn send_domain(&mut self) -> Option<crate::transport::poll::Ungrouped> {
+		None
+	}
+
+	fn send_group(
+		&mut self,
+		_: Option<&crate::transport::poll::Ungrouped>,
+		_: i64,
+	) -> Option<crate::transport::poll::Ungrouped> {
 		None
 	}
 

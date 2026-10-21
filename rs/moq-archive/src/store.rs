@@ -417,7 +417,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 129, "version": 2 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -428,7 +428,7 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 129, "version": 2 }"#);
 	}
 
 	#[tokio::test]

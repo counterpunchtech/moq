@@ -28,7 +28,7 @@ use crate::quic::driver::{
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::UdpSender,
-    send_group::{self, SendGroup, SendOptions},
+    send_group::{self, SendDomain, SendGroup, SendOptions},
     send_stream::SendStream,
     udp_transmit,
 };
@@ -342,12 +342,20 @@ impl Connection {
         }
     }
 
-    /// Open a send group at `priority`, for streams and datagrams to join with [`SendOptions`]
-    /// or [`SendStream::set_group`].
+    /// Open a send domain, which shares bytes equally with the connection's other domains.
+    pub fn send_domain(&self) -> SendDomain {
+        SendDomain::new(self.0.0.clone())
+    }
+
+    /// Open a send group at `priority` in `domain`, or the connection's default domain, for
+    /// streams and datagrams to join with [`SendOptions`] or [`SendStream::set_group`].
+    ///
+    /// # Panics
+    /// - when `domain` belongs to another connection
     ///
     /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
-    pub fn send_group(&self, priority: i64) -> SendGroup {
-        SendGroup::new(self.0.0.clone(), priority)
+    pub fn send_group(&self, domain: Option<&SendDomain>, priority: i64) -> SendGroup {
+        SendGroup::new(self.0.0.clone(), domain, priority)
     }
 
     /// Initiate a new outgoing bidirectional stream, its sending half scheduled by `options`.

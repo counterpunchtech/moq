@@ -47,6 +47,9 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 		self.0.estimated_send_rate()
 	}
 }
+/// A backend session's send domain.
+pub type Domain<S> = <<<S as backend::Session>::SendStream as GroupedSend>::Group as poll::SendGroup>::Domain;
+
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
 /// `pub` only because `pub(crate)` is refused (E0446): the adapter's `type Group` projects
@@ -62,9 +65,18 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 		None
 	}
 
-	/// Open a send group at `priority`, or `None` when the backend has none.
-	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
-		let _ = priority;
+	/// Open a send domain, or `None` when the backend has none.
+	fn send_domain(&mut self) -> Option<Domain<Self>> {
+		None
+	}
+
+	/// Open a send group at `priority` in `domain`, or `None` when the backend has none.
+	fn send_group(
+		&mut self,
+		domain: Option<&Domain<Self>>,
+		priority: i64,
+	) -> Option<<Self::SendStream as GroupedSend>::Group> {
+		let _ = (domain, priority);
 		None
 	}
 
@@ -141,8 +153,15 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
 	}
-	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
-		Grouped::send_group(&mut self.0, priority)
+	fn send_domain(&mut self) -> Option<poll::DomainOf<Self>> {
+		Grouped::send_domain(&mut self.0)
+	}
+	fn send_group(
+		&mut self,
+		domain: Option<&poll::DomainOf<Self>>,
+		priority: i64,
+	) -> Option<<S::SendStream as GroupedSend>::Group> {
+		Grouped::send_group(&mut self.0, domain, priority)
 	}
 	fn send_datagram(
 		&mut self,

@@ -204,7 +204,7 @@ async fn recordings_are_byte_identical_on_every_backend() {
 	assert_eq!(expected.keys().cloned().collect::<Vec<_>>(), layout());
 	assert_eq!(
 		&expected["rec/video%2F360p/.info"][..],
-		br#"{"version":2,"priority":127,"timescale":1000}"#
+		br#"{"version":2,"priority":128,"timescale":1000}"#
 	);
 
 	let dir = tempfile::tempdir().unwrap();

@@ -26,9 +26,9 @@ pub enum Error {
 	#[error("priority {existing} does not match {intended}")]
 	Priority {
 		/// The priority already recorded.
-		existing: u8,
+		existing: i8,
 		/// The priority the caller wanted to record.
-		intended: u8,
+		intended: i8,
 	},
 
 	/// An existing `.info` has a different timescale, `None` when untimed.

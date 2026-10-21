@@ -10,8 +10,12 @@ use crate::{Error, Result, VERSION};
 pub struct Info {
 	/// Recording format version; must be [`VERSION`].
 	pub version: u64,
-	/// Publisher tie-break priority, 0 through 255.
-	pub priority: u8,
+	/// The publisher's track priority, higher first.
+	///
+	/// Stored as its moq-lite byte, `priority + 128`, which is what recordings made before
+	/// priorities were signed stored, so they keep their meaning.
+	#[serde(with = "priority")]
+	pub priority: i8,
 	/// Units per second for this track's timestamps, 1 through 2^53 - 1, or `None` when the track
 	/// is untimed and its frames store no timestamps.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,7 +27,7 @@ pub struct Info {
 
 impl Info {
 	/// The current format version with `priority` and `timescale`, `None` for an untimed track.
-	pub fn new(priority: u8, timescale: Option<u64>) -> Result<Self> {
+	pub fn new(priority: i8, timescale: Option<u64>) -> Result<Self> {
 		let info = Self {
 			version: VERSION,
 			priority,
@@ -67,6 +71,19 @@ impl Info {
 	}
 }
 
+/// The priority as its moq-lite byte.
+mod priority {
+	use serde::{Deserialize, Deserializer, Serializer};
+
+	pub fn serialize<S: Serializer>(priority: &i8, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_u8((*priority as u8) ^ 0x80)
+	}
+
+	pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i8, D::Error> {
+		Ok((u8::deserialize(deserializer)? ^ 0x80) as i8)
+	}
+}
+
 /// The epoch as its UUID text.
 mod epoch {
 	use serde::{Deserialize, Deserializer, Serializer, de::Error};
@@ -95,7 +112,7 @@ mod tests {
 	fn roundtrip() {
 		let info = Info::new(0, Some(1_000_000)).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":0,"timescale":1000000}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":128,"timescale":1000000}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
@@ -103,7 +120,7 @@ mod tests {
 	fn an_untimed_track_omits_its_timescale() {
 		let info = Info::new(3, None).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":3}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":131}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
@@ -114,8 +131,22 @@ mod tests {
 			info,
 			Info::decode(br#"{ "version": 2, "priority": 7, "timescale": 1000 }"#).unwrap()
 		);
-		assert_eq!(info.priority, 7);
+		assert_eq!(info.priority, -121);
 		assert_eq!(info.timescale, Some(1000));
+	}
+
+	#[test]
+	fn priority_is_stored_as_its_lite_byte() {
+		for (priority, byte) in [(i8::MIN, 0), (-1, 127), (0, 128), (i8::MAX, 255)] {
+			let info = Info::new(priority, None).unwrap();
+			let json = format!(r#"{{"version":2,"priority":{byte}}}"#);
+			assert_eq!(info.encode().unwrap().as_ref(), json.as_bytes());
+			assert_eq!(Info::decode(json.as_bytes()).unwrap(), info);
+		}
+		assert!(matches!(
+			Info::decode(br#"{"version":2,"priority":256}"#),
+			Err(Error::Json(_))
+		));
 	}
 
 	#[test]
@@ -133,7 +164,7 @@ mod tests {
 		let bytes = info.encode().unwrap();
 		assert_eq!(
 			bytes.as_ref(),
-			br#"{"version":2,"priority":0,"timescale":1000,"epoch":"01900000-0000-7000-8000-000000000001"}"#
+			br#"{"version":2,"priority":128,"timescale":1000,"epoch":"01900000-0000-7000-8000-000000000001"}"#
 		);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 		assert!(matches!(
