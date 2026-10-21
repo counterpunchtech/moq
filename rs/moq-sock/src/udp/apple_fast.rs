@@ -83,7 +83,11 @@ fn prepare_msg_x(
     hdr: &mut msghdr_x,
     iov: &mut libc::iovec,
     ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
-    #[allow(unused_variables, reason = "kept for parity with the unix `prepare_msg` signature")] encode_src_ip: bool,
+    #[allow(
+        unused_variables,
+        reason = "kept for parity with the unix `prepare_msg` signature"
+    )]
+    encode_src_ip: bool,
     sendmsg_einval: bool,
 ) {
     iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
