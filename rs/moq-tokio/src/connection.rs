@@ -2416,8 +2416,10 @@ mod tests {
 		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let addr = listener.tcp_local_addr().unwrap();
 
-		let mut config = crate::connect::Config::default();
-		config.version = vec![version];
+		let mut config = crate::connect::Config {
+			version: vec![version],
+			..Default::default()
+		};
 		config.backoff.initial = Some(MIN_BACKOFF);
 		config.backoff.max = Some(MIN_BACKOFF);
 		let connection = config
