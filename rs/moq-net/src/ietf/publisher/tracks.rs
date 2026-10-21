@@ -147,6 +147,16 @@ struct Listed {
 	params: Params,
 }
 
+/// How a paused PUBLISH subscription resumes forwarding.
+struct Resume {
+	/// FILL_PARAMETERS (draft-20+) for the objects before the join.
+	fill: Option<ietf::Fill>,
+	/// NEW_GROUP_REQUEST, counted as a join as on a SUBSCRIBE.
+	new_group: Option<u64>,
+	/// Whether a REQUEST_UPDATE asked for it, which the join's REQUEST_OK answers.
+	answer: bool,
+}
+
 /// What ended a paused PUBLISH subscription's wait.
 enum Wait {
 	/// The subscriber's REQUEST_UPDATE.
@@ -362,6 +372,16 @@ where
 		while !*finished {
 			match ready!(stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(cx)) {
 				Ok(Some(Next::Message(update))) => {
+					// Its Request ID is spent like any other, and a bad one is the session's error.
+					if let Err(err) = self.control.accept(update.request_id)
+						&& !matches!(err, Error::GoingAway)
+					{
+						self.session.clone().close(
+							super::super::error::to_session_code(&crate::SessionError::from(&err)),
+							"invalid request ID",
+						);
+						return Poll::Ready(Err(err));
+					}
 					// A new prefix or FORWARD would re-scope the listing under every PUBLISH it
 					// made. Refusing it ends the request (section 10.9.1).
 					let err = update.refused.unwrap_or(Error::Unsupported);
@@ -443,15 +463,6 @@ where
 			}
 			None => return,
 		};
-		let mut tracks = match broadcast.tracks() {
-			Ok(tracks) => tracks,
-			Err(err) => {
-				tracing::debug!(broadcast = %absolute, %err, "listed broadcast ended");
-				return;
-			}
-		};
-		let gate = crate::auth::Gate::new(self.auth.clone(), namespace.clone(), crate::auth::Direction::Publish);
-
 		// Each PUBLISH watches its track's entry here: dropping it says the track is no
 		// longer listed.
 		let mut listed: HashMap<Arc<str>, kio::Producer<()>> = HashMap::new();
@@ -460,9 +471,25 @@ where
 		let mut publishes = TaskSet::owned();
 		// The listing ended, or the request did: nothing more to add.
 		let mut adding = true;
+		// The broadcast's listing, held only while our publish permit covers it: a track
+		// it does not cover is not revealed at all, and one it comes to cover is listed
+		// from scratch.
+		let (permit, mut auth_epoch) = self.permit_now(None);
+		let mut tracks = None;
+		if permit.matches(namespace.as_str()) {
+			match broadcast.tracks() {
+				Ok(listing) => tracks = Some(listing),
+				Err(err) => {
+					tracing::debug!(broadcast = %absolute, %err, "listed broadcast ended");
+					return;
+				}
+			}
+		}
 
 		enum Event {
 			Track(crate::broadcast::TracksEvent),
+			/// Our publish permit may have changed.
+			Regrant(crate::auth::Permit),
 			/// The broadcast ended or its route went: every track it listed is gone.
 			Ended,
 			/// The request was cancelled.
@@ -481,6 +508,15 @@ where
 				if route.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Some(Event::Ended));
 				}
+				if let Poll::Ready(permit) =
+					self.auth
+						.poll_permit(crate::auth::Direction::Publish, &mut auth_epoch, waiter)
+				{
+					return Poll::Ready(Some(Event::Regrant(permit)));
+				}
+				let Some(tracks) = tracks.as_mut() else {
+					return Poll::Pending;
+				};
 				match tracks.poll_next(waiter) {
 					Poll::Ready(Ok(Some(event))) => Poll::Ready(Some(Event::Track(event))),
 					Poll::Ready(Ok(None)) => Poll::Ready(Some(Event::Ended)),
@@ -496,19 +532,38 @@ where
 			let Some(event) = event else {
 				return;
 			};
+			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<()>>, skipped: &mut HashSet<Arc<str>>| {
+				listed.clear();
+				let mut skips = request.skips.lock();
+				for name in skipped.drain() {
+					skips.remove(&(suffix.clone(), name));
+				}
+			};
 			match event {
 				Event::Ended => {
-					listed.clear();
-					{
-						let mut skips = request.skips.lock();
-						for name in skipped.drain() {
-							skips.remove(&(suffix.clone(), name));
-						}
-					}
+					unlist(&mut listed, &mut skipped);
 					// What it already PUBLISHed ends now; wait for that to go out.
 					kio::wait(|waiter| publishes.poll(waiter)).await;
 					return;
 				}
+				Event::Regrant(permit) => match (permit.matches(namespace.as_str()), tracks.is_some()) {
+					// Each PUBLISH ends on its own gate as well; dropping the listing also
+					// cancels the skips not yet sent.
+					(false, true) => {
+						tracks = None;
+						unlist(&mut listed, &mut skipped);
+					}
+					(true, false) if adding => match broadcast.tracks() {
+						Ok(listing) => tracks = Some(listing),
+						Err(err) => {
+							tracing::debug!(broadcast = %absolute, %err, "listed broadcast ended");
+							unlist(&mut listed, &mut skipped);
+							kio::wait(|waiter| publishes.poll(waiter)).await;
+							return;
+						}
+					},
+					_ => {}
+				},
 				// The PUBLISHes already sent still end when their track is unlisted, so keep
 				// reading the listing for them, adding nothing.
 				Event::Cancelled => adding = false,
@@ -520,8 +575,6 @@ where
 					listed.remove(&name);
 				}
 				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
-				// A track our grant does not cover is not revealed at all.
-				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !gate.allows() => {}
 				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
 					let mut skip = |name: Arc<str>| {
 						request.skips.lock().insert((suffix.clone(), name.clone()), ());
@@ -666,7 +719,11 @@ where
 							params.priority = ok.subscriber_priority;
 							params.order = Some(ok.group_order);
 							params.filter = ok.filter;
-							ok.forward.then_some((None, false))
+							ok.forward.then_some(Resume {
+								fill: None,
+								new_group: None,
+								answer: false,
+							})
 						}
 					}
 				}
@@ -679,9 +736,9 @@ where
 		let mut opened = 0;
 		// What to resume with, and whether an update asked for it: a forwarding PUBLISH_OK
 		// resumes at once, with no update to answer.
-		let mut resume: Option<(Option<ietf::Fill>, bool)> = resume;
+		let mut resume: Option<Resume> = resume;
 		let done = loop {
-			if let Some((fill, answer)) = resume.take() {
+			if let Some(how) = resume.take() {
 				match self
 					.resume_publish(
 						&mut stream,
@@ -689,8 +746,7 @@ where
 						&namespace,
 						request_id,
 						params,
-						fill,
-						answer,
+						how,
 						join.as_ref(),
 						&mut gate,
 						&mut finished,
@@ -772,6 +828,11 @@ where
 				None if update.fill.is_some() && update.forward != Some(true) => {
 					Some(("FILL_PARAMETERS without resuming", Error::Unsupported))
 				}
+				// A paused subscription opens no groups, so a new one is asked for only as it
+				// resumes.
+				None if update.new_group.is_some() && update.forward != Some(true) => {
+					Some(("NEW_GROUP_REQUEST without resuming", Error::Unsupported))
+				}
 				None => None,
 			};
 			if let Some((reason, err)) = refusal {
@@ -789,7 +850,13 @@ where
 				params.max_age = Some(max_age);
 			}
 			match update.forward {
-				Some(true) => resume = Some((update.fill, true)),
+				Some(true) => {
+					resume = Some(Resume {
+						fill: update.fill,
+						new_group: update.new_group,
+						answer: true,
+					})
+				}
 				_ => self.write_request_ok(&mut stream.writer, request_id, None).await?,
 			}
 		};
@@ -818,8 +885,7 @@ where
 		namespace: &crate::PathOwned,
 		request_id: RequestId,
 		params: Params,
-		fill: Option<ietf::Fill>,
-		answer: bool,
+		how: Resume,
 		join: Option<&Join<GroupOf<S>>>,
 		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
@@ -866,6 +932,9 @@ where
 		)
 		.ranked(self.priority.clone());
 		serve.pausable = true;
+		if let Some(value) = how.new_group {
+			serve.request_new_group(value);
+		}
 
 		if let Some(join) = join {
 			let joined = match (params.filter, edge.largest) {
@@ -884,11 +953,12 @@ where
 			};
 			join.joins.lock().insert(join.request_id, Some(joined));
 		}
-		let fill = fill
+		let fill = how
+			.fill
 			.filter(|_| Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if answer
+		if how.answer
 			&& self
 				.write_request_ok(&mut stream.writer, request_id, edge.largest)
 				.await
@@ -1378,6 +1448,102 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}: answered no update");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(done.stream_count, 1, "{version}");
+		}
+	}
+
+	/// A REQUEST_UPDATE on the listing admits its Request ID like any other: one of the
+	/// wrong parity closes the session rather than only refusing the update.
+	#[moq_clock::test]
+	async fn a_listing_update_admits_its_request_id() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			// An odd Request ID is ours to allocate, never the client peer's.
+			let bare = ietf::SubscribeUpdate {
+				forward: None,
+				filter: None,
+				..update(1, false)
+			};
+			send(&mut request, &bare).await;
+			let closed = timeout(std::future::poll_fn(|cx| h.peer.poll_closed(cx))).await;
+			assert!(
+				matches!(&closed, memory::Error::Session { reason, .. } if reason == "invalid request ID"),
+				"{version}: {closed:?}"
+			);
+		}
+	}
+
+	/// NEW_GROUP_REQUEST resuming a paused PUBLISH is a join under the track's refresh
+	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not.
+	#[moq_clock::test]
+	async fn a_resume_asks_for_a_new_group() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let live = h
+			.broadcast
+			.create_track("live", crate::track::Info::timed().with_refresh(Some(1)))
+			.unwrap();
+		let mut group = live.create_group(group::Info { sequence: 4 }).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"key".as_slice()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"delta".as_slice()).unwrap();
+
+		let mut request = h.request(&listing(false)).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
+		let mut stream = loop {
+			let (stream, _, name, _) = h.publish().await;
+			if name == "live" {
+				break stream;
+			}
+		};
+		publish_ok(&mut stream).await;
+		send(
+			&mut stream,
+			&ietf::SubscribeUpdate {
+				filter: Some(Filter::Absolute {
+					start: Location { group: 4, object: 0 },
+					end: None,
+				}),
+				new_group: Some(0),
+				..update(2, true)
+			},
+		)
+		.await;
+		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
+		assert_eq!(live.demand().wanted(), Some(5), "the join never reached the track");
+	}
+
+	/// Tracks under a namespace our grant does not cover are not listed until it does, and
+	/// a grant that stops covering them ends their PUBLISHes.
+	#[moq_clock::test]
+	async fn a_listing_follows_the_publish_grant() {
+		let nothing = || crate::auth::Grant {
+			publish: crate::Patterns::new(),
+			subscribe: crate::Patterns::new(),
+			expires: None,
+		};
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing());
+			h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
+			assert!(opened.is_pending(), "{version}: listed a track the grant denies");
+
+			auth.authorize(&crate::auth::Grant::all());
+			let (mut first, ..) = h.publish().await;
+			let (mut second, ..) = h.publish().await;
+			publish_ok(&mut first).await;
+			publish_ok(&mut second).await;
+
+			auth.authorize(&nothing());
+			for stream in [&mut first, &mut second] {
+				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
+			}
 		}
 	}
 }
