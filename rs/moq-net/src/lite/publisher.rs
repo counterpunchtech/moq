@@ -2308,7 +2308,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					}
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
-					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
+					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale)?;
 
 					*self = Self::Serve {
 						group,
@@ -4382,7 +4382,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 				&self.group,
 				self.capped,
 				self.ctx.stamp.map(|stamp| stamp.timescale),
-				self.ctx.version,
 			)
 		});
 		let records = match records {

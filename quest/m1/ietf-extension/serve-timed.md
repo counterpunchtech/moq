@@ -24,7 +24,3 @@ the timestamps came from moq-transport and are unchecked.
 Mirror it in js/net, where `Info.unchecked` is `@internal`. If the timed
 encoding on that hop needs a wire change, update
 `drafts/draft-lcurley-moq-lite.md` (or the extension's draft) in the same PR.
-
-## Required
-
-- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - adds `Info::ietf()`, which `unchecked` derives from
