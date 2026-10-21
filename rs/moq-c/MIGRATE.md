@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq_track_info` gains `compress` (#5928)
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
 ### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.

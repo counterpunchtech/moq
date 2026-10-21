@@ -11,6 +11,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `MoqTrackInfo` gains `compress` (#5928)
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
 ### Anchors can name a time (#6074)
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.

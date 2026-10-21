@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
 ### Anchors can name a time (#6074)
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
