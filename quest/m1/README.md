@@ -118,8 +118,6 @@ lands before the cut.
 
 - [Nightly media players](/quest/m1/media-engines-nightly.md) - the Firefox and WebKit player rows pass, or an engine that cannot play leaves the nightly matrix
 
-- [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
-
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Dependency and alternatives audit](/quest/m1/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Test coverage audit](/quest/m1/audit-test-coverage.md) - repeat the coverage audit against the m0 baselines before the next major release

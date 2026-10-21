@@ -22,8 +22,7 @@ follow-up through `/quest-plan`.
 What to check first: whether the nightly `sizes` job (`sh/size/`) has run.
 It needs the Linux release builds, skipped since the 2026-10-11 nixpkgs
 bump broke their link. If it has, its history replaces the local method below.
-Then whether [moq-net compiles once](/quest/m1/net-erase-transport.md) and
-[the catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
+Then whether [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
 landed, and re-attribute the native rows if so.
 
 ### Baselines (m0 run, 2026-10-19 and 2026-10-20)
@@ -54,10 +53,12 @@ Native and WASM main numbers are from 2026-10-19 (2b28f5eac); JS from
   (watch), 199.8 to 173.8 KB (watch-ui) and 176.8 to 151.2 KB (publish).
   `js/net/src/ietf/index.test.ts` fails if the entry statically reaches it
   again.
-- Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md), most of
-  the native growth since July (the drivers are monomorphized per transport and
-  per instantiating crate), and
-  [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md),
+- Fixed: moq-net boxes the transport, so its session drivers compile once
+  instead of per transport and per instantiating crate (PR_LINK).
+  Stripped profiling builds fell 31.8 to 22.5 MiB (relay), 49.1 to 42.5 MiB
+  (CLI), 28.0 to 21.8 MiB (`libmoq_ffi.so`), 254.6 to 207.8 MiB (unstripped
+  `libmoq.a`) and 862 to 786 KB gzipped (`@moq/wasm`).
+- Planned: [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md),
   about 1 MiB of the CLI.
 - Explained, no action: `moq-quic` replacing quinn, `kio`, `unsafe-libopus`,
   `moq-video`/`moq-vaapi` in the FFI library and `fast_image_resize` in
