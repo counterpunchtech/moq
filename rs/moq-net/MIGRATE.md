@@ -38,7 +38,7 @@ A caller that holds the group behind `&mut` can write a whole frame with `write_
 ### A received track's end waits for groups in flight (#6111)
 
 Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
-On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range)` marks groups the peer said it skipped, so readers stop waiting for them.
+On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
 `finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
 
 `track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
@@ -52,6 +52,27 @@ A group followed by a frameless one is judged against the next group that has a 
 
 Aborting a track now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+
+### A dropped or cut group ends its reader with an error (#6143)
+
+A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
+A group already held fails the same way when the drop lands, even while its stream is still arriving.
+On lite-05 and lite-06 the error is always `Error::Stream(StreamError::NotFound)`.
+Treat a failed group read as the loss of that group and keep reading the track, rather than ending the subscription.
+
+### A claim answers by publishing (#5678)
+
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
+`Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
+`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
+
+### Anchors can name a time (#6074)
+
+`track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
+Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.
 
 ### Each group has one writer (#6020)
 

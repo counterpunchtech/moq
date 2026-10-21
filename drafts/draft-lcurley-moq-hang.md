@@ -35,6 +35,14 @@ normative:
     date: false
 
 informative:
+  moqepoch:
+    title: "MoQ Epoch Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-epoch/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   h273:
     title: "Coding-independent code points for video signal type identification"
     target: https://www.itu.int/rec/T-REC-H.273
@@ -251,6 +259,8 @@ type VideoDecoderConfigExtensions = {
   "displayAspectHeight": number | undefined,
   "preference": number | undefined,
   "color": Color | undefined,
+  "projection": Projection | undefined,
+  "stereo": string | undefined,
 }
 ~~~
 
@@ -295,6 +305,25 @@ type Chromaticity = { "x": number, "y": number }
 `contentLight` is the {{cta861}} MaxCLL and MaxFALL in candelas per square metre, where 0 means unknown.
 A publisher MUST omit a field its source leaves unspecified rather than write a default, and SHOULD prefer the value signalled in the elementary stream over a container's when they disagree.
 `color` is not part of the track's identity ({{identity}}).
+
+`projection` maps the decoded picture onto the viewer's field of view:
+
+~~~
+type Projection =
+  { "kind": "rectilinear" } |
+  { "kind": "equirectangular", "fov": number | undefined }
+~~~
+
+`rectilinear`, the default when absent, is a flat picture.
+`equirectangular` maps longitude linearly across the width and latitude linearly down the height, spanning all 180 degrees of latitude around a viewer at the centre.
+Its `fov` is the degrees of longitude the picture spans, centred straight ahead: greater than 0 and at most 360, defaulting to 360, so VR180 is 180.
+
+`stereo` says how each eye's view is packed into the frame.
+`mono`, the default when absent, shows the whole frame to both eyes.
+`left-right` carries the left eye's view in the left half and the right eye's in the right half, and `top-bottom` carries the left eye's view in the top half and the right eye's in the bottom half.
+
+A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
+Neither field is part of the track's identity.
 
 For example:
 
@@ -370,7 +399,18 @@ See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
 
-In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) plus:
+
+~~~
+type AudioDecoderConfigExtensions = {
+  "layout": string | undefined,
+}
+~~~
+
+`layout` says what the decoded channels carry; when absent, they follow the codec's own channel order.
+`ambisonic` is full-sphere ambisonics in the AmbiX convention: ACN channel order with SN3D normalization, of the order N for which `numberOfChannels` is (N+1)^2.
+A consumer MUST reject `ambisonic` with fewer than 4 channels or a count that is not a square, and MUST treat an unrecognized `layout` as absent.
+`layout` is not part of the track's identity.
 
 ### PCM {#audio-pcm}
 
@@ -583,7 +623,7 @@ The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
 ### broadcast and track {#data-shared}
-The `broadcast` and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-track}}).
+The `broadcast`, `epoch`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-epoch}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
@@ -607,6 +647,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "epoch": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
@@ -637,6 +678,27 @@ An MSF {{moqmsf}} gateway maps the resolved broadcast path to the track's absolu
 An absent MSF `namespace` inherits the catalog's broadcast.
 Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
 A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
+
+### epoch {#field-epoch}
+The optional `epoch` field names the publisher instance of the broadcast a rendition references ({{field-broadcast}}), as the canonical text of its Epoch {{moql}}: a lowercase hyphenated UUIDv7.
+Without `broadcast`, it names the instance of the catalog's own broadcast.
+A consumer MUST reject a catalog containing any other `epoch` value.
+
+A consumer reads each path a catalog instance references from the first broadcast it resolves there, so the catalog and its renditions never resolve one path independently across a replacement.
+An absent `epoch` accepts that first broadcast, whichever instance it is.
+A consumer that follows a referenced broadcast's announcements MAY move a rendition without `epoch` onto a restarted instance.
+
+When `epoch` is present and the route that resolved the referenced broadcast carries an Epoch, the consumer MUST read the rendition only from that instance.
+It MUST fail the rendition rather than fall back to another instance, including one that replaced it before or after resolution, and MUST NOT follow a restart onto another instance for it.
+A later catalog update naming another Epoch for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Epoch fail instead.
+A new catalog instance resolves its references afresh.
+
+A route without an Epoch, such as one over an older moq-lite version or MoQ Transport without the epoch extension {{moqepoch}}, cannot prove which instance it serves, so there `epoch` is best effort: the consumer reads the broadcast it resolved.
+A consumer MUST NOT treat a catalog's `epoch` as evidence that a subscription may resume across routes.
+A consumer that predates the field ignores it and does not gain its guarantee.
+
+A publisher SHOULD set `epoch` only when it knows the instance it references, and MUST omit it for a broadcast produced on demand, which has no instance until a worker accepts the request.
+MSF {{moqmsf}} has no field for an instance, so a gateway converting to MSF drops `epoch` and SHOULD report that it did; its readers accept the first instance they resolve.
 
 ### track {#field-track}
 A rendition's key in its map is its ID, and by default also the name of its track.
@@ -893,6 +955,7 @@ type ArchiveSchema = {
   }>,
   "timescale": number | undefined,
   "replay": string | undefined,
+  "replayEpoch": string | undefined,
   "store": string | undefined,
   "version": number | undefined,
 }
@@ -922,6 +985,8 @@ Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a 
 The `replay` field, if present, is a relative MoQ broadcast path ({{field-broadcast}}) the archive is served back from.
 Absent, the timelines live on the catalog's own broadcast.
 A wildcard replay path names no generation.
+
+The `replayEpoch` field, if present, names the publisher instance of `replay`, with the meaning and rules of a rendition's `epoch` ({{field-epoch}}).
 
 The `store` field, if present, is the object-store URL the recording objects ({{recording}}) live under.
 Authorization for `replay` and `store` is external.
@@ -1328,6 +1393,7 @@ This document has no IANA actions.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
+- Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 
@@ -1358,6 +1424,7 @@ This document has no IANA actions.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
+- Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
 
 ## moq-hang-03
 {:numbered="false"}

@@ -914,6 +914,8 @@ export class Subscriber {
 				await stream.writer.u53(StreamId.Track);
 				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
+				// Until js/net inflates, a compressed track is refused rather than read as garbage.
+				if (info.compress) throw new Error("compressed tracks are not supported");
 				return { info, stream };
 			},
 			signal,
@@ -1252,8 +1254,10 @@ export class Subscriber {
 					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
 			} else if ("drop" in resp) {
+				// The publisher will never send these groups, so they are accounted for without a
+				// stream, and a reader of one still arriving ends with the drop's error now.
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				entry.track.dropGroups(resp.drop.start, resp.drop.end + 1);
+				entry.track.dropGroups(resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
 			}
 		}
 	}
