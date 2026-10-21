@@ -791,6 +791,7 @@ impl Link {
 	}
 
 	/// The handle this session is built on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn handle(&self) -> &Handle {
 		&self.handle
 	}
@@ -825,6 +826,7 @@ impl Link {
 
 	/// Retire the session to draining once `goaway` is sent or received, freeing the
 	/// handle for a replacement.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn drain_with(&self, goaway: std::sync::Arc<crate::goaway::Handle>) {
 		self.with(|link| link.goaway = Some(goaway));
 	}
