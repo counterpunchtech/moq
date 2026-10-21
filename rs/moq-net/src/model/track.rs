@@ -15170,7 +15170,10 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [WIDE]);
 		drop(dynamic);
 		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		assert!(drained_drops(&mut subscriber).is_empty(), "the feed may still deliver them");
+		assert!(
+			drained_drops(&mut subscriber).is_empty(),
+			"the feed may still deliver them"
+		);
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(0, WIDE)]);
 	}

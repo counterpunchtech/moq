@@ -2163,11 +2163,7 @@ mod tests {
 	/// Many group fetches on one track share model state, but never share readiness.
 	fn feed_batch(
 		sequences: impl IntoIterator<Item = u64>,
-	) -> (
-		track::Producer,
-		Vec<kio::Pending<track::Fetching>>,
-		Vec<track::Fill>,
-	) {
+	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::Fill>) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let dynamic = track.dynamic();
