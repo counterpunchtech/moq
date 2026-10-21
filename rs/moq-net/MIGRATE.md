@@ -26,6 +26,11 @@ lease.release();
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
 `transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
+### Anchors can name a time (#6074)
+
+`track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
+Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.
+
 ### Each group has one writer (#6020)
 
 `group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.
