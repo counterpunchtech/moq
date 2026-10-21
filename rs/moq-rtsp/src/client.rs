@@ -371,9 +371,7 @@ struct Stream {
 	track: Track,
 	/// The previous frame's timestamp, in the stream's clock units since the session start, and
 	/// when it arrived.
-	// retina stamps arrival on std's clock; only its own stamps are compared.
-	#[allow(clippy::disallowed_types)]
-	last: Option<(i64, std::time::Instant)>,
+	last: Option<(i64, moq_clock::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
 	/// When a lost packet broke the video's reference chain, so it waits for a keyframe.
@@ -421,7 +419,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
-				frame.end_ctx().received(),
+				moq_clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
@@ -429,7 +427,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				false,
-				frame.ctx().received(),
+				moq_clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
 			),

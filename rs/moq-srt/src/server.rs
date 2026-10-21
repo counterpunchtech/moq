@@ -582,29 +582,19 @@ pub(crate) async fn serve_subscribe(
 		};
 		// Sample the muxer's generation alongside the frame it describes, so a new
 		// program clock re-anchors the pacing rather than mapping the new timeline
-		// through the old anchor.
+		// through the old anchor. srt-tokio paces on std's clock, where a late payload
+		// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
 		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::now()) {
-			socket.send((host_instant(at), payload)).await?;
+			socket.send((at.into_std(), payload)).await?;
 		}
 	}
 
 	if let Some((at, payload)) = egress.flush() {
-		socket.send((host_instant(at), payload)).await?;
+		socket.send((at.into_std(), payload)).await?;
 	}
 	socket.close().await?;
 
 	Ok(())
-}
-
-/// The std instant `at` names, since srt-tokio paces on std's clock. A late payload
-/// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-fn host_instant(at: Instant) -> std::time::Instant {
-	let (now, host) = (moq_net::time::now(), std::time::Instant::now());
-	match at.checked_duration_since(now) {
-		Some(ahead) => host + ahead,
-		None => host.checked_sub(now - at).unwrap_or(host),
-	}
 }
 
 /// Clamp a paced send instant up to the connection's first one, seeding that floor
@@ -674,9 +664,9 @@ mod tests {
 	#[test]
 	fn a_late_payload_keeps_its_past_host_instant() {
 		let now = StdInstant::now();
-		let late = host_instant(moq_net::time::now() - Duration::from_millis(100));
+		let late = (moq_net::time::now() - Duration::from_millis(100)).into_std();
 		assert!(late < now, "{late:?} should precede {now:?}");
-		assert!(host_instant(moq_net::time::now() + Duration::from_millis(100)) > now);
+		assert!((moq_net::time::now() + Duration::from_millis(100)).into_std() > now);
 	}
 
 	#[test]

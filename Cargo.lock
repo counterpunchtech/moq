@@ -4902,6 +4902,7 @@ dependencies = [
 name = "moq-ice"
 version = "0.1.0"
 dependencies = [
+ "moq-clock",
  "str0m",
  "stun-types",
  "thiserror 2.0.21",
@@ -5173,6 +5174,7 @@ dependencies = [
  "axum",
  "bytes",
  "hang",
+ "moq-clock",
  "moq-ice",
  "moq-mux",
  "moq-net",
