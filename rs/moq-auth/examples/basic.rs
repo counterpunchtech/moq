@@ -1,5 +1,10 @@
 // cargo run --example basic
 
+#![expect(
+	clippy::disallowed_methods,
+	reason = "`Claims` takes `SystemTime`, so the example reads the host clock"
+)]
+
 use std::time::{Duration, SystemTime};
 
 fn main() -> anyhow::Result<()> {

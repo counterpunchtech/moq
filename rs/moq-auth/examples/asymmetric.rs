@@ -4,6 +4,11 @@
 // and the public key verifies them. This is the recommended approach for
 // production: the relay only needs the public key.
 
+#![expect(
+	clippy::disallowed_methods,
+	reason = "`Claims` takes `SystemTime`, so the example reads the host clock"
+)]
+
 use std::time::{Duration, SystemTime};
 
 fn main() -> anyhow::Result<()> {
