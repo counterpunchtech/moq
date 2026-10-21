@@ -228,15 +228,21 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	broadcast.close();
 });
 
-// A source that stops ends the publish cleanly: the finished broadcast stays announced while its
-// media is fresh, so a viewer still catching up drains the tail, then it closes.
-test("stopping the announce serves the finished broadcast until its media is stale", async () => {
+// With `linger`, a source that stops ends the publish cleanly: the finished broadcast stays announced
+// while its media is fresh, so a viewer still catching up drains the tail, then it closes.
+test("stopping the announce with linger serves the finished broadcast until its media is stale", async () => {
 	const clock = new Manual();
 	const restore = clock.install();
 	const origin = new Origin.Producer();
 	try {
 		const announce = new Signal(true);
-		const broadcast = new Broadcast({ enabled: true, origin, name: Path.from("test.hang"), announce });
+		const broadcast = new Broadcast({
+			enabled: true,
+			origin,
+			name: Path.from("test.hang"),
+			announce,
+			linger: true,
+		});
 		const video = broadcast.video("video");
 		video.config.set(videoConfig);
 		await settle();
@@ -282,8 +288,45 @@ test("stopping the announce serves the finished broadcast until its media is sta
 });
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same epoch, so a resumed viewer mistook the new catalog for the old one. A re-announce now
-// publishes a new broadcast under a new epoch, replacing the finished one at once.
+// same epoch, so a resumed viewer mistook the new catalog for the old one. Without `linger`, turning
+// the announce off unannounces at once and keeps the broadcast for the next announce.
+test("a re-announce continues the catalog's group sequence", async () => {
+	const announce = new Signal(true);
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Origin.Producer(),
+		name: Path.from("test.hang"),
+		announce,
+	});
+	broadcast.video("video").config.set(videoConfig);
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
+	expect((await first.nextGroup())?.sequence).toBe(0);
+
+	announce.set(false);
+	await settle();
+	expect(net.route).toBeUndefined();
+	broadcast.audio("audio").config.set(audioConfig);
+	await settle();
+	announce.set(true);
+	await settle();
+
+	// The same track keeps serving, and its newest group is past the first.
+	expect(broadcast.net.peek()).toBe(net);
+	const group = await first.nextGroup();
+	expect(group?.sequence).toBeGreaterThan(0);
+	const catalog = (await group?.readJson()) as Catalog.Root;
+	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
+
+	first.close();
+	broadcast.close();
+});
+
+// With `linger`, a re-announce publishes a new broadcast under a new epoch, replacing the finished
+// one at once.
 test("announcing again replaces a finished broadcast with a new one", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
@@ -291,6 +334,7 @@ test("announcing again replaces a finished broadcast with a new one", async () =
 		origin: new Origin.Producer(),
 		name: Path.from("test.hang"),
 		announce,
+		linger: true,
 	});
 	broadcast.video("video").config.set(videoConfig);
 	await settle();
@@ -327,7 +371,7 @@ test("disabling, renaming, or closing ends a finished broadcast at once", async 
 	const announce = new Signal(true);
 	const name = new Signal(Path.from("test.hang"));
 	const origin = new Origin.Producer();
-	const broadcast = new Broadcast({ enabled, origin, name, announce });
+	const broadcast = new Broadcast({ enabled, origin, name, announce, linger: true });
 	broadcast.video("video").config.set(videoConfig);
 	await settle();
 

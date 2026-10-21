@@ -30,11 +30,14 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
-	//
-	// Turning it off after an announce ends the broadcast cleanly: it stays announced while its
-	// media is fresh, so a viewer still catching up drains the tail, then closes. Announcing again
-	// publishes a new broadcast, replacing the finished one at once.
+	// Turning it off unannounces the broadcast, unless `linger` finishes it.
 	announce: Getter<boolean>;
+
+	// Whether turning `announce` off after an announce finishes the broadcast cleanly instead of
+	// unannouncing it. Defaults to false. A finished broadcast stays announced while its media is
+	// fresh, so a viewer still catching up drains the tail, then closes, and announcing again
+	// publishes a new broadcast that replaces it at once. Read when announcing stops.
+	linger: Getter<boolean>;
 
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
@@ -140,6 +143,7 @@ export class Broadcast {
 			origin: getter(props?.origin),
 			enabled: getter(props?.enabled ?? true),
 			announce: getter(props?.announce ?? true),
+			linger: getter(props?.linger ?? false),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
@@ -364,7 +368,7 @@ export class Broadcast {
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
 		const broadcast = origin.createBroadcast(name);
-		// Set once announcing stops after serving, which ends this broadcast cleanly.
+		// Set once announcing stops after serving with `linger`, which ends this broadcast cleanly.
 		const ended = new Signal(false);
 		effect.get(ended);
 		effect.cleanup(() => {
@@ -374,8 +378,8 @@ export class Broadcast {
 			this.#finished = finished;
 			void finished.wait();
 		});
-		// One publisher instance per broadcast, so a restart is a new broadcast rather than a
-		// resume into the old one.
+		// One publisher instance per broadcast, kept across unannounce and announce, so a
+		// restart is a new broadcast rather than a resume into the old one.
 		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
@@ -385,7 +389,7 @@ export class Broadcast {
 		});
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
-		// so a rendition change keeps writing to it instead of restarting its
+		// so a re-announce or a rendition change keeps writing to it instead of restarting its
 		// group sequence under the same epoch. Rendition tracks by name, so registering a name
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
@@ -402,8 +406,9 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				// Before the first announce there is nothing to end.
-				if (serving) ended.set(true);
+				// Before the first announce there is nothing to finish.
+				if (serving && this.in.linger.peek()) ended.set(true);
+				else broadcast.unannounce();
 				return;
 			}
 
