@@ -1697,6 +1697,35 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	await settle();
 	expect(sub.closed.peek()).toBeInstanceOf(Error);
 	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	// Refused, the reader holds no copy.
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("an end a replaced copy declared holds once the copy is let go in the same turn", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	front.serve(b.consume());
+	await settle();
+
+	// A datagram read lets go of the replaced copy before its end is reported.
+	ta.producer.finishAt({ group: 2, frame: 0 });
+	expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+
+	tb.producer.finishAt({ group: 3, frame: 0 });
+	await settle();
+	expect(sub.closed.peek()).toBeInstanceOf(Error);
 
 	sub.close();
 	front.consumer.close();

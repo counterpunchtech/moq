@@ -275,7 +275,7 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
-	/** A copy declared another end after the track ended cleanly: reads fail with this. */
+	/** A copy declared another end: reads fail with this. */
 	#refused?: Error;
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
@@ -630,6 +630,9 @@ class Reader implements ResumeSource {
 	 * a replaced one, which a clean end waits for.
 	 */
 	#letGo(delivered: Delivered): boolean {
+		// An end a copy declared outlives the copy.
+		this.#learnEnd();
+		if (this.#closed) return false;
 		const last = this.#copies.at(-1);
 		const edge = last && hooks.latestSequence(last.sub);
 		const cursor = this.#shell.cursor.peek();
@@ -847,12 +850,12 @@ class Reader implements ResumeSource {
 			return;
 		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
 			if (declared.frame === 0) this.#declared = end;
-		} else if (this.#ended) {
-			// `closed` already settled cleanly: stop reading the copies that claim other content.
-			this.#refused = new Incompatible(this.route.name);
-			this.close(this.#refused);
 		} else {
-			this.#shell.close(new Incompatible(this.route.name));
+			// Stop reading the copies that claim other content. `closed` settles with the refusal,
+			// unless it already settled cleanly.
+			this.#refused = new Incompatible(this.route.name);
+			this.#shell.close(this.#refused);
+			this.close(this.#refused);
 		}
 	}
 
