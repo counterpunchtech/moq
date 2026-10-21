@@ -13,6 +13,15 @@ The publisher's `Info::priority` now breaks ties between subscriptions at one su
 
 On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
 
+### A claim answers by publishing (#5678)
+
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
+`Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
+`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
+
 ### Anchors can name a time (#6074)
 
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.

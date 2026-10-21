@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
+Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
+
 ### `TrackInfo` gains `Compress` (#5928)
 
 A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.

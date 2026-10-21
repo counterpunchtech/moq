@@ -69,5 +69,5 @@ and with fairness off the strict order is unchanged.
 
 ## Related
 
-- [Egress held state](/quest/m1/egress-held-state.md) - whatever replaces parked group streams must still decide who gets the next stream across broadcasts
+- [One parked group per subscription](https://github.com/moq-dev/moq/pull/6140) - the parked group each subscription keeps must still yield the next stream by broadcast
 - [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the receive-side counterpart on the same moq-quic sessions

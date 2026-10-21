@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### A claim answers by publishing (#5678)
+
+`origin.dynamic_(prefix:)` takes no route, and `update` is gone.
+Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains a time variant, so exhaustive switches need a case for it.

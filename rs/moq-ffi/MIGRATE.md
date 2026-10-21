@@ -11,6 +11,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### A claim answers by publishing (#5678)
+
+`MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
+`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+
 ### `MoqTrackInfo` gains `compress` (#5928)
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.

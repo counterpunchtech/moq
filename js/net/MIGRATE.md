@@ -11,6 +11,15 @@ The track's default was 127 and the subscription's 0, the least urgent; both are
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
 
+### A claim answers by publishing (#5678)
+
+`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast.announce()` throws.
+Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
+`Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
+Close the claim and claim again to change it, and close an answer's producer to end that output.
+
 ### `largest()` reports within a reader's `setGroups` bounds
 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
