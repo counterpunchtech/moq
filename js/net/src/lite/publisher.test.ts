@@ -935,6 +935,34 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 	}
 });
 
+// A relay receives the newest group first while its source still promises older groups.
+// START must preserve that promise, bounded by the downstream floor and first served group.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const [source, expected] of [
+		[0, 2],
+		[3, 3],
+		[9, 6],
+	]) {
+		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
+			const sub = await servedSubscription({ version, startGroup: 2 });
+			try {
+				hooks.startTrack(sub.track, { start: source, requested: 2 });
+				sub.serve(6);
+				expect(await sub.servedSequence()).toBe(6);
+				const response = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+				expect(response.start.group).toBe(expected);
+				if (expected < 6) {
+					sub.serve(expected);
+					expect(await sub.servedSequence()).toBe(expected);
+				}
+			} finally {
+				await sub.close();
+			}
+		});
+	}
+}
+
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
 test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {

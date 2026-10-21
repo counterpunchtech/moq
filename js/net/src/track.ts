@@ -560,6 +560,7 @@ let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | unde
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let sourceStart: (producer: Producer) => number | undefined;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -726,6 +727,7 @@ export class Producer {
 	}
 
 	static {
+		sourceStart = (producer) => producer.#served?.start;
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
@@ -1816,6 +1818,12 @@ export class Subscriber {
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
+		};
+		hooks.sourceStart = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.start();
+			const producer = subscriber.#state.producer;
+			const start = producer && sourceStart(producer);
+			return start === undefined ? undefined : Math.max(start, subscriber.#cursor.peek().start);
 		};
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();

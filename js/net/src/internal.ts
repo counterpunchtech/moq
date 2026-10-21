@@ -316,6 +316,8 @@ export interface ResumeSource {
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
 	latest(): number | undefined;
+	/** The serving copy's declared start, raised to its cursor floor. */
+	start(): number | undefined;
 	/** The serving copy's declared exclusive end. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -404,6 +406,9 @@ export const hooks: {
 	// pending: /quest/m1/public-model/serve.md
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
+	// pending: /quest/m1/public-model/serve.md
+	/** The source's declared start, raised to the subscriber's cursor floor; assigned by `track.ts`. */
+	sourceStart: (subscriber: Subscriber) => number | undefined;
 	// pending: /quest/m1/public-model/serve.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
@@ -555,6 +560,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	sourceStart: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {

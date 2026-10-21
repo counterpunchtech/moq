@@ -1296,15 +1296,17 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
-					startSequence = group.sequence;
-					// SUBSCRIBE_START names the first group served now. A later group at or
-					// above an explicit floor is still delivered, so the cursor stays put.
+					const source = hooks.sourceStart(track);
+					// Newest-first delivery can put a group ahead of where the source's feed
+					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
+					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
 						hooks.replaceGroups(track, {
-							start: { included: group.sequence },
+							start: { included: startSequence },
 							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 						});
 					}
@@ -1312,7 +1314,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence, largest) },
+								{ start: new SubscribeStart(startSequence, largest) },
 								this.version,
 							),
 						))
