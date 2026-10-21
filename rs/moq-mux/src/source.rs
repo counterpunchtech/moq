@@ -133,7 +133,7 @@ impl Source {
 			return Binding::new(pinned.clone());
 		}
 		Binding(Bound::Requested {
-			request: self.origin.request_broadcast(path, None).into_inner(),
+			lookup: Mutex::new(Lookup::new(&self.origin, path)),
 			pins: self.pins.clone(),
 			path: path.clone(),
 		})
@@ -232,7 +232,9 @@ impl Source {
 	/// Start one broadcast request now and retain its result for repeated reads.
 	///
 	/// Unlike [`resolve`](Self::resolve), this issues the request without awaiting or polling.
-	/// A remote or dynamic handler may answer later. The binding never retries a failed request
+	/// A remote or dynamic handler may answer later. A client session that only discovers
+	/// what is watched is asked about the path first, and the request goes out once it
+	/// answers. The binding never retries a failed request
 	/// or resolves the path again after a publisher is replaced.
 	///
 	/// A path this source already resolved binds to that broadcast; otherwise the origin is
@@ -278,9 +280,9 @@ pub struct Binding(Bound);
 enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
-	/// A request issued when the binding was made.
+	/// A lookup started when the binding was made.
 	Requested {
-		request: moq_net::origin::Requesting,
+		lookup: Mutex<Lookup>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
 		path: moq_net::PathOwned,
@@ -299,8 +301,8 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		match &self.0 {
 			Bound::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
-			Bound::Requested { request, pins, path } => {
-				let broadcast = ready!(request.poll_ok(waiter))?;
+			Bound::Requested { lookup, pins, path } => {
+				let broadcast = ready!(lookup.lock().expect("lookup poisoned").poll(waiter))?;
 				// A request that raced another for the path takes the one pinned first.
 				let mut pins = pins.lock().expect("pins poisoned");
 				Poll::Ready(Ok(pins.entry(path.clone()).or_insert(broadcast).clone()))
@@ -313,6 +315,53 @@ impl Binding {
 	/// Concurrent reads and cancelled waits retain the same request and result.
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
+	}
+}
+
+/// One request for a path, made once the origin has heard whether anything serves it.
+///
+/// A client session only asks its peer about paths something watches, so a sibling no
+/// listing covers would be unroutable when asked at once. Watching the path first and
+/// asking once that watch syncs answers from what the peer announces. An origin that
+/// already knows its routes syncs at once, so the request still goes out on binding.
+struct Lookup {
+	origin: moq_net::origin::Consumer,
+	path: moq_net::PathOwned,
+	/// Dropped once the request is made: a broadcast resolved through a discovered route
+	/// keeps its own path watched.
+	watch: Option<moq_net::announce::Consumer>,
+	request: Option<moq_net::origin::Requesting>,
+}
+
+impl Lookup {
+	fn new(origin: &moq_net::origin::Consumer, path: &moq_net::PathOwned) -> Self {
+		// A path no pattern can spell, or one outside the scope, fails on the request instead.
+		let watch = moq_net::Pattern::literal(path.as_str())
+			.ok()
+			.and_then(|pattern| origin.scope("", &moq_net::Patterns::from(pattern)).ok())
+			.map(|scoped| scoped.with_hidden(true).announced());
+		let mut lookup = Self {
+			origin: origin.clone(),
+			path: path.clone(),
+			watch,
+			request: None,
+		};
+		// Ask now when the origin already knows, so a dynamic handler hears it on binding.
+		let _ = lookup.poll(&kio::Waiter::noop());
+		lookup
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
+		if self.request.is_none() {
+			if let Some(watch) = &mut self.watch {
+				// Synced only counts once every event queued before it was read.
+				while let Poll::Ready(Some(_)) = watch.poll_next(waiter) {}
+				ready!(watch.poll_synced(waiter));
+			}
+			self.watch = None;
+			self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
+		}
+		self.request.as_ref().expect("requested above").poll_ok(waiter)
 	}
 }
 

@@ -2065,6 +2065,7 @@ impl Producer {
 	/// prefixes readers of the origin want discovered, mapped onto this handle's
 	/// scope, starting with the current ones.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn interests(&self) -> Interests {
 		let queue = kio::Queue::new();
 		let mut state = self.shared.lock();
@@ -2104,6 +2105,7 @@ impl Producer {
 	/// Whether routes arrive here on a link between relays ([`Self::peer`] or
 	/// [`Self::upstream`]), whose sessions discover everything they may.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn relays(&self) -> bool {
 		self.link != Link::Local
 	}
@@ -3079,7 +3081,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			};
 			for action in front.step(event) {
 				match action {
-					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen, &mut resolved, &mut discovered)),
+					Action::Reselect => {
+						events.push_back(select(&mut front, &sources, &mut seen, &mut resolved, &mut discovered))
+					}
 					Action::Request { route } => {
 						// The entry and what it serves.
 						let found = {
@@ -4079,6 +4083,7 @@ pub(crate) struct Interests {
 impl Interests {
 	/// The next change, or `None` once the origin closed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<InterestChange>> {
 		Poll::Ready(ready!(self.queue.poll_pop(waiter)).ok())
 	}
@@ -4763,7 +4768,12 @@ impl OriginState {
 		let mut changes = Vec::new();
 		for listener in &self.listeners {
 			for relative in listener.asks(prefix) {
-				changes.push((listener.queue.clone(), listener.root.join(&relative), relative, listener.link));
+				changes.push((
+					listener.queue.clone(),
+					listener.root.join(&relative),
+					relative,
+					listener.link,
+				));
 			}
 		}
 		for (queue, absolute, prefix, link) in changes {
@@ -4821,7 +4831,12 @@ impl OriginState {
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
-	fn register_cursor(&mut self, shared: &SendCell<kio::Shared<OriginState>>, id: ConsumerId, mut cursor: TableCursor) {
+	fn register_cursor(
+		&mut self,
+		shared: &SendCell<kio::Shared<OriginState>>,
+		id: ConsumerId,
+		mut cursor: TableCursor,
+	) {
 		// First, so the snapshots a session takes for these interests hold the cursor
 		// unsynced from the start, through the scan below.
 		if cursor.interested {
@@ -5778,6 +5793,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
+	/// The stream also watches its scope: a moq-lite client session fed by this
+	/// origin asks its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6069,7 +6086,11 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced.
+	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin's readers watch, so a path no [`Self::announced`],
+	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
+	/// unroutable on it. A broadcast resolved through a discovered route keeps its
+	/// path watched until dropped.
 	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.

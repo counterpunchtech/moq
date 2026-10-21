@@ -5026,7 +5026,11 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		let mut prefix = AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot(""));
+		let mut prefix = AnnouncePrefix::new(
+			subscriber.clone(),
+			Path::new("").to_owned(),
+			subscriber.origin.snapshot(""),
+		);
 		let mut cursor = consumer.announced();
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
@@ -5093,7 +5097,14 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		(AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot("")), consumer)
+		(
+			AnnouncePrefix::new(
+				subscriber.clone(),
+				Path::new("").to_owned(),
+				subscriber.origin.snapshot(""),
+			),
+			consumer,
+		)
 	}
 
 	/// The origin's consumers sync once the counted starts are in and read, never before.
@@ -5266,7 +5277,11 @@ mod tests {
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
-		let mut prefix = AnnouncePrefix::new(subscriber.clone(), Path::new("").to_owned(), subscriber.origin.snapshot(""));
+		let mut prefix = AnnouncePrefix::new(
+			subscriber.clone(),
+			Path::new("").to_owned(),
+			subscriber.origin.snapshot(""),
+		);
 
 		let err = kio::wait(|waiter| prefix.poll(waiter))
 			.await

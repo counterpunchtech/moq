@@ -229,12 +229,7 @@ async fn a_resolved_broadcast_keeps_its_route() {
 		let lazy = Lazy::new(version).await;
 		let mut watch = lazy.watch("a");
 		synced(&mut watch).await;
-		let broadcast = lazy
-			.subscriber
-			.consume()
-			.request_broadcast("a/x", None)
-			.await
-			.unwrap();
+		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
 		drop(watch);
 
 		moq_clock::sleep(LINGERED).await;
@@ -321,7 +316,12 @@ async fn serving_the_peer_asks_nothing() {
 		let pair = connect_mock(options).await;
 		moq_clock::sleep(SETTLE).await;
 
-		let requests = pair.client_transport.bidi_types().into_iter().filter(|kind| *kind == ANNOUNCE).count();
+		let requests = pair
+			.client_transport
+			.bidi_types()
+			.into_iter()
+			.filter(|kind| *kind == ANNOUNCE)
+			.count();
 		assert_eq!(requests, 0, "{version}");
 		assert!(matches!(
 			local.consume().request_broadcast("a/x", None).await,

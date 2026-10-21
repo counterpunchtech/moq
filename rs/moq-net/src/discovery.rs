@@ -146,7 +146,9 @@ impl Discovery {
 		let count = self.wanted.get(&prefix).copied().unwrap_or(0);
 		let count = match want {
 			true => count + 1,
-			false => count.checked_sub(1).expect("an interest released more often than gained"),
+			false => count
+				.checked_sub(1)
+				.expect("an interest released more often than gained"),
 		};
 		match count {
 			0 => self.wanted.remove(&prefix),

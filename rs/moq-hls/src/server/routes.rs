@@ -986,6 +986,32 @@ mod tests {
 		pair.accept.abort();
 	}
 
+	/// A client asks its peer only about watched paths, so a sibling no listing covers is
+	/// asked about before it is requested.
+	#[tokio::test]
+	async fn a_sibling_resolves_through_a_client_session() {
+		let pair = lite_pair().await;
+		let catalog = pair.pub_origin.create_broadcast("room/live").expect("catalog");
+		catalog.announce(Default::default()).expect("announce catalog");
+		let media = pair.pub_origin.create_broadcast("room/source").expect("media");
+		media.announce(Default::default()).expect("announce media");
+
+		let origin = pair.sub_origin.consume();
+		let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+			.await
+			.expect("catalog resolve timed out")
+			.expect("catalog broadcast");
+		let source = moq_mux::Source::new(origin, broadcast);
+		let sibling = tokio::time::timeout(TIMEOUT, source.resolve(Some(&moq_net::path::Relative::new("./source"))))
+			.await
+			.expect("sibling resolve timed out")
+			.expect("sibling broadcast");
+		assert!(!sibling.is_closed());
+
+		drop((catalog, media));
+		pair.accept.abort();
+	}
+
 	#[tokio::test]
 	async fn a_disconnected_sibling_publisher_answers_404() {
 		let pair = lite_pair().await;
@@ -1015,13 +1041,11 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote_media = tokio::time::timeout(
-			TIMEOUT,
-			pair.sub_origin.consume().request_broadcast("room/source", None),
-		)
-		.await
-		.expect("sibling resolve timed out")
-		.expect("sibling broadcast");
+		// Waited on rather than requested once: a client only asks about what it watches.
+		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))
+			.await
+			.expect("sibling resolve timed out")
+			.expect("sibling broadcast");
 		drop(media);
 		drop(media_broadcast);
 		tokio::time::timeout(TIMEOUT, remote_media.closed())

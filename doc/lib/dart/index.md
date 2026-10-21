@@ -64,7 +64,8 @@ moq
     default:
   }
 });
-final broadcast = await moq.requestBroadcast('live/camera');
+// Wait for a publisher at one path; call available() again for the next one.
+final broadcast = await moq.announcedBroadcast('live/camera').available();
 final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
 print(await catalog.next());
 ```
@@ -97,7 +98,7 @@ encoder.finish();
 // Decode a subscribed rendition. Dispose each frame promptly.
 import 'package:moq/video.dart' as video;
 
-final remote = await moq.requestBroadcast('live/camera');
+final remote = await moq.announcedBroadcast('live/camera').available();
 final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
