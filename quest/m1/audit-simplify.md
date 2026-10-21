@@ -34,7 +34,6 @@ Left from the m0 run because open work edits the same code:
   and the IETF publisher/subscriber constructors drifted from lite's config
   structs. Waits on [close-tail drain](/quest/m1/close-tail-drain.md).
 - Lite and IETF `GroupServe` share their open, flush, and FIN-settle driver.
-  Waits on [compressed tracks](/quest/m1/compress/core.md).
 - `ietf/adapter.rs` reimplements `kio::Queue`; keep a drop guard for the
   writer. Waits on close-tail drain.
 

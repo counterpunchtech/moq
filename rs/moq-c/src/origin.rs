@@ -381,7 +381,10 @@ impl Origin {
 				},
 			};
 
-			let request_id = State::lock().origin.broadcast_request.insert((request, driver.clone()))?;
+			let request_id = State::lock()
+				.origin
+				.broadcast_request
+				.insert((request, driver.clone()))?;
 			let callback = State::lock().origin.dynamic.get(id).map(|entry| entry.task.callback);
 			let Some(callback) = callback else {
 				return Ok(());
