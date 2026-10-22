@@ -129,7 +129,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 		token.close();
 		expect(await token.closed).toBeNull();
-		await waitFor(handle.grant, (g) => g?.publish.equals(patterns("")) === false);
+		await waitFor(handle.grant, (g) => g?.publish.size === 0);
 		second.client.abort();
 		second.server.abort();
 	});
@@ -701,12 +701,22 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 			added = true;
 		});
 		await refuse(await requests.next());
+		// Unanswered through the backoff, so a publication it might cover waits for the retry.
+		let ready: boolean | undefined;
+		void wireOf(client)
+			.auth.ready(Path.from("a"), "publish")
+			.then((value) => {
+				ready = value;
+			});
 		await refuse(await after(Milli(1000)));
+		expect(ready).toBeUndefined();
 		const accepted = await after(Milli(2000));
 		if (!accepted) throw new Error("the token was not presented again");
 		issued.push(accepted.accept(grant(["a"], [])));
 		const token = await adding;
 		expect(token.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
+		await settles(() => ready !== undefined);
+		expect(ready).toBe(true);
 	} finally {
 		client.abort();
 		server.abort();
@@ -754,6 +764,27 @@ test("lite-07 presents a token added after a GOAWAY only on the successor", asyn
 	successor.server.abort();
 });
 
+test("lite-07 refuses a token added to a session's own handle after a GOAWAY", async () => {
+	const protocol = Lite.ALPN_07_WIP;
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume() }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	try {
+		const late = withTimeout(client.auth.add("late"), Nano.fromMilli(Milli(1000)), "add after GOAWAY hung");
+		await expect(late).rejects.toBeInstanceOf(StreamError);
+	} finally {
+		client.abort();
+		server.abort();
+	}
+});
+
 test("lite-07 ignores a draining session's late refusal once its successor granted", async () => {
 	const protocol = Lite.ALPN_07_WIP;
 	const handle = new Handle();
@@ -798,6 +829,79 @@ test("lite-07 ignores a draining session's late refusal once its successor grant
 		server.abort();
 		successor.client.abort();
 		successor.server.abort();
+	}
+});
+
+test("lite-07 ignores a draining session's late refusal while its successor retries", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const refusals = () => warned.mock.calls.filter(([line]) => line === "auth token refused").length;
+	const protocol = Lite.ALPN_07_WIP;
+	const handle = new Handle();
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume(), auth: handle }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const requests = server.auth.requests();
+	const issued: Issued[] = [];
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	issued.push(setup.accept(grant([], [])));
+	const adding = handle.add("token");
+	const unanswered = await requests.next();
+	expect(unanswered && new TextDecoder().decode(unanswered.token)).toBe("token");
+
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	const next = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	const successorRequests = next.server.auth.requests();
+	try {
+		const successorSetup = await successorRequests.next();
+		if (!successorSetup) throw new Error("missing successor setup token");
+		issued.push(successorSetup.accept(grant([], [])));
+		const first = await successorRequests.next();
+		if (!first) throw new Error("the successor did not present the token");
+		const firstGrant = first.accept(grant(["second"], []));
+		const token = await adding;
+		await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
+		let ended = false;
+		void token.closed.then(() => {
+			ended = true;
+		});
+
+		// The successor's grant ends with a refusal that may pass, so it backs off with no grant.
+		const before = refusals();
+		firstGrant.revoke(SessionCode.TooManyRequests, "busy");
+		await settles(() => refusals() > before);
+		await waitFor(token.grant, (g) => g === undefined);
+
+		// The draining session's stale refusal lands during that backoff.
+		const stale = refusals();
+		unanswered?.reject(SessionCode.Unauthorized, "stale");
+		await settles(() => refusals() > stale);
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(ended).toBe(false);
+
+		const retried = successorRequests.next();
+		clock.advance(Nano.fromMilli(Milli(1000)));
+		const again = await retried;
+		if (!again) throw new Error("the successor did not present the token again");
+		issued.push(again.accept(grant(["third"], [])));
+		await waitFor(token.grant, (g) => g?.publish.equals(patterns("third")) === true);
+		expect(ended).toBe(false);
+	} finally {
+		for (const grant of issued) grant.close();
+		client.abort();
+		server.abort();
+		next.client.abort();
+		next.server.abort();
+		warned.mockRestore();
+		restore();
 	}
 });
 

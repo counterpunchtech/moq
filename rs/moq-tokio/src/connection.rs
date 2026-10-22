@@ -873,6 +873,11 @@ impl Connection {
 			if !timeout.is_zero() && retry.start.elapsed() >= timeout {
 				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			}
+			// An ended auth handle refuses every later session, so no dial can recover. A fresh
+			// watch only reports an error once its handle has ended.
+			if let Poll::Ready(Err(err)) = shared.auth.grant().poll_changed(&kio::Waiter::noop()) {
+				return Err(err.into());
+			}
 
 			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
 				Ok((addr, dialed)) => {
@@ -1307,6 +1312,7 @@ impl Connection {
 	/// presented on each reconnect, so a route naming one keeps it, and its grant follows
 	/// the live session. It ends with the connection: [`Error::MoqNet`]'s error, or
 	/// [`moq_net::Error::Unauthorized`] for a rejection, or [`moq_net::Error::Cancel`].
+	/// Aborting it ends the connection at its next reconnect, with the abort's error.
 	pub fn auth(&self) -> moq_net::auth::Handle {
 		self.auth.clone()
 	}
@@ -2564,6 +2570,34 @@ mod tests {
 		let token = token.unwrap();
 		let closed = tokio::time::timeout(WAIT, token.closed()).await.unwrap();
 		assert!(matches!(closed, moq_net::Error::Cancel), "{closed:?}");
+	}
+
+	/// Ending the connection's auth handle ends the loop at its next reconnect, rather than
+	/// redialing sessions the handle refuses.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn an_ended_auth_handle_ends_the_loop() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{addr}/")));
+
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		connection.auth().abort(moq_net::Error::App(9));
+		session.abort(moq_net::Error::Cancel);
+		let closed = tokio::time::timeout(WAIT, connection.closed())
+			.await
+			.expect("the loop kept redialing on an ended auth handle");
+		assert!(
+			matches!(closed, Err(Error::MoqNet(moq_net::Error::App(9)))),
+			"{closed:?}"
+		);
 	}
 
 	/// A session that ends the loop reports through `closed`, not as a retry reason.
