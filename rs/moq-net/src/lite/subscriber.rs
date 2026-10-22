@@ -609,8 +609,11 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>, client: bool) -> Self {
+		// Lite03/04 mark no initial set, so a watch would read as synced before the peer
+		// answers it. Asking for everything at connect keeps their discovery eager instead.
+		let lazy = client && !matches!(subscriber.version, Version::Lite03 | Version::Lite04);
 		Self {
-			discovery: crate::discovery::Discovery::new(&subscriber.origin, client, subscriber.runtime.clone()),
+			discovery: crate::discovery::Discovery::new(&subscriber.origin, lazy, subscriber.runtime.clone()),
 			prefixes: HashMap::new(),
 			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
 			uni: UniAccept::new(subscriber.clone(), early),

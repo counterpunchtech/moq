@@ -115,8 +115,8 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
-/// on a malformed offer, and surfaces a not-announced broadcast (or one outside
-/// `subscriber`'s scope) as [`Error::Moq`].
+/// on a malformed offer, and surfaces a broadcast still unannounced after 5s (or one
+/// outside `subscriber`'s scope) as [`Error::Moq`].
 pub async fn accept(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
@@ -125,19 +125,7 @@ pub async fn accept(
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	// Resolve the broadcast on the subscribe origin by path. `request_broadcast` resolves an
-	// announced broadcast immediately and falls back to a dynamic handler; with neither it
-	// errors and the WHEP client retries (typical). The `Source` resolves any sibling broadcast
-	// a rendition's catalog `broadcast` field references (e.g. `./source`) the same way.
-	//
-	// Bound the wait for resolution + the first catalog: an unannounced broadcast, or an
-	// announced-but-catalog-less one, would otherwise park this handler forever.
-	let source = tokio::time::timeout(CATALOG_TIMEOUT, async {
-		let broadcast = subscriber.request_broadcast(broadcast.as_path(), None).await?;
-		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)).await
-	})
-	.await
-	.map_err(|_| Error::CatalogTimeout)??;
+	let source = resolve(subscriber, broadcast.as_path()).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -195,6 +183,29 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 		.unwrap_or(false)
 }
 
+/// Resolve `path` on the subscribe origin and wait for its first catalog.
+///
+/// `routed_broadcast` watches the path while it resolves, which is what makes a lazily
+/// discovering client session ask its peer about it; a plain request would be unroutable
+/// there. The `Source` resolves any sibling broadcast a rendition's catalog `broadcast` field
+/// references (e.g. `./source`) through the same origin.
+///
+/// Both waits share one bound, or an unannounced broadcast, or an announced-but-catalog-less
+/// one, would park the handler forever. No route by the deadline is
+/// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
+async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>) -> Result<EgressSource> {
+	let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
+	let broadcast = tokio::time::timeout_at(deadline, subscriber.routed_broadcast(path))
+		.await
+		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??;
+	tokio::time::timeout_at(
+		deadline,
+		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)),
+	)
+	.await
+	.map_err(|_| Error::CatalogTimeout)?
+}
+
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
@@ -204,5 +215,75 @@ fn status_for(err: &Error) -> StatusCode {
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		Error::Moq(moq_net::Error::NotFound | moq_net::Error::Unroutable) => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use bytes::Bytes;
+
+	use crate::codec::{Bridge, Frame};
+
+	const TIMEOUT: Duration = Duration::from_secs(10);
+
+	/// A plain moq-lite client origin asks its peer only about watched paths, so resolving
+	/// a WHEP play must watch the broadcast rather than request it blind.
+	#[tokio::test]
+	async fn a_broadcast_resolves_through_a_lazy_client_session() {
+		let pub_origin = moq_tokio::origin::spawn();
+		let sub_origin = moq_tokio::origin::spawn();
+
+		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
+		source
+			.announce(moq_net::origin::Route::default())
+			.expect("announce broadcast");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+		opus.push(Frame {
+			timestamp_us: 20_000,
+			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		})
+		.expect("publish packet");
+
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.tcp.bind = Some("127.0.0.1:0".parse().expect("addr"));
+		let mut server = listen
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = server.tcp_local_addr().expect("tcp listener bound");
+		let accept = tokio::spawn(async move {
+			let request = server.accept().await.expect("accept");
+			let (session, driver) = request
+				.with_publisher(&pub_origin)
+				.ok()
+				.await
+				.expect("publisher session");
+			let _ = driver.await;
+			let _ = session.closed().await;
+		});
+
+		let client = moq_tokio::connect::Config::default()
+			.init(Default::default())
+			.expect("client")
+			.with_subscriber(sub_origin.clone())
+			.with_reconnect(false);
+		let url: url::Url = format!("tcp://{addr}/").parse().expect("url");
+		let _connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+			.await
+			.expect("connect timed out")
+			.expect("connect");
+
+		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::new("cam"))
+			.await
+			.expect("the broadcast resolves");
+		assert!(!resolved.catalog_codecs().is_empty());
+
+		accept.abort();
 	}
 }

@@ -13,7 +13,7 @@ Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `ann
 A broadcast resolved through a discovered route keeps its path watched until dropped.
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
-moq-transport sessions are unchanged.
+moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
