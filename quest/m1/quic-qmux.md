@@ -19,10 +19,9 @@ Decided in the 2026-09-30 plan:
   `web-transport-trait` ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)). The TypeScript `@moq/qmux`
   keeps its own state machine and is the interop reference; it lives in
   `js/qmux`.
-- **All four wire versions stay**: draft-02, draft-01, draft-00, and the
-  legacy `webtransport` format, since published clients (and the TS peer)
-  negotiate them. They differ only in record framing, so they share the one
-  state machine.
+- **Three wire versions stay**: draft-02, draft-01, and draft-00. They
+  differ only in record framing, so they share the one state machine. The
+  legacy `webtransport` format is dropped (2026-10-21, below).
 - **Shape**: the sans-IO part is `moq_quic::mux`, a module behind a feature,
   so it reaches the stream state without widening `moq-quic`'s public API.
   The tokio session, adapters, and trait impl are the `qmux` crate, published
@@ -61,7 +60,7 @@ reusable acceptance fixtures, including byte fairness, strict priority,
 newest/oldest group ordering, cancellation, and blocked-stream behavior.
 The native scheduler does not wait for this dependent proof.
 
-Add the missing wire evidence before release: golden vectors for each of the four versions,
+Add the missing wire evidence before release: golden vectors for each of the three versions,
 bidirectional interoperability against the last web-transport `qmux` release (0.6.x, a
 test-only dependency), and the in-tree TypeScript qmux peer used by `js/net`.
 Move `just test qmux` onto the in-tree crate: it runs `test/qmux/interop.test.ts`,
@@ -97,6 +96,19 @@ as upstream releases and pin bumps; the bug stays on main until this lands.
 The release line gets no backport of the credit and close fixes; the
 stream-limit port in the [release shutdown backport](/quest/m0/ffi-shutdown-backport.md)
 is the exception.
+
+Decided 2026-10-21 (maintainer), while starting:
+
+- One PR, with layered commits for the mux hooks, the crate, and the consumer switch.
+- Keep qmux 0.6's API shape on the new core, so its migration is mostly the
+  poll traits and config cleanups.
+- Drop the legacy `webtransport` format: it predates QMux draft-00 and is only
+  a WebSocket fallback. WebSocket upgrades without a QMux subprotocol are
+  refused.
+- The transport reports its `Binding`, so WebSocket sessions keep their URI.
+- Drop the `h3qx` example; the interop examples move in tree.
+- The relay keeps advertising draft-01 and draft-00 only; advertising draft-02
+  is a separate change.
 
 ## Related
 

@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### WebSocket clients must offer a QMux subprotocol (#PRNUM)
+
+The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.
+Upgrade any client that still speaks only `webtransport` over WebSocket before the relay.
+
 ### `supervise` takes a `Serving` guard (#6144)
 
 `moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.

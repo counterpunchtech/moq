@@ -592,6 +592,57 @@ fn golden_transport_parameters() {
     }
 }
 
+/// An established client's records for a finished stream, a reset, and a close, byte for
+/// byte, so a framing change shows up as a wire change. Every version frames them alike:
+/// the record header is the transport's.
+#[test]
+fn golden_records() {
+    for &version in Version::ALL {
+        let mut pair = Pair::new(config(version));
+        let mut record = |conn: &mut Connection, now| {
+            let record = conn.poll_transmit(now).unwrap();
+            assert!(conn.poll_transmit(now).is_none());
+            record
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+
+        let id = pair
+            .client
+            .streams()
+            .open(Dir::Uni, SendOptions::default())
+            .unwrap();
+        pair.client.send_stream(id).write(b"hi").unwrap();
+        pair.client.send_stream(id).finish().unwrap();
+        let stream = record(&mut pair.client, pair.now);
+
+        let id = pair
+            .client
+            .streams()
+            .open(Dir::Uni, SendOptions::default())
+            .unwrap();
+        pair.client.send_stream(id).write(b"x").unwrap();
+        pair.client
+            .send_stream(id)
+            .reset(VarInt::from_u32(5))
+            .unwrap();
+        let reset = record(&mut pair.client, pair.now);
+
+        pair.client
+            .close(VarInt::from_u32(42), Bytes::from_static(b"bye"));
+        let close = record(&mut pair.client, pair.now);
+
+        // STREAM(OFF=0, LEN, FIN) id 2 "hi"; RESET_STREAM id 6 code 5 final size 1;
+        // CONNECTION_CLOSE(application) code 42 "bye"
+        assert_eq!(
+            [stream, reset, close],
+            ["0b02026869", "04060501", "1d2a03627965"],
+            "{version:?}"
+        );
+    }
+}
+
 /// The client's STREAM bytes in the order its records carry them, as `(stream, bytes)` runs
 fn stream_order(pair: &mut Pair) -> Vec<(u64, usize)> {
     let mut order: Vec<(u64, usize)> = Vec::new();
