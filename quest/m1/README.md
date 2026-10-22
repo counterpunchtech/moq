@@ -94,7 +94,6 @@ lands before the cut.
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [JS answers SUBSCRIBE_START like Rust](/quest/m1/js-start-parity.md) - a JS publisher's START names where its backlog starts, not its newest group
-- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [GOAWAY deadline](/quest/m1/goaway-deadline.md) - the drain deadline counts from the trigger in moq-net and js/net, so a peer that stops reading cannot stall it

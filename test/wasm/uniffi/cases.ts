@@ -275,9 +275,9 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 					| undefined;
 				if (got?.sequence() !== sequence) throw new Error(`sequence ${got?.sequence()} != ${sequence}`);
 				const frame = await got.readFrame();
-				// moq-lite-02 carries no timestamp; every other version must keep it exact.
-				if (relay.version !== "moq-lite-02" && frame?.timestampUs !== stamp(sequence))
-					throw new Error(`timestamp ${frame?.timestampUs} != ${stamp(sequence)}`);
+				// Lite-02 carries no timestamp and a lite-05/06 subscriber drops it; the rest keep it exact.
+				const expected = /^moq-lite-0[1-6]$/.test(relay.version) ? undefined : stamp(sequence);
+				if (frame?.timestampUs !== expected) throw new Error(`timestamp ${frame?.timestampUs} != ${expected}`);
 				seen.push(String(sequence));
 			}
 			return undefined;
