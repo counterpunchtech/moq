@@ -257,9 +257,23 @@ impl Connection {
         }
         self.timer.on_recv(now);
         if let Err(err) = self.process(payload, now) {
-            debug!(%err, "qmux protocol error");
-            self.close = Some(Close::from(err.clone()));
-            self.lost(ConnectionError::TransportError(err));
+            self.fail(err);
+        }
+    }
+
+    /// The transport refused an incoming record larger than `max_record_size`, or a draft-00
+    /// frame larger than `max_frame_size`, rather than read it into memory
+    pub fn handle_oversized(&mut self) {
+        if self.error.is_none() {
+            self.fail(self.oversized());
+        }
+    }
+
+    /// The transport found the peer violating its framing, such as overrunning a buffer it
+    /// bounds itself, so close with `err`
+    pub fn handle_violation(&mut self, err: TransportError) {
+        if self.error.is_none() {
+            self.fail(err);
         }
     }
 
@@ -527,18 +541,12 @@ impl Connection {
 
     fn process(&mut self, mut payload: Bytes, now: Instant) -> Result<(), TransportError> {
         let size = payload.len();
-        match self.config.version.uses_records() {
-            true if size as u64 > self.config.max_record_size.into_inner() => {
-                return Err(TransportError::PROTOCOL_VIOLATION(
-                    "record exceeds max_record_size",
-                ));
-            }
-            false if size > MAX_FRAME_SIZE => {
-                return Err(TransportError::FRAME_ENCODING_ERROR(
-                    "frame exceeds max_frame_size",
-                ));
-            }
-            _ => {}
+        let limit = match self.config.version.uses_records() {
+            true => self.config.max_record_size.into_inner(),
+            false => MAX_FRAME_SIZE as u64,
+        };
+        if size as u64 > limit {
+            return Err(self.oversized());
         }
 
         let mut frames = 0;
@@ -557,6 +565,21 @@ impl Connection {
         }
         self.streams.queue_max_stream_id(&mut self.pending);
         Ok(())
+    }
+
+    /// The error for a record or draft-00 frame over its size limit
+    fn oversized(&self) -> TransportError {
+        match self.config.version.uses_records() {
+            true => TransportError::PROTOCOL_VIOLATION("record exceeds max_record_size"),
+            false => TransportError::FRAME_ENCODING_ERROR("frame exceeds max_frame_size"),
+        }
+    }
+
+    /// End the connection over a violation, telling the peer with a CONNECTION_CLOSE
+    fn fail(&mut self, err: TransportError) {
+        debug!(%err, "qmux protocol error");
+        self.close = Some(Close::from(err.clone()));
+        self.lost(ConnectionError::TransportError(err));
     }
 
     fn on_frame(

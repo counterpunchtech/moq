@@ -303,6 +303,17 @@ fn rejects_oversized_records() {
         transport_error(&mut server).code,
         TransportErrorCode::FRAME_ENCODING_ERROR
     );
+
+    // The same, refused by the transport before it was read
+    for (version, code) in [
+        (Version::QMux01, TransportErrorCode::PROTOCOL_VIOLATION),
+        (Version::QMux00, TransportErrorCode::FRAME_ENCODING_ERROR),
+    ] {
+        let mut server = Connection::new(config(version), Side::Server, now);
+        server.handle_oversized();
+        assert_eq!(transport_error(&mut server).code, code);
+        assert!(server.poll_transmit(now).is_some(), "CONNECTION_CLOSE");
+    }
 }
 
 #[test]
