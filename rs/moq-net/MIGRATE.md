@@ -48,9 +48,10 @@ On a received copy, readers wait at a hole below that end for the subscription's
 Every group reaches readers as soon as it is created, but the live edge, `largest()`, and the judgment of whether a group was succeeded count a group only once its first frame opens or it finishes.
 A group followed by a frameless one is judged against the next group that has a frame.
 
-### `track::Producer::abort` aborts open groups (#6111)
+### Ending a track aborts its open groups (#6111)
 
-Aborting a track now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
+Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
 `track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
 
 ### A dropped or cut group ends its reader with an error (#6143)

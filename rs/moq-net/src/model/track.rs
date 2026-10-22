@@ -1617,10 +1617,23 @@ impl TrackState {
 		}
 	}
 
-	/// Drop the open groups nobody will finish now that the track ended abruptly, and
-	/// keep the finished ones for readers still draining. A consumer that already
-	/// pulled an open group keeps its own handle and ends with it.
-	fn drop_open_groups(&mut self, err: StreamError) {
+	/// End the track abruptly with `err`: drop the open groups nobody will finish, keep the
+	/// finished ones for readers still draining, and stop protecting the live edge.
+	///
+	/// Returns every unfinished copy, to abort once the track lock is released, so a reader
+	/// that already pulled one ends with `err` too and its writer fails.
+	fn tear_down(&mut self, err: Error) -> OpenGroups {
+		// Snapshot the frame boundary before the open group it may sit in goes away: an
+		// abrupt end is exactly when a replacement route asks where to resume.
+		self.resume = self.resume_position();
+		let groups = self
+			.lookup
+			.values()
+			.flat_map(Slot::copies)
+			.filter(|group| !group.is_finished())
+			.cloned()
+			.collect();
+		let dropped = StreamError::from(&err);
 		let open: Vec<_> = self
 			.lookup
 			.iter()
@@ -1628,7 +1641,7 @@ impl TrackState {
 			.filter_map(|(&sequence, _)| Some(sequence..sequence.checked_add(1)?))
 			.collect();
 		for groups in open {
-			self.drop_groups(groups, err.clone());
+			self.drop_groups(groups, dropped.clone());
 		}
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Handle::is_finished));
@@ -1641,6 +1654,8 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.retain(|sequence, _| lookup.contains_key(sequence));
+		self.close_cache();
+		OpenGroups { groups, err }
 	}
 
 	/// Take `sequence` out of the cache, along with its checked start.
@@ -2381,7 +2396,7 @@ impl TrackState {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
-		commit_abort(Self::modify(producer)?, err);
+		commit_abort(Self::modify(producer)?, err).abort();
 		Ok(())
 	}
 
@@ -2455,25 +2470,38 @@ impl TrackState {
 	}
 }
 
-/// Record `err` and close the track: the shared tail of [`Producer::abort`] and
-/// [`Producer::abort_unused`].
-fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
-	// Snapshot the frame boundary before the open group it may sit in goes away: an
-	// abort is exactly when a replacement route asks where to resume.
-	state.resume = state.resume_position();
+/// Record `err` and close the track, the shared tail of every abort, returning the open
+/// groups to abort once the guard is gone.
+fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
 	// Decided before the open groups go: the groups below the end are the evidence. A gap
 	// past the grace was lost before the abort rather than cut off by it.
 	let now = state.cache.pool().now_wall();
 	state.fold_arrivals(now);
 	state.settled = state.is_settled();
-	let dropped = StreamError::from(&err);
-	state.abort = Some(err);
+	state.abort = Some(err.clone());
 	// Keep what finished for consumers still draining: they get it, then the abort (or
 	// the clean end, when the end settled). Clearing here would abort finished groups a
 	// slower reader has not pulled yet. The pool's idle expiry bounds how long they stay.
-	state.drop_open_groups(dropped);
-	state.close_cache();
+	let open = state.tear_down(err);
 	state.close();
+	open
+}
+
+/// The unfinished groups a teardown took out of the track, aborted once the track lock
+/// is released.
+#[must_use = "abort the open groups after releasing the track lock"]
+struct OpenGroups {
+	groups: Vec<group::Handle>,
+	err: Error,
+}
+
+impl OpenGroups {
+	/// End each group with the teardown's error: its readers end and its writer fails.
+	fn abort(self) {
+		for group in self.groups {
+			let _ = group.abort(self.err.clone());
+		}
+	}
 }
 
 /// A reader's local group bounds: the floor, and the exclusive cap (`None` for none).
@@ -2845,17 +2873,17 @@ impl Producer {
 
 	/// End the track without declaring where it ends, as a closed session does.
 	///
-	/// Consumers drain the groups that finished and then end cleanly; the open groups are
-	/// dropped. A reader following the track's routes resumes from another one where this
-	/// copy stopped. Use [`Self::finish`] or [`Self::finish_at`] when the end is known.
+	/// Consumers drain the groups that finished and then end cleanly. The open groups are
+	/// aborted with [`Error::SessionClosed`], so a consumer that already pulled one ends
+	/// with it and their writers fail. A reader following the track's routes resumes from
+	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
+	/// when the end is known.
 	pub fn close(self) -> Result<()> {
 		let mut state = self.modify()?;
 		state.sealed = true;
-		// See `commit_abort`: a takeover resumes mid-group once the open group goes away.
-		state.resume = state.resume_position();
-		state.drop_open_groups(StreamError::from(&Error::SessionClosed));
-		state.close_cache();
+		let open = state.tear_down(Error::SessionClosed);
 		state.close();
+		open.abort();
 		Ok(())
 	}
 
@@ -3062,19 +3090,7 @@ impl Producer {
 	pub fn abort(self, err: Error) -> Result<()> {
 		// Unlisted first, so the track leaves the listing before its name is free again.
 		self.alive.unlist();
-		let state = self.modify()?;
-		let open: Vec<_> = state
-			.lookup
-			.values()
-			.flat_map(|slot| std::iter::once(&slot.group).chain(slot.head.as_deref()))
-			.filter(|group| !group.is_finished())
-			.cloned()
-			.collect();
-		// Snapshot the resume boundary before aborting groups releases their frames.
-		commit_abort(state, err.clone());
-		for group in open {
-			let _ = group.abort(err.clone());
-		}
+		commit_abort(self.modify()?, err).abort();
 		Ok(())
 	}
 
@@ -3085,6 +3101,9 @@ impl Producer {
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
 	/// so the caller can continue serving and wait for the next unused wake.
+	///
+	/// The abort is the same as [`Self::abort`]: a group consumer that outlived the track's
+	/// consumers ends with `err`, and the group's writer fails.
 	#[expect(
 		clippy::result_large_err,
 		reason = "return the owned producer without allocating on an idle check"
@@ -3092,7 +3111,7 @@ impl Producer {
 	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
 		let used = match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
-				commit_abort(guard, err);
+				commit_abort(guard, err).abort();
 				false
 			}
 			kio::Unused::Closed => false,
@@ -3550,10 +3569,9 @@ impl Drop for Alive {
 					track = %self.name,
 					"track::Producer dropped without finish() or abort()"
 				);
-				// See `abort`: keep the frame boundary once its open group goes away.
-				state.resume = state.resume_position();
-				state.drop_open_groups(StreamError::from(&Error::Dropped));
-				state.close_cache();
+				let open = state.tear_down(Error::Dropped);
+				drop(state);
+				open.abort();
 			}
 			Err(state) => {
 				if state.sealed || state.end.is_some() || state.abort.is_some() {
@@ -3728,7 +3746,7 @@ impl TrackWeak {
 		};
 		match producer.write_unused() {
 			kio::Unused::Idle(guard) => {
-				commit_abort(guard, err);
+				commit_abort(guard, err).abort();
 				true
 			}
 			kio::Unused::Closed => true,
@@ -7285,7 +7303,7 @@ impl Request {
 	pub(crate) fn reject_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
-				commit_abort(guard, err);
+				commit_abort(guard, err).abort();
 				true
 			}
 			kio::Unused::Closed => true,
@@ -11698,6 +11716,70 @@ mod test {
 		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
+	}
+
+	/// Closing a track aborts its open groups like [`Producer::abort`], with
+	/// [`Error::SessionClosed`].
+	#[test]
+	#[cfg(feature = "async")]
+	fn close_ends_a_pulled_open_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut consumer = producer.subscribe(None);
+		let mut writer = producer.append_group().unwrap();
+		writer
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		let mut group = consumer.assert_group();
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		producer.close().unwrap();
+		let read = group.read_frame().now_or_never().expect("should not block");
+		assert!(matches!(read, Err(Error::SessionClosed)), "{read:?}");
+		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
+		assert!(matches!(write, Err(Error::SessionClosed)), "{write:?}");
+	}
+
+	/// Aborting an unused track aborts an open group whose reader outlived the track's
+	/// consumers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn abort_unused_ends_a_pulled_open_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut consumer = producer.subscribe(None);
+		let mut writer = producer.append_group().unwrap();
+		writer
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		let mut group = consumer.assert_group();
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+		drop(consumer);
+
+		assert!(producer.abort_unused(Error::Cancel).is_ok());
+		let read = group.read_frame().now_or_never().expect("should not block");
+		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
+		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
+		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
+	}
+
+	/// Dropping the last producer without a finish aborts its open groups with
+	/// [`Error::Dropped`].
+	#[test]
+	#[cfg(feature = "async")]
+	fn drop_unfinished_ends_a_pulled_open_group() {
+		let producer = track_producer("test", Info::timed());
+		let mut consumer = producer.subscribe(None);
+		let mut writer = producer.append_group().unwrap();
+		writer
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		let mut group = consumer.assert_group();
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		drop(producer);
+		let read = group.read_frame().now_or_never().expect("should not block");
+		assert!(matches!(read, Err(Error::Dropped)), "{read:?}");
+		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
+		assert!(matches!(write, Err(Error::Dropped)), "{write:?}");
 	}
 
 	/// Aborting a track also aborts a fetched head still being written, so its reader ends
