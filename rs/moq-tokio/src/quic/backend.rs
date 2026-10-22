@@ -480,8 +480,8 @@ impl Client {
 		let session = match url.scheme() {
 			"https" => {
 				let mut request = web::proto::ConnectRequest::new(url.clone());
-				for alpn in versions.alpns() {
-					request = request.with_protocol(alpn.to_string());
+				for protocol in versions.web_protocols() {
+					request = request.with_protocol(protocol.to_string());
 				}
 				web::Session::connect(connection, request)
 					.await

@@ -26,7 +26,7 @@ pub struct Options {
 /// Without this the browser negotiates no subprotocol and the session has no
 /// version to start from.
 fn builder() -> ClientBuilder {
-	ClientBuilder::new().with_protocols(moq_net::ALPNS.iter().copied())
+	ClientBuilder::new().with_protocols(moq_net::Versions::all().web_protocols())
 }
 
 /// Open a browser WebTransport connection to `url`.
