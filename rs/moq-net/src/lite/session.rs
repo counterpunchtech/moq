@@ -253,8 +253,18 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
-	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let stats = publish
+		.as_ref()
+		.map(|origin| origin.stats())
+		.or_else(|| subscribe.as_ref().map(|origin| origin.stats()))
+		.cloned()
+		.unwrap_or_default();
+	let publish = publish.unwrap_or_else(|| {
+		origin::Producer::empty(Hop::random())
+			.consume()
+			.with_stats(stats.clone())
+	});
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
 	let subscriptions =
 		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
@@ -328,6 +338,7 @@ where
 
 	let driver = Driver {
 		auth: Present {
+			stats: stats.clone(),
 			runtime: runtime.clone(),
 			session: session.clone(),
 			version,
@@ -341,9 +352,15 @@ where
 		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
-			.then(|| SendSetup::new(session.clone(), our_setup, version)),
-		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
-		session_stream: setup_stream,
+			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
+		goaway: Some(SendGoaway::new(
+			runtime,
+			session.clone(),
+			goaway,
+			version,
+			stats.clone(),
+		)),
+		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early),
 		session,
@@ -469,6 +486,7 @@ impl<S: crate::transport::poll::Session> Drop for Driver<S> {
 
 /// Opens one AUTH stream per token this side presents.
 struct Present<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
@@ -494,6 +512,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 		}
 		while let Poll::Ready(Some((id, token))) = self.handle.poll_opening(waiter) {
 			self.tokens.push(PresentToken {
+				stats: self.stats.clone(),
 				runtime: self.runtime.clone(),
 				session: self.session.clone(),
 				version: self.version,
@@ -516,6 +535,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 /// One token's AUTH stream: send the token, then track the grant until either
 /// side ends it.
 struct PresentToken<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
@@ -580,6 +600,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
 					};
+					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer
 						.buffer(&super::ControlType::Auth)
@@ -671,6 +692,7 @@ fn poll_session_stream<S: crate::transport::poll::Session>(
 /// error is logged and the machine finishes; the peer falls back to "no
 /// capabilities" for us.
 struct SendSetup<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	version: Version,
 	state: SendSetupState<S>,
 }
@@ -691,8 +713,9 @@ enum SendSetupState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SendSetup<S> {
-	fn new(session: S, setup: Setup, version: Version) -> Self {
+	fn new(session: S, setup: Setup, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
+			stats,
 			version,
 			state: SendSetupState::Open {
 				session,
@@ -716,7 +739,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 				SendSetupState::Open { session, setup } => {
 					let stream = ready!(session.poll_open_uni(cx, Default::default()))
 						.map_err(crate::lite::error::from_transport)?;
-					let mut writer = Writer::new(stream, self.version);
+					let mut writer = Writer::new(stream, self.version).with_stats(&self.stats);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;
 					self.state = SendSetupState::Send {
@@ -745,6 +768,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 /// the sender's own timer, so a caller draining a lite-03 peer still gets the
 /// session closed on schedule; the peer just never learns why.
 struct SendGoaway<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	version: Version,
 	runtime: crate::time::Deadlines,
 	goaway: crate::goaway::Protocol,
@@ -775,8 +799,15 @@ enum SendGoawayState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(runtime: crate::time::Deadlines, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+	fn new(
+		runtime: crate::time::Deadlines,
+		session: S,
+		goaway: crate::goaway::Protocol,
+		version: Version,
+		stats: crate::stats::Session,
+	) -> Self {
 		Self {
+			stats,
 			version,
 			runtime,
 			goaway,
@@ -831,6 +862,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 							continue;
 						}
 					};
+					stream = stream.with_stats(&self.stats);
 					let msg = super::Goaway {
 						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
 					};

@@ -18,6 +18,7 @@ pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
+	stats: crate::stats::Session,
 }
 
 /// How much payload may pile up behind a parked consumer before
@@ -37,7 +38,13 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream,
 			buffer: Default::default(),
 			version,
+			stats: Default::default(),
 		}
+	}
+
+	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
+		self.stats = stats.clone();
+		self
 	}
 
 	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
@@ -57,6 +64,9 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 				Ok(value) => {
 					if consume {
 						let used = self.buffer.len() - r.remaining();
+						if let Some(class) = r.control {
+							self.stats.control(class, used, true);
+						}
 						self.buffer.advance(used);
 					}
 					return Poll::Ready(Ok(value));
@@ -327,6 +337,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 			stream: self.stream,
 			buffer: self.buffer,
 			version,
+			stats: self.stats,
 		}
 	}
 }
@@ -364,6 +375,52 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
 			std::task::Poll::Ready(Ok(()))
 		}
+	}
+
+	#[test]
+	fn control_body_counts_consumed_messages_not_peeks_or_failed_decodes() {
+		use crate::{
+			lite,
+			stats::{Control, Registry, Tier},
+		};
+		let registry = Registry::new(Default::default());
+		let session = registry.tier(Tier::default()).session("");
+		let version = lite::Version::Lite07;
+		let msg = lite::Probe {
+			bitrate: Some(123),
+			rtt: Some(4),
+		};
+		let bytes = msg.encode_bytes(version).unwrap();
+		let mut reader = Reader::new(StopLog::default(), version).with_stats(&session);
+		reader.buffer.extend_from_slice(&bytes);
+		reader.buffer.extend_from_slice(&bytes);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(
+			reader.poll_decode_peek_maybe::<lite::Probe>(&mut cx),
+			Poll::Ready(Ok(_))
+		));
+		assert!(registry.snapshot().control().is_empty());
+		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
+		assert_eq!(
+			registry.snapshot().control(),
+			vec![(Tier::default(), Control::Probe, 0, bytes.len() as u64)]
+		);
+		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
+		reader.buffer.extend_from_slice(&[0x80]);
+		assert!(matches!(
+			reader.poll_decode::<lite::Probe>(&mut cx),
+			Poll::Ready(Err(_))
+		));
+		reader.buffer.clear();
+		reader.buffer.extend_from_slice(&[1, 0x80]);
+		assert!(matches!(
+			reader.poll_decode::<lite::Probe>(&mut cx),
+			Poll::Ready(Err(_))
+		));
+		assert_eq!(
+			registry.snapshot().control(),
+			vec![(Tier::default(), Control::Probe, 0, bytes.len() as u64 * 2)]
+		);
 	}
 
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session

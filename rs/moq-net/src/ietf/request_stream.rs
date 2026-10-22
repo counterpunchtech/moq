@@ -6,6 +6,20 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Stream},
 };
 
+/// Legacy receives are framed once by the physical multiplexer, not again by
+/// the virtual request decoder. Encodes still count at their typed codec.
+pub(super) fn with_stats<S: crate::transport::poll::Session>(
+	stream: Stream<S, Version>,
+	stats: &crate::stats::Session,
+	version: Version,
+) -> Stream<S, Version> {
+	let mut stream = stream.with_stats(stats);
+	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+		stream.reader = stream.reader.with_stats(&Default::default());
+	}
+	stream
+}
+
 pub(super) fn fin_cancels(version: Version) -> bool {
 	matches!(
 		version,
@@ -130,8 +144,10 @@ pub(super) enum FollowUp {
 
 impl Decode<Version> for FollowUp {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let update = r.varint()? == super::SubscribeUpdate::ID;
+		let id = r.varint()?;
+		let update = id == super::SubscribeUpdate::ID;
 		let body = super::Body::decode(r, version)?;
+		r.control = Some(super::message::control(id));
 		Ok(match update {
 			true => Self::Update(body),
 			false => Self::End,
@@ -147,7 +163,9 @@ pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
 impl Decode<Version> for Framed {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
-		Ok(Self(id, super::Body::decode(r, version)?))
+		let body = super::Body::decode(r, version)?;
+		r.control = Some(super::message::control(id));
+		Ok(Self(id, body))
 	}
 }
 

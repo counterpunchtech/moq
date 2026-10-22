@@ -307,6 +307,7 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
+	control: [[AtomicU64; 2]; Control::ALL.len()],
 }
 
 impl SessionCounters {
@@ -337,6 +338,14 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
+		}
+	}
+
+	fn control(&self, totals: &mut [[u64; 2]; Control::ALL.len()]) {
+		for (total, counters) in totals.iter_mut().zip(&self.control) {
+			for (total, counter) in total.iter_mut().zip(counters) {
+				*total += counter.load(Ordering::Relaxed);
+			}
 		}
 	}
 
@@ -886,6 +895,63 @@ impl Role {
 	}
 }
 
+/// The bounded class of a successfully encoded or decoded control-message body.
+///
+/// Counters include prefixes inside a complete codec value, but exclude separately
+/// coded selectors and raw payload writes. A framed IETF body counts after its
+/// framing decodes, before request validation. Shared reply IDs use [`Self::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Control {
+	/// Session setup and information.
+	Session,
+	/// Namespace advertisements and listings.
+	Announce,
+	/// Track metadata and listings.
+	TrackInfo,
+	/// Live subscriptions and their updates.
+	Subscribe,
+	/// Finite fetch requests.
+	Fetch,
+	/// Bandwidth probes.
+	Probe,
+	/// Authorization messages.
+	Auth,
+	/// Session or request migration.
+	Goaway,
+	/// Other protocol control messages, including shared request responses.
+	Other,
+}
+
+impl Control {
+	const ALL: [Self; 9] = [
+		Self::Session,
+		Self::Announce,
+		Self::TrackInfo,
+		Self::Subscribe,
+		Self::Fetch,
+		Self::Probe,
+		Self::Auth,
+		Self::Goaway,
+		Self::Other,
+	];
+
+	/// The stable label used by control-body metrics.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Announce => "announce",
+			Self::TrackInfo => "track_info",
+			Self::Subscribe => "subscribe",
+			Self::Fetch => "fetch",
+			Self::Probe => "probe",
+			Self::Auth => "auth",
+			Self::Goaway => "goaway",
+			Self::Other => "other",
+		}
+	}
+}
+
 /// A point-in-time, host-level rollup of a registry's counters, returned
 /// by [`Registry::snapshot`].
 ///
@@ -904,9 +970,27 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
+	control: HashMap<Tier, [[u64; 2]; Control::ALL.len()]>,
 }
 
 impl Snapshot {
+	/// The `(tier, class, encoded, decoded)` control-body totals, sorted by tier and class.
+	/// Includes prefixes inside complete codec values, but excludes separately coded type selectors,
+	/// media payload, and transport framing, acknowledgements, and retransmissions.
+	pub fn control(&self) -> Vec<(Tier, Control, u64, u64)> {
+		let mut rows = Vec::new();
+		for (tier, totals) in &self.control {
+			for class in Control::ALL {
+				let [encoded, decoded] = totals[class as usize];
+				if encoded != 0 || decoded != 0 {
+					rows.push((tier.clone(), class, encoded, decoded));
+				}
+			}
+		}
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(a.1.as_str().cmp(b.1.as_str())));
+		rows
+	}
+
 	/// The `(tier, role, totals)` traffic rows, one publisher and one subscriber
 	/// row per tier present. Sorted by tier label then role for stable output.
 	pub fn traffic(&self) -> Vec<(Tier, Role, Traffic)> {
@@ -1205,6 +1289,7 @@ impl Registry {
 				let totals = snap.sessions.entry(tier.clone()).or_default();
 				for counters in labels.values() {
 					totals.add(counters.snapshot());
+					counters.control(snap.control.entry(tier.clone()).or_default());
 				}
 			}
 		}
@@ -1272,6 +1357,7 @@ impl Registry {
 				});
 				if closed {
 					retired.sessions.entry(tier.clone()).or_default().add(presence);
+					counters.control(retired.control.entry(tier.clone()).or_default());
 				}
 				!closed
 			});
@@ -1566,6 +1652,15 @@ struct Viewer {
 }
 
 impl Session {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn control(&self, class: Control, bytes: usize, received: bool) {
+		let Some(inner) = &self.inner else { return };
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(counters) = &current.presence {
+			counters.control[class as usize][usize::from(received)].fetch_add(bytes as u64, Ordering::Relaxed);
+		}
+	}
+
 	/// Count a connection's wire counters under this context's label, following its retags.
 	pub fn wire(&self, counters: crate::transport::Wire) -> Wire {
 		let Some(inner) = &self.inner else {
@@ -2512,6 +2607,23 @@ mod tests {
 		assert!(row.closed, "the final gauge is marked closed");
 		assert!(drain(&stats).sessions.is_empty(), "root pruned after the last drain");
 		assert!(session_snapshot(&stats, &Tier::default(), "acme").is_none());
+	}
+
+	#[test]
+	fn control_body_totals_follow_retags_and_survive_retirement() {
+		let registry = Registry::new(Default::default());
+		let first = Tier::new("internal");
+		let second = Tier::new("edge");
+		let context = registry.tier(first.clone()).session("");
+		context.control(Control::Announce, 17, false);
+		context.retag(second.clone(), "");
+		context.control(Control::TrackInfo, 23, true);
+		let expected = vec![(second, Control::TrackInfo, 0, 23), (first, Control::Announce, 17, 0)];
+		assert_eq!(registry.snapshot().control(), expected);
+		drop(context);
+		registry.report(&mut Report::default());
+		assert_eq!(registry.snapshot().control(), expected);
+		assert_eq!(registry.snapshot().control(), expected, "scrapes do not drain totals");
 	}
 
 	#[test]

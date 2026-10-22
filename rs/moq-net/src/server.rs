@@ -413,7 +413,7 @@ impl Server {
 
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
-		let mut stream = Stream::accept(&mut session, encoding).await?;
+		let mut stream = Stream::accept(&mut session, encoding).await?.with_stats(&self.stats);
 		let client: setup::Client = stream.reader.decode().await?;
 
 		let version = client

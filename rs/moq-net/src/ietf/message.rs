@@ -2,6 +2,35 @@ use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
+pub(super) fn control(id: u64) -> crate::stats::Control {
+	use super::*;
+	use crate::stats::Control;
+	match id {
+		PublishNamespace::ID
+		| PublishNamespaceError::ID
+		| PublishNamespaceDone::ID
+		| PublishNamespaceCancel::ID
+		| SubscribeNamespace::ID
+		| SubscribeNamespaceLegacy::ID
+		| SubscribeNamespaceOk::ID
+		| SubscribeNamespaceError::ID
+		| UnsubscribeNamespace::ID
+		| NamespaceDone::ID => Control::Announce,
+		TrackStatus::ID => Control::TrackInfo,
+		Subscribe::ID
+		| SubscribeOk::ID
+		| Unsubscribe::ID
+		| Publish::ID
+		| PublishOk::ID
+		| PublishError::ID
+		| PublishDone::ID => Control::Subscribe,
+		Fetch::ID | FetchOk::ID | FetchError::ID | FetchCancel::ID => Control::Fetch,
+		auth::Auth::ID | auth::AuthOk::ID | auth::AuthError::ID => Control::Auth,
+		GoAway::ID => Control::Goaway,
+		_ => Control::Other,
+	}
+}
+
 /// A trait for IETF messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// IETF messages use a u16 size prefix and have a message type ID for control stream dispatch.
@@ -20,7 +49,9 @@ impl<T: Message> Encode<Version> for T {
 		tracing::trace!(?self, "encoding");
 		let prefix = w.prefix_u16();
 		self.encode_msg(w, version)?;
-		w.fill(prefix)
+		w.fill(prefix)?;
+		w.control = Some(control(T::ID));
+		Ok(())
 	}
 }
 
@@ -71,6 +102,9 @@ impl<T: Message> Decode<Version> for T {
 		match &result {
 			Ok(msg) => tracing::trace!(?msg, "decoded"),
 			Err(err) => tracing::warn!(%err, "decode failed"),
+		}
+		if result.is_ok() {
+			r.control = Some(control(T::ID));
 		}
 		result
 	}

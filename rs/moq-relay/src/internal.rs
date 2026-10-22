@@ -519,6 +519,31 @@ fn render_metrics(
 		}
 	}
 
+	for (name, help, received) in [
+		(
+			"moq_relay_control_encoded_body_bytes_total",
+			"Successfully encoded control-message body bytes including codec prefixes; excludes transport overhead.",
+			false,
+		),
+		(
+			"moq_relay_control_decoded_body_bytes_total",
+			"Successfully decoded control-message body bytes including codec prefixes; excludes transport overhead.",
+			true,
+		),
+	] {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, class, encoded, decoded) in snap.control() {
+			let value = if received { decoded } else { encoded };
+			let _ = writeln!(
+				out,
+				"{name}{{tier=\"{}\",class=\"{}\"}} {value}",
+				tier.as_str(),
+				class.as_str()
+			);
+		}
+	}
+
 	let _ = writeln!(
 		out,
 		"# HELP moq_relay_requests_total Admitted request/response exchanges."

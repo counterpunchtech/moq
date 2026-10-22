@@ -17,6 +17,7 @@ pub struct Auth {
 }
 
 impl Message for Auth {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Auth);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
@@ -75,6 +76,7 @@ fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
 }
 
 impl Message for AuthOk {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Auth);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
@@ -123,6 +125,7 @@ pub struct AuthError {
 const MAX_REASON: usize = 8192;
 
 impl Message for AuthError {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Auth);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);

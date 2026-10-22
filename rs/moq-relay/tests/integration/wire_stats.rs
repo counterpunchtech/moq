@@ -63,7 +63,16 @@ async fn wire_sources(io_uring: bool) {
 		let before = tokio::time::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
-				if row.active() == 1 && row.wire_tx > 0 && row.wire_rx > 0 {
+				if row.active() == 1
+					&& row.wire_tx > 0
+					&& row.wire_rx > 0
+					&& registry
+						.snapshot()
+						.control()
+						.iter()
+						.any(|(_, class, encoded, decoded)| {
+							*class == moq_net::stats::Control::Announce && *encoded > 0 && *decoded > 0
+						}) {
 					break row;
 				}
 				tokio::task::yield_now().await;
@@ -88,6 +97,16 @@ async fn wire_sources(io_uring: bool) {
 				.parse()
 				.unwrap();
 			assert!(total > 0, "live {scheme} transport must reach the ops endpoint: {body}");
+		}
+		for direction in ["encoded", "decoded"] {
+			let prefix = format!("moq_relay_control_{direction}_body_bytes_total{{tier=\"\",class=\"announce\"}} ");
+			let total: u64 = body
+				.lines()
+				.find_map(|line| line.strip_prefix(&prefix))
+				.expect("control-body metric")
+				.parse()
+				.unwrap();
+			assert!(total > 0, "{scheme}: {body}");
 		}
 		drop(connection);
 		let after = tokio::time::timeout(TIMEOUT, async {

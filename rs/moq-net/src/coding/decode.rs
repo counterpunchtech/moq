@@ -137,13 +137,18 @@ impl From<BoundsExceeded> for DecodeError {
 pub struct Decoder<'a> {
 	buf: &'a [u8],
 	form: Form,
+	pub(crate) control: Option<crate::stats::Control>,
 }
 
 impl<'a> Decoder<'a> {
 	/// Read `buf`, with varints in the given form.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn new(buf: &'a [u8], form: Form) -> Self {
-		Self { buf, form }
+		Self {
+			buf,
+			form,
+			control: None,
+		}
 	}
 
 	/// The varint form this decoder reads.
