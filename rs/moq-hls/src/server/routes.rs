@@ -1063,10 +1063,13 @@ mod tests {
 			.expect("catalog resolve timed out")
 			.expect("catalog broadcast");
 		let source = moq_mux::Source::new(origin, broadcast);
-		let sibling = tokio::time::timeout(TIMEOUT, source.resolve(Some(&moq_net::path::Relative::new("./source"))))
-			.await
-			.expect("sibling resolve timed out")
-			.expect("sibling broadcast");
+		let sibling = tokio::time::timeout(
+			TIMEOUT,
+			source.resolve(Some(&moq_net::path::Relative::new("./source")), None),
+		)
+		.await
+		.expect("sibling resolve timed out")
+		.expect("sibling broadcast");
 		assert!(!sibling.is_closed());
 
 		drop((catalog, media));
