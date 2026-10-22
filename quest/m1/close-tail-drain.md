@@ -77,16 +77,16 @@ moq-tokio's `quic::web` path) for the same ordering.
 Public API: none. Wire: none.
 
 The receive drain also requires qmux to end unfinished stream reads after the
-session closes, once their buffered data is consumed. In qmux 0.6.3,
-`SessionState` teardown leaves stream channel senders in the shared `Streams`
-map retained by `Session` handles, so such reads can remain pending forever.
-Main still depends on that release (rechecked 2026-10-20), and the hang
-reproduces there. moq takes no new work in, or dependency on, moq-dev/web-transport
-(maintainer, 2026-10-20), so the fix comes from moq's own stack: the in-tree qmux
-that [qmux on moq-quic](/quest/m2/quic-qmux.md) builds, unless the maintainer picks
-an interim guard in moq-tokio's async-backend adapter. Keep the TCP publisher
-restart regression in `moq-gst` passing; it checks that the closed session's
-source withdraws without waiting on an unfinished media stream.
+session closes, once their buffered data is consumed. qmux 0.6.3 and 0.6.4 leave
+the stream channel senders in the shared `Streams` table that `Session` handles
+retain after teardown, so such reads stay pending forever. Decided (maintainer,
+2026-10-21): fix it at the source in qmux now, ahead of
+[qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md).
+[moq-dev/web-transport#437](https://github.com/moq-dev/web-transport/pull/437)
+drops those senders at teardown; this PR bumps `qmux` to the first release that
+contains it, with no `[patch]`. Keep the TCP publisher restart regressions in
+`moq-gst` passing; they check that the closed session's source withdraws
+without waiting on an unfinished media stream.
 
 ## Related
 
