@@ -107,7 +107,7 @@ Check first (from the m0 CI pipeline audit, 2026-10-21):
   by [#6086](https://github.com/moq-dev/moq/pull/6086). Unowned:
   `rs audio-devices`, new on 2026-10-20, fails all five playback tests on the
   hosted ARM runner and passes on x86_64 Linux. Owned elsewhere besides the
-  above: the Rust and JS benchmark legs by the
-  [performance audit](/quest/m0/audit-perf.md), Audio quality's budgets by
+  above: the Rust and JS benchmark legs, which
+  [#6112](https://github.com/moq-dev/moq/pull/6112) restored, Audio quality's budgets by
   the [audio jitter target](/quest/m1/audio-jitter-target/README.md), and the
   bun advisories with the Rust ones.
