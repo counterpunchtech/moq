@@ -111,7 +111,6 @@ lite-07 stream type here.
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
-- [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
 - [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
 - [JS linger](/quest/m1/linger-js.md) - `js/net` finishes a broadcast cleanly like Rust, and `@moq/publish` uses it when a source stops
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path

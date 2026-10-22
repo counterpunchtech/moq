@@ -14,8 +14,11 @@ use moq_clock::Instant;
 #[non_exhaustive]
 pub struct Config {
 	/// How long an incoming connection has from its first packet to finish its
-	/// whole handshake, or `None` (the default) for no bound but the idle
-	/// timeout.
+	/// whole handshake, or `None` (the default) for no bound but moq-quic's
+	/// 10 s handshake idle timeout, which [`Transport::idle_timeout`] does
+	/// not change.
+	///
+	/// [`Transport::idle_timeout`]: super::Transport::idle_timeout
 	pub timeout: Option<Duration>,
 }
 
