@@ -117,6 +117,31 @@ impl Config {
 
 /// Controls echo cancellation between one [`playback::Engine`] and microphone.
 ///
+/// Where a frame handed to a [`Tap`] was taken.
+///
+/// Bolo's measurement fork (counterpunchtech/moq, branch `bolo/moq-audio-tap-1`):
+/// observation only, nothing is processed differently whether a tap is set or
+/// not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapPoint {
+	/// One 10 ms microphone frame as the canceller received it, interleaved at
+	/// the attached microphone's format ([`Control::capture_format`]).
+	Raw,
+	/// The same frame after cancellation (or the passthrough, when the
+	/// processor rejected the format), interleaved, the same length as `Raw`.
+	Aec,
+	/// One reference frame as it went into the echo model: 10 ms, interleaved,
+	/// [`Control::RENDER_CHANNELS`] channels at [`Control::RENDER_RATE`].
+	Render,
+}
+
+/// An observer of the canceller's frames.
+///
+/// Called on the microphone callback thread while it holds the canceller's
+/// lock, so it must not block or allocate per call beyond what it can afford
+/// at 100 calls a second per point.
+pub type Tap = Arc<dyn Fn(TapPoint, &[f32]) + Send + Sync>;
+
 /// Built by [`Engine::canceller`](playback::Engine::canceller) and handed to
 /// [`capture::Config::aec`](crate::capture::Config::aec), which is the whole of
 /// the usual surface.
@@ -172,6 +197,32 @@ impl Control {
 		self.inner.enabled.load(Ordering::Relaxed)
 	}
 
+	/// The sample rate [`TapPoint::Render`] frames arrive at.
+	pub const RENDER_RATE: u32 = REFERENCE_RATE;
+	/// The channel count of [`TapPoint::Render`] frames.
+	pub const RENDER_CHANNELS: usize = REFERENCE_CHANNELS;
+
+	/// Observe what the canceller sees: every 10 ms microphone frame before
+	/// ([`TapPoint::Raw`]) and after ([`TapPoint::Aec`]) cancellation, and
+	/// every reference frame ([`TapPoint::Render`]) as it goes into the echo
+	/// model, in the order the model sees them. `None` removes the tap.
+	///
+	/// Cancellation that is switched off is a passthrough and taps nothing;
+	/// nothing is tapped before a microphone attaches either.
+	pub fn set_tap(&self, tap: Option<Tap>) {
+		self.inner.state.lock().unwrap().tap = tap;
+	}
+
+	/// The format `Raw` and `Aec` frames arrive in, `(sample rate, channels)`
+	/// of the attached microphone; `None` before one attaches.
+	pub fn capture_format(&self) -> Option<(u32, u16)> {
+		let state = self.inner.state.lock().unwrap();
+		state
+			.processor
+			.as_ref()
+			.map(|_| (state.capture_rate, state.capture.num_channels()))
+	}
+
 	/// Attach the adaptive state to a microphone with this format.
 	///
 	/// Called when `capture` opens a device, so the allocation lands there
@@ -215,6 +266,7 @@ impl Control {
 		if state.processor.is_none() || state.capture != capture {
 			state.processor = Some(processor);
 			state.capture = capture;
+			state.capture_rate = sample_rate;
 			state.resize();
 		} else {
 			state.reset();
@@ -329,6 +381,10 @@ struct State {
 	/// `None` until a microphone opens and reports its format.
 	processor: Option<AudioProcessing>,
 	capture: StreamConfig,
+	/// The attached microphone's sample rate, for [`Control::capture_format`].
+	capture_rate: u32,
+	/// Bolo's measurement tap; `None` in every build that does not set one.
+	tap: Option<Tap>,
 	/// Reference from the output mixer, replaced whenever the output stream is
 	/// rebuilt and `None` while none is running.
 	reference: Option<ResamplingCons<f32>>,
@@ -358,6 +414,8 @@ impl Default for State {
 			processor: None,
 			// Replaced by `Control::attach`; nothing is processed before then.
 			capture: reference_config(),
+			capture_rate: REFERENCE_RATE,
+			tap: None,
 			reference: None,
 			running: false,
 			pending: Vec::new(),
@@ -401,6 +459,8 @@ impl State {
 		let Self {
 			processor,
 			capture,
+			capture_rate: _,
+			tap,
 			reference,
 			running,
 			pending,
@@ -453,6 +513,9 @@ impl State {
 		if let Some(reference) = reference {
 			while reference.available_frames() >= REFERENCE_FRAME {
 				reference.read_interleaved(reference_frame, false);
+				if let Some(tap) = tap {
+					tap(TapPoint::Render, reference_frame);
+				}
 				deinterleave(reference_frame, render_in, REFERENCE_CHANNELS);
 				let _ = process_render(processor, render_in, render_out);
 			}
@@ -461,13 +524,20 @@ impl State {
 		pending.extend_from_slice(buf);
 
 		while pending.len() >= stride {
+			if let Some(tap) = tap {
+				tap(TapPoint::Raw, &pending[..stride]);
+			}
 			deinterleave(&pending[..stride], capture_in, channels);
+			let before = processed.len();
 			match process_capture(processor, capture, capture_in, capture_out) {
 				Ok(()) => interleave(capture_out, channels, processed),
 				// sonora writes a fallback of its own choosing when it rejects a
 				// format, and it will keep rejecting it. Pass the microphone
 				// through rather than publish whatever that fallback was.
 				Err(_) => processed.extend_from_slice(&pending[..stride]),
+			}
+			if let Some(tap) = tap {
+				tap(TapPoint::Aec, &processed[before..]);
 			}
 
 			pending.drain(..stride);
@@ -811,6 +881,73 @@ mod tests {
 		let state = canceller.inner.state.lock().unwrap();
 		assert!(state.pending.is_empty(), "a partial frame survived the toggle");
 		assert!(state.processed.is_empty(), "processed samples survived the toggle");
+	}
+
+	/// Bolo's tap sees each reference frame as it goes in, then each microphone
+	/// frame before and after the model, at the canceller's own 10 ms framing,
+	/// and nothing while cancellation is off.
+	#[test]
+	fn tap_observes_render_raw_and_aec_frames_in_order() {
+		let control = detached();
+		let canceller = control.attach(48_000, 1).unwrap();
+		let mut prod = tap(&canceller);
+		let frame = frame(48_000);
+
+		// The channel readies its input on the first push and its output on
+		// the first read, so one push-then-read pair primes it before the
+		// observer is set (the read drains the channel's latency of silence).
+		play(&mut prod, 0.0);
+		canceller.process(&mut vec![0.0f32; frame]);
+
+		let seen: Arc<Mutex<Vec<(TapPoint, usize, f32)>>> = Arc::new(Mutex::new(Vec::new()));
+		let sink = seen.clone();
+		control.set_tap(Some(Arc::new(move |point, samples: &[f32]| {
+			let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+			sink.lock().unwrap().push((point, samples.len(), peak));
+		})));
+		assert_eq!(control.capture_format(), Some((48_000, 1)));
+
+		for _ in 0..4 {
+			play(&mut prod, 0.25);
+		}
+		let mut buf = vec![0.75f32; frame * 2];
+		canceller.process(&mut buf);
+
+		let seen_now = seen.lock().unwrap().clone();
+		let points: Vec<TapPoint> = seen_now.iter().map(|(point, _, _)| *point).collect();
+		// How many reference frames were readable is the channel's business;
+		// that they all came first, before any microphone frame, is the tap's.
+		let renders = points.iter().take_while(|point| **point == TapPoint::Render).count();
+		assert!(renders >= 1, "no reference frame was tapped: {points:?}");
+		assert_eq!(
+			points[renders..],
+			[TapPoint::Raw, TapPoint::Aec, TapPoint::Raw, TapPoint::Aec],
+			"{points:?}"
+		);
+		assert_eq!(seen_now[0].1, REFERENCE_FRAME * REFERENCE_CHANNELS);
+		assert!(
+			seen_now[..renders].iter().all(|(_, _, peak)| *peak == 0.25),
+			"the played reference did not reach the tap as played: {:?}",
+			&seen_now[..renders]
+		);
+		assert_eq!(seen_now[renders], (TapPoint::Raw, frame, 0.75));
+		assert_eq!(
+			seen_now[renders + 1].1,
+			frame,
+			"the Aec frame is the Raw frame's length"
+		);
+		let total = seen_now.len();
+
+		control.set_enabled(false);
+		let mut buf = vec![0.75f32; frame];
+		canceller.process(&mut buf);
+		assert_eq!(seen.lock().unwrap().len(), total, "a passthrough was tapped");
+
+		control.set_enabled(true);
+		control.set_tap(None);
+		let mut buf = vec![0.75f32; frame];
+		canceller.process(&mut buf);
+		assert_eq!(seen.lock().unwrap().len(), total, "a removed tap was called");
 	}
 
 	#[test]
