@@ -48,7 +48,6 @@ lands before the cut.
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
-- [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - moq-cli's server and push sinks follow an epochless `Restart` where their output can mark it, and fail loud otherwise
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
@@ -82,7 +81,6 @@ lands before the cut.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Relay signal install](/quest/m1/relay-signal-install.md) - a shutdown signal after the relay starts serving drains it, without leaking handlers into an embedder whose startup failed
-- [Rust redirect loops](/quest/m1/tokio-redirect-loop.md) - moq-tokio escalates its backoff when GOAWAY redirects bounce between peers, as JS does
 - [JS redirect keys strip userinfo](/quest/m1/js-reload-userinfo.md) - js/net keys a reconnect endpoint without URL userinfo, matching Rust
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
