@@ -2358,6 +2358,15 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Observe a shared track's terminal cause without extending its publisher lifetime.
+	// private: capability gap
+	// Sessions retain shared state while a FETCH owns its group writer.
+	pub(crate) fn poll_closed(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
+		producer
+			.poll_closed(waiter)
+			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+	}
+
 	/// Abort shared track state without extending its publisher lifetime.
 	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
@@ -3145,12 +3154,7 @@ impl Producer {
 
 	/// Poll until the track is closed or aborted; ready with the cause.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.state.poll_closed(waiter).map(|()| self.abort_reason())
-	}
-
-	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
-	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		TrackState::poll_closed(&self.state, waiter)
 	}
 
 	/// Return true if the track has been closed.
