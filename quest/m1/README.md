@@ -97,7 +97,6 @@ lite-07 stream type here.
 - [JS redirect keys strip userinfo](/quest/m1/js-reload-userinfo.md) - js/net keys a reconnect endpoint without URL userinfo, matching Rust
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
-- [A parked JS stream open gives up](/quest/m1/js-parked-expiry.md) - a js/net publisher's pending stream open ends when its group expires or is evicted
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the in-tree @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
@@ -142,6 +141,8 @@ lite-07 stream type here.
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Dependency and alternatives audit](/quest/m1/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Test cost audit](/quest/m1/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned
+- [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
+- [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
