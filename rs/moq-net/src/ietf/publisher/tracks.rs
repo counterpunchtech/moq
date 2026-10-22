@@ -252,11 +252,10 @@ where
 			.unwrap_or_default();
 		let peer = self.peer().await;
 		let declared = self.peer_setup.get().await;
-		// With MoQ Auth, wait for the answer to the credential we presented at setup, so no
-		// track is listed before our grant says which ones the peer may see.
-		if declared.auth {
-			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
-		}
+		// With MoQ Auth, list nothing until the credential we presented at setup is answered,
+		// so no track is listed before our grant says which ones the peer may see. The wait
+		// lives in the listing loop so a cancel or a closed session still frees the prefix.
+		let mut answered = !declared.auth;
 		let origin = self
 			.origin
 			.scope(&prefix, &scope)
@@ -320,6 +319,10 @@ where
 					}
 					if let Err(err) = Self::poll_write_skips(&mut stream, &request.skips, waiter, &mut cx) {
 						return Poll::Ready(Event::Cancelled(Err(err)));
+					}
+					if !answered {
+						ready!(self.auth.poll_setup_answered(waiter));
+						answered = true;
 					}
 					match announced.poll_next(waiter) {
 						Poll::Ready(Some(event)) => Poll::Ready(Event::Announce(event)),
@@ -2204,7 +2207,8 @@ mod tests {
 	}
 
 	/// With MoQ Auth, no track is listed until the peer answers our setup credential, whose
-	/// grant may narrow what the listing shows.
+	/// grant may narrow what the listing shows, and a listing cancelled while waiting frees
+	/// its prefix.
 	#[moq_clock::test]
 	async fn a_listing_waits_for_the_setup_answer() {
 		for version in [Version::Draft18, Version::Draft22] {
@@ -2227,10 +2231,17 @@ mod tests {
 			)
 			.with_auth(auth.clone());
 
-			let _request = h.request(&listing(false)).await;
+			let first = h.request(&listing(false)).await;
 			moq_clock::sleep(Duration::from_millis(10)).await;
 			let opened = futures::poll!(std::pin::pin!(Stream::accept(&mut h.peer, version)));
 			assert!(opened.is_pending(), "{version}: listed a track before the setup answer");
+
+			first.writer.abort(&Error::Cancel);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			let mut again = listing(false);
+			again.request_id = RequestId(2);
+			let mut request = h.request(&again).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 
 			auth.granted(0, crate::auth::Grant::all());
 			let (mut stream, ..) = h.publish().await;
