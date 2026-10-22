@@ -46,6 +46,10 @@ struct Fixture {
 /// A compressed track published over moq-lite 07 to a relay, and subscribed from the relay
 /// over `downstream`.
 async fn connect(downstream: &str) -> Fixture {
+	connect_with(downstream, moq_net::track::Subscription::default()).await
+}
+
+async fn connect_with(downstream: &str, subscription: moq_net::track::Subscription) -> Fixture {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("data", compressed()).unwrap();
@@ -66,7 +70,7 @@ async fn connect(downstream: &str) -> Fixture {
 	let consumer = origin.consume();
 	consumer.routed("bcast").await.unwrap();
 	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
-	let subscriber = remote.track("data").unwrap().subscribe(None).await.unwrap();
+	let subscriber = remote.track("data").unwrap().subscribe(subscription).await.unwrap();
 	support::harness::subscribed(&track).await;
 
 	Fixture {
@@ -76,6 +80,55 @@ async fn connect(downstream: &str) -> Fixture {
 		_hops: vec![upstream, downstream],
 		_origins: vec![publisher, relay, origin],
 	}
+}
+
+/// A cold subscriber needs the compressed prefix, but its application sees only its
+/// requested half-open frame range, including when it changes that range while live.
+#[moq_clock::test]
+async fn application_ranges_keep_their_filter_after_requesting_the_compressed_prefix() {
+	use moq_net::track::{Anchor, Position, Range, Subscription};
+	moq_clock::timeout(TIMEOUT, async {
+		let range = |group, start, end| {
+			Subscription::default().with_ranges([Range {
+				start: Anchor::Absolute(Position { group, frame: start }),
+				end: Some(Anchor::Absolute(Position { group, frame: end })),
+			}])
+		};
+		let mut fixture = connect_with("moq-lite-07-wip", range(5, 2, 4)).await;
+		assert_eq!(
+			fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
+			Anchor::Absolute(Position::group(5)),
+			"upstream asks for the prefix"
+		);
+		for sequence in [5, 6] {
+			if sequence == 6 {
+				fixture.subscriber.update(range(6, 1, 3)).unwrap();
+				let updated = fixture.track.subscription_changed().await.unwrap().unwrap();
+				assert_eq!(
+					updated.ranges[0],
+					Range {
+						start: Anchor::Absolute(Position::group(6)),
+						end: Some(Anchor::Absolute(Position { group: 6, frame: 3 })),
+					}
+				);
+			}
+			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			for index in 0..5 {
+				group
+					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+					.unwrap();
+			}
+			group.finish().unwrap();
+			let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
+			let (start, end) = if sequence == 5 { (2, 4) } else { (1, 3) };
+			for index in start..end {
+				assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, payload(index));
+			}
+			assert!(reading.read_frame().await.unwrap().is_none());
+		}
+	})
+	.await
+	.expect("the requested frames arrive");
 }
 
 /// Whole and chunked frames on a compressed track read back as written on every version,

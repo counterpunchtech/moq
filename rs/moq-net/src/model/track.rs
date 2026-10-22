@@ -3306,6 +3306,37 @@ impl Producer {
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
+	/// Widen outgoing compressed ranges that cannot inflate from a cached prefix.
+	/// Only requesters call this: the original preferences keep filtering local reads,
+	/// and a server serves the frame bounds it was actually asked for.
+	#[cfg_attr(
+		not(feature = "async"),
+		allow(dead_code, reason = "Only session adapters request upstream.")
+	)]
+	// private: capability gap
+	pub(crate) fn widen_compressed(&self, subscription: &mut Subscription) {
+		if !self.info.compress {
+			return;
+		}
+		let state = self.state.read();
+		for range in &mut subscription.ranges {
+			if range.is_empty() {
+				continue;
+			}
+			let Anchor::Absolute(start) = &mut range.start else {
+				continue;
+			};
+			if start.frame != 0
+				&& !state
+					.lookup
+					.get(&start.group)
+					.is_some_and(|slot| slot.copies().any(|group| group.holds_prefix(start.frame)))
+			{
+				start.frame = 0;
+			}
+		}
+	}
+
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.

@@ -73,6 +73,11 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// Normalize a compressed wire request for the private requesting-model benchmark.
+pub fn widen_compressed(track: &track::Producer, subscription: &mut track::Subscription) {
+	track.widen_compressed(subscription);
+}
+
 /// Declare a received track's end while the wire may still owe groups below it, as a
 /// subscriber does on SUBSCRIBE_END, for the pending-tail benchmark.
 pub fn finish_at_pending(track: &mut track::Producer, end: track::Position) -> crate::Result<()> {
