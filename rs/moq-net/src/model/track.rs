@@ -7073,11 +7073,8 @@ impl Drop for Staged {
 		let Some(producer) = self.producer.take() else {
 			return;
 		};
-		// Unlisted first, as in `Producer::abort`.
-		producer.alive.unlist();
-		if let Ok(state) = producer.state.write() {
-			commit_abort(state, Error::Dropped);
-		}
+		// Aborted like the producer it derefs to, so a group written through it ends too.
+		let _ = producer.abort(Error::Dropped);
 	}
 }
 
