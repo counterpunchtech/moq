@@ -372,7 +372,10 @@ impl Misses {
 		let mut left = RangeSet::new();
 		left.insert(hole.clone());
 		// Only what overlaps the hole, so judging every run costs each one the same.
-		for claimed in [&state.drops, &self.given_up, &self.wanted] {
+		for (run, _) in state.drops.overlapping(&hole) {
+			left.remove(run.clone());
+		}
+		for claimed in [&self.given_up, &self.wanted] {
 			for run in claimed.overlapping(&hole) {
 				left.remove(run.clone());
 			}

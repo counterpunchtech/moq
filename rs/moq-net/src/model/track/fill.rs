@@ -16,7 +16,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, group};
+use crate::{Error, Result, StreamError, group};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -583,7 +583,7 @@ impl Inner {
 		}
 		if let Ok(mut state) = TrackState::modify(&self.state) {
 			for groups in unresolved.iter() {
-				state.drop_unfed(groups.clone());
+				state.drop_unfed(groups.clone(), StreamError::from(&err));
 			}
 		}
 		self.refuse(&unresolved, err);
@@ -656,8 +656,9 @@ impl Drop for Inner {
 		let left = self.unresolved(self.start.group..self.end);
 		if !left.is_empty() && self.result.is_used() {
 			if let Ok(mut state) = TrackState::modify(&self.state) {
+				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
 				for groups in left.iter() {
-					state.drop_unfed(groups.clone());
+					state.drop_unfed(groups.clone(), StreamError::NotFound);
 				}
 			}
 			if let Ok(mut outcome) = self.result.write() {
@@ -673,7 +674,7 @@ impl Drop for Inner {
 impl TrackState {
 	/// Record `groups` as dropped, as a fill's source answered, except what the cache holds
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
-	fn drop_unfed(&mut self, groups: ops::Range<u64>) {
+	fn drop_unfed(&mut self, groups: ops::Range<u64>, err: StreamError) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
 		if self.start_pending {
 			return;
@@ -686,7 +687,7 @@ impl TrackState {
 			}
 		}
 		for groups in dropped.iter() {
-			self.drop_groups(groups.clone());
+			self.drop_groups(groups.clone(), err.clone());
 		}
 	}
 }

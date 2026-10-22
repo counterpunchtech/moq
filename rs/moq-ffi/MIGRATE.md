@@ -16,6 +16,11 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 
 `max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.

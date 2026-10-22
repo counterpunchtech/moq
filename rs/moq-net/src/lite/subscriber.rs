@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
+	AsPath, Error, Path, PathOwned, Timestamp, bandwidth,
 	coding::{Reader, Stream},
 	lite,
 	track::{Position, Subscription},
@@ -93,9 +93,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 #[derive(Clone)]
 struct TrackEntry {
 	producer: track::Producer,
-	/// Timestamp scale from this track's TRACK_INFO, known before the SUBSCRIBE is
-	/// even opened, so group streams decode frames without blocking.
-	timescale: Option<Timescale>,
+	/// How to read the track, from its TRACK_INFO, known before the SUBSCRIBE is even
+	/// opened, so group streams decode frames without blocking.
+	framing: lite::Framing,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
 }
@@ -511,12 +511,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		};
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
-		let dg = lite::Datagram::decode(payload, self.version, ietf, |id| match subscribes.get(&id) {
-			Some(entry) => lite::Format {
-				timescale: entry.timescale,
-				compressed: entry.producer.info().compress,
-			},
-			None => lite::Format::default(),
+		let dg = lite::Datagram::decode(payload, self.version, ietf, |id| {
+			subscribes.get(&id).map(|entry| entry.framing).unwrap_or_default()
 		})?;
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
@@ -525,7 +521,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 		let timestamp = dg
 			.timestamp
-			.zip(entry.timescale)
+			.zip(entry.framing.timescale)
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
 			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
@@ -891,7 +887,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
-					let (group, track, timescale, reading) = {
+					let (group, track, framing, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
@@ -944,7 +940,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
-						(group, entry.producer.clone(), entry.timescale, reading)
+						(group, entry.producer.clone(), entry.framing, reading)
 					};
 
 					// The timescale came from TRACK_INFO (read before this subscription was
@@ -953,7 +949,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(&self.subscriber, timescale, ietf, hdr.frame_start),
+						ingest: FrameIngest::new(&self.subscriber, framing, ietf, hdr.frame_start),
 						shown: false,
 						_reading: reading,
 					};
@@ -1029,15 +1025,14 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 /// Pumps bare FRAME messages from a reader into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
 struct FrameIngest {
-	/// `Some` decodes the lite-05 zigzag-delta timestamp prefix; `None` leaves frames
+	/// A timescale decodes the lite-05 zigzag-delta timestamp prefix; none leaves frames
 	/// untimed (pre-lite-05).
-	timescale: Option<Timescale>,
+	framing: lite::Framing,
 	/// Previous frame's raw timestamp value (in `timescale` units), for the
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
 	phase: IngestPhase,
 	budget: frame::Budget,
-	version: Version,
 	/// Where the stream's frames start, the first Object ID until a record names it.
 	frame_start: u64,
 	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
@@ -1090,19 +1085,18 @@ impl FrameIngest {
 	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
 	fn new<S: crate::transport::poll::Session>(
 		subscriber: &Subscriber<S>,
-		timescale: Option<Timescale>,
+		framing: lite::Framing,
 		ietf: bool,
 		frame_start: u64,
 	) -> Self {
 		Self {
-			timescale,
+			framing,
 			prev_ts: 0,
 			phase: match ietf {
 				true => IngestPhase::State,
 				false => IngestPhase::Timing,
 			},
 			budget: subscriber.frames.clone(),
-			version: subscriber.version,
 			frame_start,
 			records: None,
 		}
@@ -1144,6 +1138,10 @@ impl FrameIngest {
 					let state = ready!(reader.poll_varint(&mut cx))?;
 					let wire = lite::ietf::decode_state(state, self.frame_start)?;
 					let relayed = wire.is_some();
+					// A track published over moq-lite has no moq-transport state.
+					if relayed && self.framing.ietf.is_none() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
 					let extensions = wire.as_ref().is_some_and(|wire| wire.extensions);
 					if let Some(wire) = wire {
 						group.set_wire(wire)?;
@@ -1189,7 +1187,7 @@ impl FrameIngest {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					if end {
-						let decoded = lite::ietf::decode_end(&block, self.timescale, self.version)?;
+						let decoded = lite::ietf::decode_end(&block, self.framing)?;
 						group.mark_gap(id, decoded.gap)?;
 						group.set_end_object(crate::model::object::Fields {
 							id,
@@ -1208,7 +1206,7 @@ impl FrameIngest {
 					return Poll::Ready(Ok(()));
 				}
 				IngestPhase::Timing => {
-					let Some(scale) = self.timescale else {
+					let Some(scale) = self.framing.timescale else {
 						self.phase = IngestPhase::Inflated { timestamp: None };
 						continue;
 					};
@@ -1254,7 +1252,7 @@ impl FrameIngest {
 						Some(records) => {
 							let (id, block) = records.pending.take().expect("a record precedes each frame");
 							let lite::ietf::Decoded { properties, gap } =
-								lite::ietf::decode_properties(&block, self.timescale, true, self.version)?;
+								lite::ietf::decode_properties(&block, self.framing, true)?;
 							group.mark_gap(id, gap)?;
 							let plain = id == group.frame_count() as u64 && properties.is_empty();
 							if !plain && !records.relayed {
@@ -1987,6 +1985,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Timescale;
 	use crate::coding::{Decode, Encode};
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
@@ -2133,13 +2132,11 @@ mod tests {
 			});
 			if update {
 				h.serve
-					.handle_subscription(&mut track, &mut sub, lowered, true, None)
+					.handle_subscription(&mut track, &mut sub, lowered, true)
 					.await
 					.unwrap();
 			} else {
-				let begin = h
-					.serve
-					.begin_subscription(&mut track, &mut Sub::None, lowered, true, None);
+				let begin = h.serve.begin_subscription(&mut track, &mut Sub::None, lowered, true);
 				assert!(matches!(begin, Ok(Begin::Establish(_))));
 			}
 
@@ -2328,12 +2325,16 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
 		let polled = fetches.polled;
-		track.drop_groups(1..2);
+		track.drop_groups(1..2, crate::StreamError::Old);
 		fetches.poll(&sub, start, &waiter);
 		assert_eq!(fetches.polled - polled, 1);
 		assert!(!fetches.held.contains_key(&1));
 		assert_eq!(fetches.held.len(), 2);
-		assert!(matches!(callers.remove(0).now_or_never(), Some(Err(Error::NotFound))));
+		// The held fetch ends with the drop's own error.
+		assert!(matches!(
+			callers.remove(0).now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
 	}
 
 	/// A peer that starts its feed far past a reader's floor makes the reader's miss wide.
@@ -2473,8 +2474,9 @@ mod tests {
 					// newer-group check is inert. Keep the scanner on the model's global
 					// wake channel rather than giving it the new per-group index.
 					match feed.poll_group(sequence, waiter) {
-						Poll::Ready(Some(_)) => drop(req),
-						Poll::Ready(None) => req.reject(Error::NotFound),
+						Poll::Ready(Ok(Some(_))) => drop(req),
+						Poll::Ready(Ok(None)) => req.reject(Error::NotFound),
+						Poll::Ready(Err(err)) => req.reject(err),
 						Poll::Pending if !missing || folds.is_some_and(|at| at <= now) => req.reject(Error::NotFound),
 						Poll::Pending => {
 							fold = fold.into_iter().chain(folds).min();
@@ -2501,6 +2503,9 @@ mod tests {
 						let waiter = kio::Waiter::noop();
 						let mut fixtures = Vec::new();
 						for _ in 0..tracks {
+							// The sim counts ready polls per task poll to catch spinning loops, so
+							// give each track's setup, and the timed loop below, a poll of its own.
+							moq_clock::sim::yield_now().await;
 							let (track, callers, requests) = feed_batch(1_000_000..1_000_000 + held);
 							let tail = kio::Producer::new(Tail::default());
 							let sub = feed_sub(&tail).await;
@@ -2524,6 +2529,7 @@ mod tests {
 							fixtures.push((track, callers, tail, sub, scan, fetches));
 						}
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
+						moq_clock::sim::yield_now().await;
 						#[allow(clippy::disallowed_methods)]
 						let began = std::time::Instant::now();
 						for sequence in runs * 2..runs * 2 + EVENTS {
@@ -2658,7 +2664,11 @@ mod tests {
 					7,
 					TrackEntry {
 						producer: track,
-						timescale: Some(Timescale::MILLI),
+						framing: lite::Framing {
+							timescale: Some(Timescale::MILLI),
+							ietf: None,
+							compressed: false,
+						},
 						tail: Default::default(),
 					},
 				);
@@ -2714,7 +2724,11 @@ mod tests {
 				7,
 				TrackEntry {
 					producer: track.clone(),
-					timescale: Some(Timescale::MILLI),
+					framing: lite::Framing {
+						timescale: Some(Timescale::MILLI),
+						ietf: None,
+						compressed: false,
+					},
 					tail: Default::default(),
 				},
 			);
@@ -2738,11 +2752,20 @@ mod tests {
 		}
 	}
 
-	/// Receive group 0 of a track in `timescale` over a lite-07 session that negotiated the
-	/// `ietf` extension, its stream holding `body` after the GROUP header. Also returns the
-	/// cache pool the track charges.
+	/// A track in `timescale` that a draft-18 moq-transport publisher published.
+	fn draft18(timescale: Option<Timescale>) -> lite::Framing {
+		lite::Framing {
+			timescale,
+			ietf: Some(crate::ietf::Version::Draft18),
+			compressed: false,
+		}
+	}
+
+	/// Receive group 0 of a track `framing` describes over a lite-07 session that negotiated
+	/// the `ietf` extension, its stream holding `body` after the GROUP header. Also returns
+	/// the cache pool the track charges.
 	async fn receive_ietf(
-		timescale: Option<Timescale>,
+		framing: lite::Framing,
 		body: &[u64],
 	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
 		use crate::transport::poll::Session as _;
@@ -2779,19 +2802,26 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 		let pool = crate::cache::Pool::unbounded();
+		let mut info = crate::track::Info::default().with_timescale(framing.timescale);
+		info.properties = framing.ietf.map(|version| {
+			std::sync::Arc::new(crate::model::object::TrackProperties {
+				version,
+				values: Vec::new(),
+			})
+		});
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info {
 				pool: pool.clone(),
 				..Default::default()
 			}),
 			"video",
-			crate::track::Info::default().with_timescale(timescale),
+			info,
 		);
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry {
 				producer: track.clone(),
-				timescale,
+				framing,
 				tail: Default::default(),
 			},
 		);
@@ -2806,7 +2836,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn ietf_records_frame_a_group() {
 		// A plain group: Group State 0, then frame 0 with an empty record.
-		let (res, track, _) = receive_ietf(None, &[0, 0, 0, 1, u64::from(b'x')]).await;
+		let (res, track, _) = receive_ietf(draft18(None), &[0, 0, 0, 1, u64::from(b'x')]).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(0).unwrap();
 		assert_eq!(
@@ -2815,7 +2845,7 @@ mod tests {
 		);
 
 		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
-		let (res, track, _) = receive_ietf(None, &[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
+		let (res, track, _) = receive_ietf(draft18(None), &[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
 		res.unwrap();
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.end_object().map(|end| end.id), Some(6));
@@ -2834,8 +2864,22 @@ mod tests {
 			(&[0x1, 1, 0, 0], "a byte after END_OF_GROUP"),
 			(&[0x1, 0, 0], "a stream ending inside a frame"),
 		] {
-			let (res, ..) = receive_ietf(None, body).await;
+			let (res, ..) = receive_ietf(draft18(None), body).await;
 			assert!(res.is_err(), "accepted {reason}");
+		}
+	}
+
+	/// A track published over moq-lite has no moq-transport state, so a relayed group on
+	/// one is refused, though its plain groups cross.
+	#[moq_clock::test]
+	async fn ietf_records_need_a_moq_transport_track() {
+		let plain = [0, 0, 0, 1, u64::from(b'x')];
+		let relayed = [0x1, 0, 0, 1, u64::from(b'x')];
+		for (framing, ok) in [(draft18(None), true), (lite::Framing::default(), false)] {
+			let (res, ..) = receive_ietf(framing, &plain).await;
+			res.unwrap();
+			let (res, ..) = receive_ietf(framing, &relayed).await;
+			assert_eq!(res.is_ok(), ok, "{framing:?}: {res:?}");
 		}
 	}
 
@@ -2844,12 +2888,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn ietf_records_need_extensions_for_properties() {
 		// Object 0 with a draft-18 block holding 0x20 = 1, or an untimed Timestamp.
-		for record in [&[3, 4, 0x20, 1][..], &[3, 4, 0x10, 7]] {
+		for record in [&[2, 0x20, 1][..], &[2, 0x10, 7]] {
 			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
 				let mut body = vec![state, 0];
 				body.extend(record);
 				body.push(0);
-				let (res, ..) = receive_ietf(None, &body).await;
+				let (res, ..) = receive_ietf(draft18(None), &body).await;
 				assert_eq!(res.is_ok(), ok, "Group State {state:#x}, record {record:?}");
 			}
 		}
@@ -2864,15 +2908,15 @@ mod tests {
 		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
 			(&[0, 0][..], true, "nothing at all"),
-			(&[0, 4, 4, 0x10, 500], false, "a mutable Timestamp"),
-			(&[0, 3, 4, 0x20, 1], true, "properties without a Timestamp"),
-			(&[0, 6, 4, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
+			(&[0, 3, 0x10, 500], false, "a mutable Timestamp"),
+			(&[0, 2, 0x20, 1], true, "properties without a Timestamp"),
+			(&[0, 5, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
 			(&[1 << 1, 0], true, "Object 1 without properties"),
 		] {
 			let mut body = vec![0x1 | 0x4];
 			body.extend(record);
 			body.extend([frame, 0]);
-			let (res, track, _) = receive_ietf(Some(Timescale::MILLI), &body).await;
+			let (res, track, _) = receive_ietf(draft18(Some(Timescale::MILLI)), &body).await;
 			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
 			if ok {
 				let mut group = track.consume().peek_group(0).unwrap();
@@ -2889,12 +2933,12 @@ mod tests {
 		const COUNT: u64 = 1000;
 		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
 		// (0x20 = 1, then zero deltas), then an empty frame.
-		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4, 0x20, 1];
+		let mut body = vec![0x1 | 0x4, 0, 2 * COUNT, 0x20, 1];
 		for _ in 1..COUNT {
 			body.extend([0, 1]);
 		}
 		body.push(0);
-		let (res, track, pool) = receive_ietf(None, &body).await;
+		let (res, track, pool) = receive_ietf(draft18(None), &body).await;
 		res.unwrap();
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.frame_count(), 1);
@@ -2953,7 +2997,11 @@ mod tests {
 			7,
 			TrackEntry {
 				producer: track.clone(),
-				timescale: Some(Timescale::MILLI),
+				framing: lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
 				tail: Default::default(),
 			},
 		);
@@ -3020,7 +3068,11 @@ mod tests {
 			7,
 			TrackEntry {
 				producer: track.clone(),
-				timescale: Some(Timescale::MILLI),
+				framing: lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
 				tail: tail.clone(),
 			},
 		);
@@ -3081,7 +3133,7 @@ mod tests {
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
-			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let mut group = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
 			group.finish().unwrap();
@@ -3153,7 +3205,7 @@ mod tests {
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
-		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 		let mut reader = broadcast
 			.consume()
 			.track("video")
@@ -3172,6 +3224,88 @@ mod tests {
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
+	}
+
+	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
+	/// Earlier versions carry an application code there, so the same bytes read as
+	/// NOT_FOUND.
+	#[moq_clock::test]
+	async fn a_subscribe_drop_ends_an_arriving_group_with_its_code() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut responses = Vec::new();
+			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
+			for resp in [
+				lite::SubscribeResponse::Start(lite::SubscribeStart {
+					group: 0,
+					largest: None,
+				}),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+					start: 2,
+					end: 2,
+					error: code.into(),
+				}),
+			] {
+				resp.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
+			}
+			// No FIN: the subscription stays open, so only the DROP ends the group.
+			let session = crate::lite::test_transport::ScriptedSession::new(responses);
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session,
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+			let mut arriving = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
+			arriving.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
+			let mut reader = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut group = reader.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"2");
+
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+			};
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+
+			let expected = match version {
+				Version::Lite07 => crate::StreamError::App(5),
+				_ => crate::StreamError::NotFound,
+			};
+			let res = group.read_frame().now_or_never();
+			assert!(
+				matches!(&res, Some(Err(Error::Stream(err))) if *err == expected),
+				"{version:?}: {res:?}"
+			);
+		}
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
@@ -3200,7 +3334,7 @@ mod tests {
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
-		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 		let mut reader = broadcast
 			.consume()
 			.track("video")
@@ -3301,7 +3435,11 @@ mod tests {
 			7,
 			TrackEntry {
 				producer,
-				timescale: Some(Timescale::MILLI),
+				framing: lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
 				tail: Default::default(),
 			},
 		);
@@ -3545,8 +3683,7 @@ mod tests {
 			.create_track("catalog.json", crate::track::Info::timed())
 			.unwrap();
 		let mut sub = Sub::None;
-		let mut establish =
-			std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default(), Some(Timescale::MILLI),));
+		let mut establish = std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default()));
 
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
@@ -3610,8 +3747,8 @@ mod tests {
 
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::MILLI));
-		let establish = serve.prepare_establish(&mut serving.serving, Subscription::default(), Some(Timescale::MILLI));
+		let mut serving = ServeLoop::new(&serve, request, Default::default());
+		let establish = serve.prepare_establish(&mut serving.serving, Subscription::default());
 		serving.mode = ServeMode::Establish(establish);
 		let gate_run = serve.gate();
 		let mut running = TrackServeRun {
@@ -3699,7 +3836,7 @@ mod tests {
 		for dynamic_first in [true, false] {
 			let h = Harness::new(VERSION);
 			let request = h._broadcast.reserve_track("pending").unwrap();
-			let mut serving = ServeLoop::new(&h.serve, request, Default::default(), None);
+			let mut serving = ServeLoop::new(&h.serve, request, Default::default());
 			let other = h._broadcast.create_track("other", None).unwrap();
 			if !dynamic_first {
 				// Isolate the subscription-changed arm, which can observe a concurrent
@@ -3739,12 +3876,7 @@ mod tests {
 			name: "video".into(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut serving = ServeLoop::new(
-			&serve,
-			broadcast.reserve_track("video").unwrap(),
-			Default::default(),
-			None,
-		);
+		let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
 		let _reader = serving.serving.subscribe(None);
 		let tail = kio::Producer::new(Tail::default());
 		serving.mode = ServeMode::Tail {
@@ -3789,12 +3921,7 @@ mod tests {
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
-			let mut serving = ServeLoop::new(
-				&serve,
-				broadcast.reserve_track("video").unwrap(),
-				Default::default(),
-				None,
-			);
+			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
 			let mut reader = serving.serving.subscribe(None);
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			assert!(matches!(serving.sub, Sub::Active(_)), "the SUBSCRIBE is on the wire");
@@ -3854,13 +3981,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(mid_group_demand()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 			.await
 			.expect("an older peer must not fail the subscribe");
 
@@ -3887,13 +4008,7 @@ mod tests {
 			let mut sub = Sub::None;
 
 			h.serve
-				.handle_subscription(
-					&mut h.producer,
-					&mut sub,
-					Some(mid_group_demand()),
-					true,
-					Some(Timescale::MILLI),
-				)
+				.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 				.await
 				.unwrap();
 
@@ -3962,7 +4077,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true)
 			.await
 			.unwrap();
 
@@ -3978,13 +4093,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
@@ -3992,7 +4101,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true)
 			.await
 			.unwrap();
 
@@ -4015,7 +4124,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true)
 			.await
 			.unwrap();
 
@@ -4031,13 +4140,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
@@ -4047,7 +4150,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true)
 			.await
 			.unwrap();
 
@@ -4087,26 +4190,14 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		let established = h.wire().len();
 
 		// A lite-06 subscriber downstream now wants to resume mid-group.
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(mid_group_demand()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 			.await
 			.expect("a downstream frame offset must not tear down an older upstream");
 
@@ -4124,7 +4215,7 @@ mod tests {
 	async fn refresh_joins_coalesce_upstream() {
 		let h = Harness::new(Version::Lite07);
 		let request = h._broadcast.reserve_track("refresh").unwrap();
-		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1), None);
+		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1));
 		let track = h._broadcast.consume().track("refresh").unwrap();
 		let _baseline = track.subscribe(None).await.unwrap();
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
@@ -4185,7 +4276,7 @@ mod tests {
 
 		// Establish from group 3; the peer's START is considered in flight.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
 			.await
 			.unwrap();
 		assert!(applies(&sub), "a fresh subscription accepts its START");
@@ -4201,7 +4292,6 @@ mod tests {
 						.with_end(Position::group(9)),
 				),
 				true,
-				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -4209,7 +4299,7 @@ mod tests {
 
 		// The start moves: a buffered START is stale while it sits elsewhere.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true)
 			.await
 			.unwrap();
 		assert!(!applies(&sub), "a moved start must invalidate a buffered START");
@@ -4217,7 +4307,7 @@ mod tests {
 		// The start returns: the declaration matches the demand again, so the
 		// publisher's skip (it sends no replacement START) must land.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
 			.await
 			.unwrap();
 		assert!(applies(&sub), "demand returning restores the START");
@@ -4236,21 +4326,21 @@ mod tests {
 
 		// Establish from group 5: the floor tracks the request until START lands.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(5), true)
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(5));
 
 		// Forward: a reader waiting in [5, 8) must fail over, not stall.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true)
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(8));
 
 		// Backward: the reopened range must stop being a permanent miss.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true)
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(3));
@@ -4258,13 +4348,7 @@ mod tests {
 		// Live edge: the floor is unknown until the next declaration, so a
 		// group below the stale one must not be a permanent miss.
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-				Some(Timescale::MILLI),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), None);
@@ -5839,7 +5923,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		sub: &mut Sub<S>,
 		pref: Option<Subscription>,
 		supports_update: bool,
-		timescale: Option<Timescale>,
 	) -> Result<Begin<S>, Error> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
@@ -5869,11 +5952,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							producer.demand_arrivals(start.group..u64::MAX);
 						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
-						Ok(Begin::Establish(self.prepare_establish(
-							producer,
-							subscription,
-							timescale,
-						)))
+						Ok(Begin::Establish(self.prepare_establish(producer, subscription)))
 					}
 					Sub::Active(active) => {
 						// Downstream preferences changed: forward them upstream as a
@@ -5944,12 +6023,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// deregisters `id` if the establish fails.
 	///
 	/// The subscription's bounds come straight from the demand aggregate.
-	fn prepare_establish(
-		&self,
-		producer: &mut track::Producer,
-		subscription: Subscription,
-		timescale: Option<Timescale>,
-	) -> Establish<S> {
+	fn prepare_establish(&self, producer: &mut track::Producer, subscription: Subscription) -> Establish<S> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
 		// Both halves of each bound come from the same position, so a frame can never
@@ -5972,7 +6046,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			id,
 			TrackEntry {
 				producer: producer.clone(),
-				timescale,
+				framing: producer.info().into(),
 				tail: tail.clone(),
 			},
 		);
@@ -5997,9 +6071,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		producer: &mut track::Producer,
 		sub: &mut Sub<S>,
 		subscription: Subscription,
-		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		let mut est = Box::new(self.prepare_establish(producer, subscription, timescale));
+		let mut est = Box::new(self.prepare_establish(producer, subscription));
 		let id = est.id;
 		match kio::wait(move |waiter| est.poll(waiter)).await {
 			Ok(active) => {
@@ -6022,9 +6095,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		sub: &mut Sub<S>,
 		pref: Option<Subscription>,
 		supports_update: bool,
-		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		match self.begin_subscription(producer, sub, pref, supports_update, timescale)? {
+		match self.begin_subscription(producer, sub, pref, supports_update)? {
 			Begin::Establish(est) => {
 				let mut est = Box::new(est);
 				let id = est.id;
@@ -6233,7 +6305,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 			// Older wires declare no publisher retention limit, and no timeline: their
 			// frames arrive untimed.
 			let info = track::Info::default().with_timescale(None);
-			TrackRunState::Serve(ServeLoop::new(&serve, request, info, None))
+			TrackRunState::Serve(ServeLoop::new(&serve, request, info))
 		};
 		let gate = serve.gate();
 		Self { serve, state, gate }
@@ -6311,10 +6383,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					let request = request.take().expect("request pending");
 					match res {
 						Ok((info, held)) => {
-							// Lite05 carries per-frame timestamps on the wire at this scale;
-							// `Some` tells the ingest to decode them.
-							let timescale = info.timescale;
-							let mut serve_loop = ServeLoop::new(&self.serve, request, info, timescale);
+							let mut serve_loop = ServeLoop::new(&self.serve, request, info);
 							serve_loop.held = Some(held);
 							self.state = TrackRunState::Serve(serve_loop);
 						}
@@ -6552,7 +6621,6 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	// preference change to an established subscription.
 	supports_update: bool,
 	supports_fetch: bool,
-	timescale: Option<Timescale>,
 	mode: ServeMode<S>,
 	/// Armed while nobody holds the copy: it stays, cache and all, for a returning
 	/// reader until this fires.
@@ -6744,7 +6812,12 @@ impl FeedFetches {
 				self.held.insert(sequence, held);
 				continue;
 			}
-			settled.push((held.fill, verdict.is_ready().then_some(sequence), gone));
+			// Never coming is a miss; a group given up keeps the error it was given up with.
+			let decided = match verdict {
+				Poll::Ready(res) => Some((sequence, res.err().unwrap_or(Error::NotFound))),
+				Poll::Pending => None,
+			};
+			settled.push((held.fill, decided, gone));
 		}
 		let fold = arrivals
 			.folds()
@@ -6754,15 +6827,17 @@ impl FeedFetches {
 		drop(arrivals);
 		drop(unused);
 		for (fill, decided, gone) in settled {
-			for groups in gone.iter() {
-				fill.drop_groups(groups.clone());
-			}
 			// The group waited on is settled, so the fill moves past it: one landed without
 			// the frames the fill starts from is no answer, and the cache serves what it has.
-			if let Some(sequence) = decided
+			// Answered before the bulk give-up, which knows no reason, so a drop's own error
+			// reaches the fetch.
+			if let Some((sequence, err)) = decided
 				&& fill.next() == Some(sequence)
 			{
-				fill.drop_groups(sequence..sequence + 1);
+				fill.group(sequence).reject(err);
+			}
+			for groups in gone.iter() {
+				fill.drop_groups(groups.clone());
 			}
 			// Waits on the next group it owes, judged on the poll its readiness wakes.
 			self.hold(fill, false);
@@ -6773,7 +6848,7 @@ impl FeedFetches {
 }
 
 impl<S: crate::transport::poll::Session> ServeLoop<S> {
-	fn new(serve: &TrackServe<S>, request: track::Request, info: track::Info, timescale: Option<Timescale>) -> Self {
+	fn new(serve: &TrackServe<S>, request: track::Request, info: track::Info) -> Self {
 		// Register the fetch handler before accepting: `accept` releases the
 		// request's own fetch gate, and a cache-miss fetch queued while TRACK_INFO
 		// was in flight would be drained as NotFound in the gap.
@@ -6797,7 +6872,6 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
-			timescale,
 			mode: ServeMode::Select,
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
@@ -6881,7 +6955,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						Poll::Ready(Ok(fill)) => {
 							if self.supports_fetch {
 								self.fetches
-									.push(FillServeRun::new(serve.clone(), fill, self.timescale));
+									.push(FillServeRun::new(serve.clone(), fill, self.serving.info().clone()));
 							} else {
 								// No FETCH on the wire: wait for the live feed, which a
 								// subscription arriving alongside may still be opening.
@@ -6895,13 +6969,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					}
 					match self.serving.poll_subscription_changed(waiter) {
 						Poll::Ready(Ok(pref)) => {
-							match serve.begin_subscription(
-								&mut self.serving,
-								&mut self.sub,
-								pref,
-								self.supports_update,
-								self.timescale,
-							) {
+							match serve.begin_subscription(&mut self.serving, &mut self.sub, pref, self.supports_update)
+							{
 								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
 								Ok(Begin::None) => {}
 								// Updating the upstream failed: hand the track back for
@@ -7036,7 +7105,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										}
 									}
 									// The publisher will never send these groups, so they
-									// are accounted for without a stream.
+									// are accounted for without a stream, and a reader of
+									// one still arriving ends with the drop's error now.
 									lite::SubscribeResponse::Drop(dropped) => {
 										if let Ok(mut tail) = active.tail.write() {
 											tail.account(
@@ -7044,7 +7114,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 												serve.subscriber.runtime.now(),
 											);
 										}
-										self.serving.drop_groups(dropped.start..dropped.end.saturating_add(1));
+										self.serving.drop_groups(
+											dropped.start..dropped.end.saturating_add(1),
+											dropped.error(serve.subscriber.version),
+										);
 									}
 									// OK just resolves the range (the producer already orders
 									// groups).
@@ -7114,16 +7187,16 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 struct FillServeRun<S: crate::transport::poll::Session> {
 	serve: TrackServe<S>,
 	fill: track::Fill,
-	timescale: Option<Timescale>,
+	info: track::Info,
 	run: Option<(u64, FetchServeRun<S>)>,
 }
 
 impl<S: crate::transport::poll::Session> FillServeRun<S> {
-	fn new(serve: TrackServe<S>, fill: track::Fill, timescale: Option<Timescale>) -> Self {
+	fn new(serve: TrackServe<S>, fill: track::Fill, info: track::Info) -> Self {
 		Self {
 			serve,
 			fill,
-			timescale,
+			info,
 			run: None,
 		}
 	}
@@ -7156,22 +7229,22 @@ impl<S: crate::transport::poll::Session> kio::Task for FillServeRun<S> {
 				debug_assert!(false, "fill group {sequence} left unanswered");
 				return Poll::Ready(());
 			}
-			let run = FetchServeRun::new(self.serve.clone(), self.fill.group(sequence), self.timescale);
+			let run = FetchServeRun::new(self.serve.clone(), self.fill.group(sequence), self.info.clone());
 			self.run = Some((sequence, run));
 		}
 	}
 }
 
 /// Serves one downstream fetch end-to-end on its own bidi stream: send FETCH,
-/// then fill the group from the bare FRAME messages that follow. The timescale
-/// comes from this track's TRACK_INFO (already known), and the group sequence
+/// then fill the group from the bare FRAME messages that follow. The track's
+/// info comes from its TRACK_INFO (already known), and the group sequence
 /// is implicit from the request.
 struct FetchServeRun<S: crate::transport::poll::Session> {
 	validity: crate::model::broadcast::RequestValidity,
 	gate: crate::auth::Gate,
 	serve: TrackServe<S>,
 	session: S,
-	timescale: Option<Timescale>,
+	info: track::Info,
 	group: u64,
 	state: FetchRunState<S>,
 }
@@ -7214,7 +7287,7 @@ impl<S: crate::transport::poll::Session> FetchRunState<S> {
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
-	fn new(serve: TrackServe<S>, request: track::GroupFill, timescale: Option<Timescale>) -> Self {
+	fn new(serve: TrackServe<S>, request: track::GroupFill, info: track::Info) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -7222,7 +7295,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 			gate: serve.gate(),
 			serve,
 			session,
-			timescale,
+			info,
 			group,
 			state: FetchRunState::Open { request: Some(request) },
 		}
@@ -7421,8 +7494,8 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// Make the group available (resolving the downstream fetch) and fill
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
-					// accepted timescale.
-					let group_info = track::Info::default().with_timescale(self.timescale);
+					// accepted info.
+					let group_info = self.info.clone();
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
 					let joined = request.joined();
@@ -7450,7 +7523,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						joined,
 						ingest: Box::new(FrameIngest::new(
 							&self.serve.subscriber,
-							self.timescale,
+							(&self.info).into(),
 							ietf,
 							frame_start,
 						)),

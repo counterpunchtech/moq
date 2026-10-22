@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` is a `UInt64?`, where nil leaves the publisher's max age alone to bound delivery.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.

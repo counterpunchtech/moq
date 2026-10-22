@@ -15,6 +15,11 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
