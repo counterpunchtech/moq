@@ -68,6 +68,9 @@ impl From<crate::quic::driver::ConnectionError> for SessionError {
 	}
 }
 
+/// The HTTP/3 code a closed session's streams are reset and stopped with.
+const WT_SESSION_GONE: u64 = 0x170d7b68;
+
 /// Why a session closed, shared by the session and its streams. The first close wins.
 ///
 /// It also knows whether the session is raw QUIC, which decides how its close and stream
@@ -105,6 +108,24 @@ impl CloseReason {
 			None if self.raw => u32::try_from(code).ok(),
 			None => None,
 		}
+	}
+
+	/// The session's close reason when the peer reset or stopped a stream with
+	/// WT_SESSION_GONE, which tears down the streams of a closed session
+	/// (draft-ietf-webtrans-http3 §4.4), or None for any other code.
+	///
+	/// The reset can beat the close capsule; until the capsule lands, it reads as a
+	/// clean close, as a CONNECT stream that ends without one does.
+	pub(crate) fn session_gone(&self, code: crate::quic::driver::VarInt) -> Option<SessionError> {
+		if self.raw || code.into_inner() != WT_SESSION_GONE {
+			return None;
+		}
+		Some(
+			self.reason
+				.get()
+				.cloned()
+				.unwrap_or_else(|| WebTransportError::Closed(0, String::new()).into()),
+		)
 	}
 
 	/// Record the close reason, returning false if one was already recorded.
@@ -380,5 +401,26 @@ mod tests {
 		// Past u32 and outside the HTTP/3 range: neither form.
 		let invalid = crate::quic::driver::VarInt::from_u64(1 << 40).unwrap();
 		assert_eq!(close.decode_stream_code(invalid), None);
+	}
+
+	/// WT_SESSION_GONE reports the session's close, before and after its capsule arrives.
+	#[test]
+	fn session_gone_reads_as_the_close() {
+		let gone = crate::quic::driver::VarInt::from_u64(WT_SESSION_GONE).unwrap();
+		let close = CloseReason::new(false);
+		assert!(matches!(
+			close.session_gone(gone),
+			Some(SessionError::WebTransportError(WebTransportError::Closed(0, _)))
+		));
+
+		close.set(WebTransportError::Closed(7, "bye".into()).into());
+		assert!(matches!(
+			close.session_gone(gone),
+			Some(SessionError::WebTransportError(WebTransportError::Closed(7, reason))) if reason == "bye"
+		));
+		assert!(close.session_gone(close.encode_stream_code(7)).is_none());
+
+		// Raw QUIC has no HTTP/3 code space, so the same number is an application code.
+		assert!(CloseReason::new(true).session_gone(gone).is_none());
 	}
 }

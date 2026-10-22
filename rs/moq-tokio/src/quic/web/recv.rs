@@ -21,12 +21,16 @@ impl RecvStream {
 		Self { inner: stream, close }
 	}
 
-	/// Decode the peer's reset code, and report a session error as the session's close reason.
+	/// Decode the peer's reset code, and report a session error, or a reset for a session
+	/// that is gone, as the session's close reason.
 	fn map_error(&self, e: crate::quic::driver::ReadError) -> ReadError {
 		match e {
 			crate::quic::driver::ReadError::Reset(code) => match self.close.decode_stream_code(code) {
 				Some(code) => ReadError::Reset(code),
-				None => ReadError::InvalidReset(code),
+				None => match self.close.session_gone(code) {
+					Some(err) => ReadError::SessionError(err),
+					None => ReadError::InvalidReset(code),
+				},
 			},
 			e => match ReadError::from(e) {
 				ReadError::SessionError(e) => ReadError::SessionError(self.close.map(e)),
@@ -82,7 +86,10 @@ impl RecvStream {
 	pub async fn received_reset(&mut self) -> Result<Option<u32>, SessionError> {
 		match self.inner.received_reset().await {
 			Ok(None) => Ok(None),
-			Ok(Some(code)) => Ok(self.close.decode_stream_code(code)),
+			Ok(Some(code)) => match self.close.session_gone(code) {
+				Some(err) => Err(err),
+				None => Ok(self.close.decode_stream_code(code)),
+			},
 			Err(crate::quic::driver::ResetError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
 			Err(crate::quic::driver::ResetError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
 		}
