@@ -407,7 +407,7 @@ pub(crate) struct TrackState {
 	sealed: bool,
 
 	// Set once a received copy's end is declared, ahead of group streams below it that QUIC
-	// may deliver in any order: when the end was declared or a group last arrived since.
+	// may deliver in any order: when the end or a start was declared, or a group last arrived since.
 	// Readers wait out the grace for that tail (see [`Self::tail_deadline`]), rather than
 	// end at the boundary with groups still to arrive.
 	tail: Option<crate::time::Instant>,
@@ -2071,7 +2071,8 @@ impl TrackState {
 	/// demand dropped to the live edge, whose floor is unknown until declared).
 	///
 	/// A declared start asks the feed for every group from it, so a gap in the arrivals at
-	/// or above it is waited for a fresh grace: the feed may only now be sending it.
+	/// or above it, and a pending tail above the last arrival, is waited for a fresh grace:
+	/// the feed may only now be sending it.
 	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
@@ -2079,6 +2080,9 @@ impl TrackState {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
 			self.arrivals.demand(start..u64::MAX, now);
+			if self.tail.is_some() {
+				self.tail = Some(now);
+			}
 		}
 	}
 
@@ -2184,7 +2188,7 @@ impl TrackState {
 	/// A missing sequence is one no live group or datagram delivered and the publisher did
 	/// not drop. A gap below an arrival is given up a grace after that arrival opened it, as
 	/// the session's tail does. The gap above the last arrival is given up a grace after
-	/// the end was declared or a group last arrived, so a feed still delivering toward an
+	/// the end or a start was declared, or a group last arrived, so a feed still delivering toward an
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group or a
 	/// datagram counts as delivered, and the check costs the same however much is cached.
 	fn tail_deadline(&self, fin: u64) -> Option<crate::time::Instant> {
@@ -12095,6 +12099,24 @@ mod test {
 		elapse(&producer, grace - Duration::from_millis(1));
 		assert!(arrival.recv_group().now_or_never().is_none(), "still within the grace");
 		elapse(&producer, Duration::from_millis(1));
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A start declared after the end asks the feed for groups it may only now send, so the
+	/// tail above the last arrival waits a fresh grace from it, not what is left of the end's.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_start_restarts_the_tail_grace() {
+		let mut producer = track_producer("test", None);
+		producer.received();
+		let grace = replay().max_delay;
+		let mut arrival = producer.subscribe(replay());
+		producer.finish_at(Position::group(2)).unwrap();
+		elapse(&producer, grace - Duration::from_millis(1));
+		producer.start_at(0).unwrap();
+		elapse(&producer, Duration::from_millis(1));
+		assert!(arrival.recv_group().now_or_never().is_none(), "a fresh grace");
+		elapse(&producer, grace - Duration::from_millis(1));
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
