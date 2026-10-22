@@ -141,8 +141,8 @@ pub(crate) struct StreamsState {
     pub(super) evicted: u64,
     /// The most credit the peer has had spent at once
     pub(super) peak_spent: u64,
-    /// Receive streams that may have data their reader has not looked at, which holds eviction
-    /// off: every such stream, and possibly some that no longer are, trimmed by the stuck pass
+    /// Receive streams whose reader may progress without new credit, which holds eviction off:
+    /// every such stream, and possibly some that no longer are, trimmed by the stuck pass
     pub(super) unlooked: FxHashSet<StreamId>,
     /// Credit still held by evicted readers that have not stopped their streams, which holds
     /// further eviction off
@@ -3608,6 +3608,43 @@ mod tests {
         assert_eq!(client.credit_stats().evicted, 1);
         assert_eq!(readable(&mut client), [ids[2]]);
         assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// A reader waiting behind a gap is not stuck: retransmitting the missing bytes spends no
+    /// connection credit, so ordinary loss on a full window evicts nothing.
+    #[test]
+    fn gap_is_not_a_stuck_window() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        // A packet of the first stream is lost; the bytes after it spend the rest of its share.
+        data(&mut client, ids[0], 0, 100, false);
+        data(&mut client, ids[0], 200, (WINDOW - 200) as usize, false);
+        assert_eq!(lease(&mut client, ids[0]), 100);
+        assert!(matches!(
+            wait(&mut client, ids[0], WINDOW as usize),
+            Err(LeaseError::Blocked(_))
+        ));
+        data(&mut client, ids[1], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+        assert!(matches!(
+            wait(&mut client, ids[1], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert_eq!(
+            client.local_max_data, client.data_recvd,
+            "the peer is blocked"
+        );
+
+        // The retransmission completes the first stream's unit, whose release frees its credit.
+        data(&mut client, ids[0], 100, 100, false);
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        release(&mut client, ids[0], WINDOW as usize);
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert!(
+            client.local_max_data > client.data_recvd,
+            "the peer has credit"
+        );
     }
 
     /// Stopping a lease that outlived its finished stream returns credit that may only pay a

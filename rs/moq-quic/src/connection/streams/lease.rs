@@ -42,11 +42,12 @@ pub struct Leased {
 /// An eviction candidate, ordered so a max-heap pops the lowest priority, then the newest.
 type Victim = Reverse<(i64, Reverse<StreamId>)>;
 
-/// Whether a stream has data its reader has not looked at: it never leased what arrived, or
-/// data arrived while it waited. Its reader may be about to free the window, so nothing is
-/// evicted meanwhile.
+/// Whether a stream's reader may progress without new connection credit: it never leased what
+/// arrived, data arrived while it waited, or it waits behind a gap. A waiting reader's unread
+/// bytes all sit past a gap, since its lease took every byte in order, and retransmitting the
+/// gap spends no credit. Nothing is evicted meanwhile.
 fn unlooked(unread: u64, lease: Option<&Leased>) -> bool {
-    (unread > 0 && lease.is_none_or(|lease| !lease.filled))
+    (unread > 0 && lease.is_none_or(|lease| !lease.filled || lease.want.is_some()))
         || lease.is_some_and(|lease| lease.ready)
 }
 
@@ -194,7 +195,8 @@ impl RecvStream<'_> {
     /// [`CreditStats::evicted`](crate::CreditStats::evicted) counts any that happen.
     ///
     /// Eviction also waits for every stream with data its reader has not leased yet, since that
-    /// reader may be about to free the window. A reader that gives up on a stream must stop it
+    /// reader may be about to free the window, and for every reader waiting behind a gap, which
+    /// a retransmission fills without new credit. A reader that gives up on a stream must stop it
     /// rather than leave it unpolled.
     ///
     /// Do not mix with [`Self::read()`] on one stream: a read skips the leased bytes.
@@ -215,6 +217,8 @@ impl RecvStream<'_> {
                 None => {
                     lease.want = Some(want);
                     lease.compact();
+                    // It may be waiting behind a gap, which holds eviction off until filled.
+                    self.state.unlooked.insert(self.id);
                     // An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
                     let evicted = self.state.evict_if_stuck().inspect(|max_data| {
                         self.pending.max_data |= max_data.should_transmit();
@@ -405,7 +409,8 @@ impl StreamsState {
     }
 
     /// Evict the lowest-priority streams holding credit while no reader can make progress: the
-    /// peer has no connection credit left, and no reader has data it has not looked at yet.
+    /// peer has no connection credit left, and no reader has data it has not looked at yet or
+    /// waits behind a gap.
     ///
     /// Waiting for a stream to be read cannot free the window then, and neither can the peer. A
     /// reader that leased and then parked, without waiting, cannot free it either, so it is a
