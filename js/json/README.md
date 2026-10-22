@@ -42,7 +42,7 @@ for await (const { value, at } of consumer) {
 const current = await consumer.latest();
 ```
 
-Changes ride as merge-patch deltas by default; pass `{ deltas: false }` to make every change a fresh single-frame snapshot group. A group of deltas runs until a joiner wants a fresh one: give the track a `refresh` ratio (`track.accept({ refresh: 8 })`), and once the deltas outweigh that many snapshots a join asks for a new group, which the producer answers by restating the value at the last update's timestamp. Without a ratio a group rolls only at its frame or byte cap. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+Changes ride as merge-patch deltas by default; pass `{ deltas: false }` to make every change a fresh single-frame snapshot group. A group of deltas runs until a joiner wants a fresh one: give the track a `refresh` ratio (`track.accept({ refresh: 8 })`), and once the deltas outweigh that many snapshots a join asks for a new group, which the producer answers by restating the value at the newest timestamp written. Without a ratio a group rolls only at its frame or byte cap. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
 
 ### Stream: every record
 
