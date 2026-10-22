@@ -591,3 +591,129 @@ fn golden_transport_parameters() {
         assert_eq!(actual, hex, "{version:?}");
     }
 }
+
+/// The client's STREAM bytes in the order its records carry them, as `(stream, bytes)` runs
+fn stream_order(pair: &mut Pair) -> Vec<(u64, usize)> {
+    let mut order: Vec<(u64, usize)> = Vec::new();
+    while let Some(record) = pair.client.poll_transmit(pair.now) {
+        let mut rest = record.clone();
+        while let Some(frame) = wire::next_frame(&mut rest).unwrap() {
+            let (wire::Frame::Quic(frame::Frame::Stream(stream)) | wire::Frame::Continue(stream)) =
+                frame
+            else {
+                continue;
+            };
+            let id = u64::from(stream.id);
+            match order.last_mut() {
+                Some((last, len)) if *last == id => *len += stream.data.len(),
+                _ => order.push((id, stream.data.len())),
+            }
+        }
+        pair.server.handle_record(record, pair.now);
+    }
+    order
+}
+
+/// Open a client uni stream with `options` and queue `len` bytes and a FIN on it
+fn queue(pair: &mut Pair, options: SendOptions<'_>, len: usize) -> u64 {
+    let id = pair.client.streams().open(Dir::Uni, options).unwrap();
+    assert_eq!(
+        pair.client.send_stream(id).write(&vec![0; len]).unwrap(),
+        len
+    );
+    pair.client.send_stream(id).finish().unwrap();
+    u64::from(id)
+}
+
+/// The record writer is QUIC's scheduler: a higher priority preempts a lower one.
+#[test]
+fn records_follow_strict_priority() {
+    let mut pair = Pair::new(config(Version::QMux02));
+    let low = queue(
+        &mut pair,
+        SendOptions {
+            group: None,
+            priority: 0,
+        },
+        30_000,
+    );
+    let high = queue(
+        &mut pair,
+        SendOptions {
+            group: None,
+            priority: 1,
+        },
+        30_000,
+    );
+    assert_eq!(stream_order(&mut pair), [(high, 30_000), (low, 30_000)]);
+}
+
+/// Streams of equal priority share the records instead of one draining first.
+#[test]
+fn records_share_equal_priority() {
+    let mut pair = Pair::new(config(Version::QMux02));
+    let a = queue(&mut pair, SendOptions::default(), 30_000);
+    let b = queue(&mut pair, SendOptions::default(), 30_000);
+    let order = stream_order(&mut pair);
+    assert!(order.len() >= 4, "{order:?}");
+    for (id, _) in &order {
+        assert!([a, b].contains(id));
+    }
+    for stream in [a, b] {
+        let sent: usize = order
+            .iter()
+            .filter(|(id, _)| *id == stream)
+            .map(|(_, len)| len)
+            .sum();
+        assert_eq!(sent, 30_000);
+    }
+}
+
+/// Ungrouped streams go before every send group, and groups order by their own priority.
+#[test]
+fn records_order_send_groups() {
+    let mut pair = Pair::new(config(Version::QMux02));
+    let low = pair.client.send_groups().open(0);
+    let high = pair.client.send_groups().open(1);
+    let in_low = queue(
+        &mut pair,
+        SendOptions {
+            group: Some(&low),
+            priority: 0,
+        },
+        20_000,
+    );
+    let in_high = queue(
+        &mut pair,
+        SendOptions {
+            group: Some(&high),
+            priority: 0,
+        },
+        20_000,
+    );
+    let ungrouped = queue(&mut pair, SendOptions::default(), 20_000);
+    assert_eq!(
+        stream_order(&mut pair),
+        [(ungrouped, 20_000), (in_high, 20_000), (in_low, 20_000)]
+    );
+
+    // Raising a group's priority reorders what it has left to send.
+    let first = queue(
+        &mut pair,
+        SendOptions {
+            group: Some(&high),
+            priority: 0,
+        },
+        20_000,
+    );
+    let second = queue(
+        &mut pair,
+        SendOptions {
+            group: Some(&low),
+            priority: 0,
+        },
+        20_000,
+    );
+    pair.client.send_groups().set_priority(&low, 2);
+    assert_eq!(stream_order(&mut pair), [(second, 20_000), (first, 20_000)]);
+}
