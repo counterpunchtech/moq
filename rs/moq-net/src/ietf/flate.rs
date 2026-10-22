@@ -6,13 +6,16 @@ use super::{ParameterVarInt, Parameters, Version};
 
 /// FLATE Setup Option, whose value 1 offers the group-scoped DEFLATE format.
 pub(super) const OPTION: u64 = 0x40B6A;
+/// DEFLATE track codec, in the MOQ Properties registry.
+pub(super) const COMPRESSION: u64 = 0x40B6C;
+/// Inflated Size object property, in the MOQ Properties registry.
+pub(super) const INFLATED: u64 = 0x40B6E;
 
 pub(crate) fn supported(version: Version) -> bool {
 	!matches!(version, Version::Draft14 | Version::Draft15)
 }
 
-#[cfg(test)]
-fn into_setup(parameters: &mut Parameters, version: Version) {
+pub(crate) fn into_setup(parameters: &mut Parameters, version: Version) {
 	if supported(version) {
 		parameters.set_varint(ParameterVarInt::Flate, 1);
 	}
@@ -29,13 +32,36 @@ pub(crate) fn from_setup(parameters: &Parameters, version: Version) -> Result<bo
 	}
 }
 
+/// A sealed declaration cannot accompany the plain fallback for an incompatible peer.
+pub(crate) fn egress(info: &crate::track::Info, compression: bool) -> Result<(), crate::Error> {
+	if !compression
+		&& info
+			.properties
+			.as_ref()
+			.is_some_and(|p| p.sealed().any(|id| id == COMPRESSION))
+	{
+		return Err(crate::Error::Unsupported);
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
 	fn negotiation_requires_an_offer_on_draft16_or_later() {
-		for version in Version::ALL {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
 			let mut parameters = Parameters::default();
 			assert!(!from_setup(&parameters, version).unwrap());
 			into_setup(&mut parameters, version);

@@ -812,6 +812,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		epoch::into_setup(&mut parameters, version);
 	}
 	request_update::into_setup(&mut parameters, version);
+	super::flate::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer

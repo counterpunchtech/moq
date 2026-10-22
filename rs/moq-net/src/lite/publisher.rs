@@ -1955,6 +1955,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 		let info = ready!(self.querying.poll_ok(waiter))?;
+		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
 		writer.buffer(&lite::TrackInfo {
@@ -2125,6 +2126,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 				Self::Confirm { subscribing, .. } => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let mut track = ready!(subscribing.poll_ok(waiter))?;
+					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
 					let Self::Confirm {
 						msg, latest, update, ..
 					} = std::mem::replace(

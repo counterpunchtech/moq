@@ -721,6 +721,7 @@ where
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
+					ietf::flate::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,

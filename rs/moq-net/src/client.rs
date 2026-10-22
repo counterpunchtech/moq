@@ -404,6 +404,7 @@ impl Client {
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
+		ietf::flate::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
