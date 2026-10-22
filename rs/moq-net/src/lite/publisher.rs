@@ -2,7 +2,7 @@
 use std::sync::atomic::AtomicU64;
 
 use crate::{SessionError, announce, frame, group, origin, track};
-use rangemap::RangeSet;
+use rangemap::{RangeMap, RangeSet};
 use std::{
 	collections::HashMap,
 	ops::{Bound, ControlFlow, Range},
@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::{
-	Error, Hop, Hops,
+	Error, Hop, Hops, StreamError,
 	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
@@ -2321,7 +2321,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 						group = group.compressed();
 					}
 					let capped = msg.end_frame.is_some();
-					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
+					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale)?;
 
 					*self = Self::Serve {
 						group,
@@ -3776,8 +3776,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	start: Option<u64>,
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
-	// Groups given up before the start resolved, which it must not name.
-	skipped: RangeSet<u64>,
+	// Groups given up before the start resolved, which it must not name, with why.
+	skipped: RangeMap<u64, StreamError>,
 	end_sent: bool,
 	// Lite05+ names every sequence below the end that this subscription never
 	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -3828,7 +3828,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start: None,
 			first: None,
-			skipped: RangeSet::new(),
+			skipped: RangeMap::new(),
 			end_sent: false,
 			served,
 			datagrams,
@@ -3959,7 +3959,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			let opening = self.opening.take().expect("polled above");
 			match res {
 				Ok(()) => self.children.push(opening),
-				Err(_) => opening.settle_failed(),
+				Err(err) => opening.settle_failed(&err),
 			}
 		}
 		// Drive the in-flight group machines; completions just retire.
@@ -4052,13 +4052,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						if self.emit_range && self.start.is_none() {
 							// At u64::MAX no later group can resolve a start past this one.
 							if let Some(end) = sequence.checked_add(1) {
-								self.skipped.insert(sequence..end);
+								self.skipped.insert(sequence..end, StreamError::NotFound);
 							}
 						} else if self.start.is_some()
 							&& let Some(end) = sequence.checked_add(1)
 						{
 							// Lite-05+ names it now; a no-op on other versions.
-							self.drop_range(sequence..end, writer)?;
+							self.drop_range(sequence..end, &StreamError::NotFound, writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
@@ -4104,12 +4104,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if !self.emit_range {
 			return Ok(false);
 		}
-		let Poll::Ready(range) = self.track.poll_drop(waiter) else {
+		let Poll::Ready((range, err)) = self.track.poll_drop(waiter) else {
 			return Ok(false);
 		};
 		match self.start {
-			None => self.skipped.insert(range),
-			Some(_) => self.drop_range(range, writer)?,
+			None => self.skipped.insert(range, err),
+			Some(_) => self.drop_range(range, &err, writer)?,
 		}
 		Ok(true)
 	}
@@ -4135,8 +4135,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 	}
 
-	/// Drop whatever part of `range` this subscription has not been served or dropped yet.
-	fn drop_range(&mut self, range: Range<u64>, writer: &mut Writer<S::SendStream, Version>) -> Result<(), Error> {
+	/// Drop, with `err`, whatever part of `range` this subscription has not been served or
+	/// dropped yet.
+	fn drop_range(
+		&mut self,
+		range: Range<u64>,
+		err: &StreamError,
+		writer: &mut Writer<S::SendStream, Version>,
+	) -> Result<(), Error> {
 		let Some(served) = &mut self.served else {
 			return Ok(());
 		};
@@ -4146,11 +4152,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let gaps: Vec<_> = served.gaps(&range).collect();
 		for gap in gaps {
 			served.insert(gap.clone());
-			writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				start: gap.start,
-				end: gap.end - 1,
-				error: 0,
-			}))?;
+			let drop = lite::SubscribeDrop::new(gap.start..=gap.end - 1, err, self.ctx.version);
+			writer.buffer(&lite::SubscribeResponse::Drop(drop))?;
 		}
 		Ok(())
 	}
@@ -4171,7 +4174,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
 		let end = final_sequence(self.track.subscription().end().map_or(fin, |end| end.min(fin)));
-		self.drop_range(start..end, writer)
+		self.drop_range(start..end, &StreamError::NotFound, writer)
 	}
 }
 
@@ -4192,7 +4195,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
 		// A group given up cannot be where the feed starts. This stops at the held group
 		// at the latest, since it was not skipped.
-		if let Some(skipped) = self.skipped.get(&start) {
+		// Adjacent runs given up with different errors stay separate, so walk them all.
+		while start < group.sequence
+			&& let Some((skipped, _)) = self.skipped.get_key_value(&start)
+		{
 			start = skipped.end.min(group.sequence);
 		}
 		let skipped = std::mem::take(&mut self.skipped);
@@ -4212,8 +4218,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start.
-		for range in skipped.iter() {
-			self.drop_range(range.start.max(start)..range.end, writer)?;
+		for (range, err) in skipped.iter() {
+			self.drop_range(range.start.max(start)..range.end, err, writer)?;
 		}
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
@@ -4395,14 +4401,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = header.and_then(|()| {
-			lite::ietf::Records::start(
-				&mut writer,
-				self.ctx.ietf,
-				&self.group,
-				self.capped,
-				self.ctx.timescale,
-				self.ctx.version,
-			)
+			lite::ietf::Records::start(&mut writer, self.ctx.ietf, &self.group, self.capped, self.ctx.timescale)
 		});
 		let records = match records {
 			Ok(records) => records,
@@ -4664,23 +4663,21 @@ impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if ready!(self.poll_serve(waiter)).is_err() {
-			self.settle_failed();
+		if let Err(err) = ready!(self.poll_serve(waiter)) {
+			self.settle_failed(&err);
 		}
 		Poll::Ready(())
 	}
 }
 
 impl<S: crate::transport::poll::Session> GroupServe<S> {
-	/// Account for a group that failed: a reset can lose its header, and a group that never
-	/// got a stream has none, so the control stream names it.
-	fn settle_failed(&self) {
+	/// Account for a group that failed with `err`: a reset can lose its header, and a group
+	/// that never got a stream has none, so the control stream names it with that error.
+	fn settle_failed(&self, err: &Error) {
 		if self.ctx.version.has_track_stream() {
-			self.ctx.outcomes.dropped.lock().unwrap().push(lite::SubscribeDrop {
-				start: self.sequence,
-				end: self.sequence,
-				error: 0,
-			});
+			let drop =
+				lite::SubscribeDrop::new(self.sequence..=self.sequence, &StreamError::from(err), self.ctx.version);
+			self.ctx.outcomes.dropped.lock().unwrap().push(drop);
 		}
 	}
 }
@@ -5707,8 +5704,9 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0, SUBSCRIBE_END at 3, and a DROP for the skipped group 1.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 1, 3, 2, 3, 1, 1, 0]);
+		// SUBSCRIBE_START at 0, SUBSCRIBE_END at 3, and a DROP for the skipped group 1 with
+		// NOT_FOUND (0x33).
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 1, 3, 2, 3, 1, 1, 0x33]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -5803,7 +5801,7 @@ mod serve_group_test {
 				assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 			}
 
-			track.drop_groups(1..2);
+			track.drop_groups(1..2, crate::StreamError::NotFound);
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 			assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)], "{version:?}");
 
@@ -5863,11 +5861,11 @@ mod serve_group_test {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
 
-		track.drop_groups(2..WIDE);
+		track.drop_groups(2..WIDE, crate::StreamError::NotFound);
 		assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		assert_eq!(drops(&mut writer, &log, version).await, [(2, WIDE - 1)]);
 
-		track.drop_groups(1..WIDE + 2);
+		track.drop_groups(1..WIDE + 2, crate::StreamError::NotFound);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(
 			drops(&mut writer, &log, version).await,
@@ -5894,7 +5892,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.start, Some(5));
 
-		track.drop_groups(2..3);
+		track.drop_groups(2..3, crate::StreamError::NotFound);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, []);
 
@@ -5928,7 +5926,7 @@ mod serve_group_test {
 
 		// Recorded as a drop on the track, as a relay does for an upstream SUBSCRIBE_DROP,
 		// before this run looks.
-		track.drop_groups(1..2);
+		track.drop_groups(1..2, crate::StreamError::NotFound);
 		write_group(&mut track, 1, 1);
 		track.finish_at(track::Position::group(2)).unwrap();
 		drop(track);
@@ -6205,7 +6203,7 @@ mod serve_group_test {
 			track.start_at(0).unwrap();
 			let subscriber = track.subscribe(track::Subscription::default());
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
-			track.drop_groups(0..1_000_000);
+			track.drop_groups(0..1_000_000, crate::StreamError::NotFound);
 			write_group(&mut track, 1_000_000, 0);
 			assert!(
 				kio::wait(|waiter| run.poll(&mut writer, waiter))
@@ -6237,7 +6235,7 @@ mod serve_group_test {
 			let subscriber = track.subscribe(track::Subscription::default());
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			// The newer group beats the older ones, so the start resolves at the source's 0.
-			track.drop_groups(2..4);
+			track.drop_groups(2..4, crate::StreamError::NotFound);
 			write_group(&mut track, 5, 0);
 			assert!(
 				kio::wait(|waiter| run.poll(&mut writer, waiter))
@@ -6761,6 +6759,34 @@ mod serve_group_test {
 		assert!(relay.started_at(6), "named the skipped group");
 	}
 
+	/// Adjacent ranges skipped with different errors before the start resolves are all
+	/// passed over, so SUBSCRIBE_START names neither.
+	#[moq_clock::test]
+	async fn held_first_group_starts_past_adjacent_skips() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut relay = RelayRun::new(&mut track, 4);
+
+		track.drop_groups(4..5, StreamError::Old);
+		// Group 5's first frame is gone.
+		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		write_group(&mut track, 6, 6);
+		relay.settle();
+
+		track.start_at(4).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+		assert!(relay.started_at(6), "named a skipped group");
+	}
+
 	/// A track that ends without a group still ends the subscription, with no stream owed.
 	#[moq_clock::test]
 	async fn lite07_empty_track_ends_without_a_start() {
@@ -6800,7 +6826,8 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 3, 0, 1, 0, 2, 3, 0, 0, 0, 1, 1, 2],
+			// The DROP carries OLD (0x34).
+			[0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -6810,7 +6837,7 @@ mod serve_group_test {
 		*open = true;
 		drop(open);
 		run.await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0, 1, 1, 2]);
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0x34, 1, 1, 2]);
 	}
 }
 
