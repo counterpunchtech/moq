@@ -608,8 +608,9 @@ let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
-// Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, for a
-// reader whose floor moved below them; assigned in the producer's static block.
+// Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
+// included as a fresh sink gets them, for a reader whose floor moved below them; assigned in
+// the producer's static block.
 let reofferCached: (
 	producer: Producer,
 	sink: TrackState,
@@ -833,8 +834,7 @@ export class Producer {
 			const held = new Set(sink.groups.peek().map((group) => group.sequence));
 			for (const entry of producer.#cache) {
 				const sequence = entry.group.sequence;
-				if (sequence < start || sequence >= end || held.has(sequence)) continue;
-				if (entry.group.closed.peek() instanceof Error || !offer(sequence)) continue;
+				if (sequence < start || sequence >= end || held.has(sequence) || !offer(sequence)) continue;
 				producer.#mirror(entry, sink);
 			}
 		};
@@ -1695,6 +1695,9 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
+	// This reader closed itself, so lowering its floor offers nothing: a producer's clean close
+	// alone leaves the cache readable, but the reader leaving must stay terminal.
+	#closed = false;
 	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
 	// does not bring it back.
 	#largestSeen?: Location;
@@ -2155,7 +2158,7 @@ export class Subscriber {
 		const before = this.#cursor.peek();
 		this.#cursor.set({ start, end });
 		const producer = this.#state.producer;
-		if (!this.#resume && producer && start < before.start) {
+		if (!this.#resume && !this.#closed && producer && start < before.start) {
 			// The arrival cursor let go of what it passed below the old floor.
 			reofferCached(producer, this.#state, start, before.start, (sequence) => !this.#delivered.has(sequence));
 		}
@@ -2164,6 +2167,7 @@ export class Subscriber {
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
+		this.#closed = true;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
 		// producer close, so the subscriber leaving is what must release them: closing

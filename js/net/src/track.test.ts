@@ -2186,6 +2186,51 @@ test("a lowered range re-offers the unread cached groups", () => {
 	track.close();
 });
 
+test("a lowered range re-offers a cached cut with its error", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxDelay: Milli(5000), groups: { start: { included: 1 } } });
+	const cut = new GroupProducer(0);
+	producer.writeGroup(cut);
+	const error = new StreamError(StreamCode(70), { message: "cut" });
+	cut.close(error);
+	producer.writeGroup(new GroupProducer(1));
+	expect(taken(track.tryRecvGroup())?.sequence).toBe(1);
+
+	track.withRange({});
+	const group = taken(track.tryRecvGroup());
+	expect(group?.sequence).toBe(0);
+	await expect(group?.readString()).rejects.toBe(error);
+	track.close();
+	producer.close();
+});
+
+test("a lowered range still re-offers after the producer closes", () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxDelay: Milli(5000), groups: { start: { included: 1 } } });
+	for (const sequence of [0, 1]) producer.writeGroup(new GroupProducer(sequence));
+	expect(taken(track.tryRecvGroup())?.sequence).toBe(1);
+	producer.close();
+
+	track.withRange({});
+	expect(taken(track.tryRecvGroup())?.sequence).toBe(0);
+	expect(track.tryRecvGroup()).toEqual({ kind: "done" });
+	track.close();
+});
+
+for (const abort of [undefined, new Error("gone")]) {
+	test(`a lowered range offers nothing to a reader that ${abort ? "aborted" : "closed"}`, () => {
+		const producer = new TrackProducer("test");
+		const track = producer.subscribe({ maxDelay: Milli(5000), groups: { start: { included: 1 } } });
+		for (const sequence of [0, 1]) producer.writeGroup(new GroupProducer(sequence));
+		expect(taken(track.tryRecvGroup())?.sequence).toBe(1);
+		track.close(abort);
+
+		track.withRange({});
+		expect(track.tryRecvGroup()).toEqual(abort ? { kind: "error", error: abort } : { kind: "done" });
+		producer.close();
+	});
+}
+
 test("malformed group bounds do not partially advance the cursor", () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(5000) });
