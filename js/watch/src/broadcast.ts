@@ -18,7 +18,10 @@ type Usable = (rel: Path.Relative | undefined, epoch: Moq.Epoch.Valid | undefine
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
 
-function filterRenditions<T extends ReferencedRendition>(renditions: Record<string, T>, usable: Usable): Record<string, T> {
+function filterRenditions<T extends ReferencedRendition>(
+	renditions: Record<string, T>,
+	usable: Usable,
+): Record<string, T> {
 	return Object.fromEntries(
 		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.epoch)),
 	);

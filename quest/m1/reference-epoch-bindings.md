@@ -24,7 +24,3 @@ field: the first instance resolved, without its guarantee.
 
 Test a matching, mismatched and epochless reference through `moq-ffi` and
 libmoq, and run `just test interop --all`.
-
-## Related
-
-- [Rust readers follow references](/quest/m0/broadcast-epoch/reference-announcements.md) - the following behavior the bindings inherit from `moq_mux`
