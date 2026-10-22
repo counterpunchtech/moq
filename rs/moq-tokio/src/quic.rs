@@ -113,10 +113,11 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
 /// credit as it reads, it bounds only the unread data. It has to be at least
-/// [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), the 64 MiB announcement
+/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
 /// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
 /// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+#[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.

@@ -3361,7 +3361,12 @@ mod tests {
         release(&mut client, id, 32);
         assert_eq!(client.local_max_data, initial + 32);
         assert_eq!(client.credit_stats().leased, 0);
-        let _ = stop(&mut client, id, 0);
+        let mut pending = Retransmits::default();
+        assert!(
+            recv(&mut client, &mut pending, id)
+                .stop(0u32.into())
+                .is_ok()
+        );
         assert!(client.leased(id).is_none());
     }
 
@@ -3600,6 +3605,51 @@ mod tests {
         // Its reader finishes a unit and parks; the credit only pays the debt.
         assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
         release(&mut client, ids[0], WINDOW as usize);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]]);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// Stopping a lease that outlived its finished stream returns credit that may only pay a
+    /// shrunk window's debt, so the stop reruns the stuck pass as a release does.
+    #[test]
+    fn stop_finished_lease_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        data(&mut client, ids[0], 0, WINDOW as usize, true);
+        for id in [ids[1], ids[2]] {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+        }
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+        for id in [ids[1], ids[2]] {
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        readable(&mut client);
+
+        // The first reader leases the whole finished stream, whose state is reclaimed, then
+        // stops it; the credit only pays the debt.
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        assert!(!client.recv.contains_key(&ids[0]), "reclaimed");
+        assert_eq!(client.credit_stats().evicted, 0);
+        let mut pending = Retransmits::default();
+        assert!(
+            recv(&mut client, &mut pending, ids[0])
+                .stop(0u32.into())
+                .is_ok()
+        );
         assert_eq!(client.credit_stats().evicted, 1);
         assert_eq!(readable(&mut client), [ids[2]]);
         assert_eq!(client.local_max_data, max_data + WINDOW);

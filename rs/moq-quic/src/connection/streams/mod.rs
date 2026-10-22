@@ -153,11 +153,17 @@ impl RecvStream<'_> {
     /// Discards unread data and notifies the peer to stop transmitting. Once stopped, further
     /// attempts to operate on a stream will yield `ClosedStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-        if self.drop_lease(error_code) {
+        let lease = self.drop_lease(error_code);
+        if lease == Some(true) {
             return Ok(());
         }
         let mut entry = match self.state.recv.entry(self.id) {
             hash_map::Entry::Occupied(s) => s,
+            // A lease outlives its finished stream; the credit it returned may only have paid debt.
+            hash_map::Entry::Vacant(_) if lease.is_some() => {
+                self.unstick();
+                return Ok(());
+            }
             hash_map::Entry::Vacant(_) => return Err(ClosedStream { _private: () }),
         };
         let stream = get_or_insert_recv(entry.get_mut(), self.state.stream_receive_window);

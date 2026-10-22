@@ -748,6 +748,9 @@ pub mod poll {
 		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>>;
 
 		/// Send a `STOP_SENDING` code. See [`RecvStream::stop`].
+		///
+		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
+		/// but leaves the drop to the wrapped stream.
 		fn stop(&mut self, code: u32);
 	}
 

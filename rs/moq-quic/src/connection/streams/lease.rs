@@ -347,19 +347,17 @@ impl RecvStream<'_> {
 
     /// Drop the stream's lease, returning its credit, ahead of a stop.
     ///
-    /// Returns whether the stream had been evicted, which already discarded its receive buffer
-    /// but left the peer to be told.
-    pub(super) fn drop_lease(&mut self, error_code: VarInt) -> bool {
+    /// Returns `None` if the stream had no lease, or else whether it had been evicted, which
+    /// already discarded its receive buffer but left the peer to be told.
+    pub(super) fn drop_lease(&mut self, error_code: VarInt) -> Option<bool> {
         self.state.unlooked.remove(&self.id);
-        let Some(lease) = self.state.leases.remove(&self.id) else {
-            return false;
-        };
+        let lease = self.state.leases.remove(&self.id)?;
         if lease.evicted {
             self.state.evicted_held -= lease.held;
         }
         let _ = self.return_credit(lease.held);
         if !lease.evicted {
-            return false;
+            return Some(false);
         }
         // Eviction paused for this stop; what it returned may only have paid debt.
         self.unstick();
@@ -376,7 +374,7 @@ impl RecvStream<'_> {
                 error_code,
             });
         }
-        true
+        Some(true)
     }
 }
 
