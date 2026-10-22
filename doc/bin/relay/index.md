@@ -75,9 +75,10 @@ relay.with_web(web).run().await?;
 - `run` consumes the relay, so clone the handles your tasks need first.
 - Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
   drops the built-in routes.
-- `run` drains on SIGTERM or SIGINT. To own the signals, for example to leave
-  DNS before draining, call `with_signals(false)` and fire `shutdown_trigger()`
-  yourself. The drain reaches only MoQ sessions, so stop any extra listener
+- `run` drains on SIGTERM or SIGINT from the moment it serves. Before that, and
+  after a startup error, they keep their default action. To own the signals, for
+  example to leave DNS before draining, call `with_signals(false)` and fire
+  `shutdown_trigger()` yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.
 - To serve MoQ from your own `moq_tokio::server::Config`, set its `activity`
   from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
