@@ -142,7 +142,7 @@ pub struct Info {
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
 	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
-	/// moq-transport draft-16+ peer negotiating the Flate extension receives the compressed
+	/// moq-transport draft-17+ peer negotiating the Flate extension receives the compressed
 	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
 	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.

@@ -2651,11 +2651,8 @@ where
 		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
 		// one made only to learn the track races the fetches it was for. Draft-17 still
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
-		// Negotiated compression also needs SUBSCRIBE_OK on draft-16: TRACK_STATUS has no properties.
 		let mut target = match request.subscription() {
-			None if ietf::TrackStatusOk::describes_track(self.version)
-				&& !(self.version == Version::Draft16 && self.peer_setup.get().await.flate) =>
-			{
+			None if ietf::TrackStatusOk::describes_track(self.version) => {
 				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
 					return;
 				};
@@ -16542,6 +16539,7 @@ mod compression_negotiation_tests {
 			Version::Draft14,
 			Version::Draft15,
 			Version::Draft16,
+			Version::Draft17,
 			Version::Draft18,
 			Version::Draft22,
 		] {

@@ -8,7 +8,7 @@
 /// have no count and are read until the end of the message payload.
 ///
 /// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, DEFAULT_PUBLISHER_GROUP_ORDER,
-/// and DYNAMIC_GROUPS are understood; the rest are kept so a relay can forward them.
+/// DYNAMIC_GROUPS, and COMPRESSION are understood; the rest are kept so a relay can forward them.
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -150,7 +150,7 @@ impl Properties {
 			known.push(int(DYNAMIC_GROUPS, 1));
 		}
 
-		if self.compress {
+		if self.compress && super::flate::supported(version) {
 			known.push(int(super::flate::COMPRESSION, 1));
 		}
 

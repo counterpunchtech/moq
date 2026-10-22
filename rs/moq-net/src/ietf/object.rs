@@ -266,7 +266,6 @@ fn timed(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Time
 		.transpose()
 }
 
-/// Every property a block from a `version` publisher holds, decoded, for tests to inspect.
 /// Restate an object's known size declaration, preserving sealed declarations verbatim.
 pub(super) fn compression(data: Vec<u8>, version: Version, inflated: Option<u64>) -> Result<Vec<u8>, Error> {
 	if data.is_empty() && inflated.is_none() {
@@ -301,6 +300,7 @@ pub(super) fn inflated(size: Option<u64>, compressed: bool) -> Result<Option<u64
 	Ok(size)
 }
 
+/// Every property a block from a `version` publisher holds, decoded, for tests to inspect.
 #[cfg(test)]
 pub(crate) fn listed(properties: &Properties, version: Version) -> Vec<Property> {
 	properties
@@ -327,7 +327,11 @@ pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 /// on a track in `timescale`. No frame holds its time, so a mutable Timestamp stays in the
 /// block, as on an untimed track.
 pub(crate) fn unframed(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Properties, Error> {
-	Ok(decode(data, version, timescale, false)?.properties)
+	let decoded = decode(data, version, timescale, false)?;
+	if decoded.inflated.is_some() {
+		return Err(Error::MalformedTrack);
+	}
+	Ok(decoded.properties)
 }
 
 fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: bool) -> Result<Decoded, Error> {
@@ -894,7 +898,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn sizes_are_known_and_unknown_properties_survive() {
-		for version in [Version::Draft16, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let unknown = property(0x8800, 7);
 			let wire = compression(serialize([&unknown], version).unwrap(), version, Some(123)).unwrap();
 			let decoded = read(&wire.into(), version, None).unwrap();
@@ -906,8 +910,28 @@ mod compression_tests {
 		}
 	}
 	#[test]
+	fn a_status_cannot_declare_an_inflated_size() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let size = property(super::super::flate::INFLATED, 0);
+			for value in [
+				size.clone(),
+				Property {
+					id: 0x0b,
+					value: Value::Bytes(serialize([&size], version).unwrap().into()),
+				},
+			] {
+				let wire = serialize([&value], version).unwrap();
+				assert!(matches!(
+					unframed(&wire.into(), version, None),
+					Err(Error::MalformedTrack)
+				));
+			}
+		}
+	}
+
+	#[test]
 	fn sealed_sizes_are_forwarded_or_refused_without_rewriting() {
-		for version in [Version::Draft16, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let sealed = Property {
 				id: 0x0b,
 				value: Value::Bytes(

@@ -12,7 +12,7 @@ pub(super) const COMPRESSION: u64 = 0x40B6C;
 pub(super) const INFLATED: u64 = 0x40B6E;
 
 pub(crate) fn supported(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15)
+	!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 }
 
 pub(crate) fn into_setup(parameters: &mut Parameters, version: Version) {
@@ -63,7 +63,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn negotiation_requires_an_offer_on_draft16_or_later() {
+	fn negotiation_requires_an_offer_on_draft17_or_later() {
 		for version in crate::Versions::all().iter().filter_map(|v| Version::try_from(*v).ok()) {
 			let mut parameters = Parameters::default();
 			assert!(!from_setup(&parameters, version).unwrap());
@@ -79,6 +79,18 @@ mod tests {
 				assert_eq!(from_setup(&parameters, version).is_err(), supported(version));
 			}
 		}
+	}
+
+	#[test]
+	fn legacy_setup_is_unchanged() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut parameters = Parameters::default();
+			into_setup(&mut parameters, version);
+			assert_eq!(parameters.get_varint(ParameterVarInt::Flate), None);
+		}
+		let mut parameters = Parameters::default();
+		into_setup(&mut parameters, Version::Draft17);
+		assert_eq!(parameters.get_varint(ParameterVarInt::Flate), Some(1));
 	}
 
 	#[test]

@@ -16553,7 +16553,7 @@ mod compression_tests {
 	use super::*;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
-		for version in [Version::Draft16, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let mut sealed = Vec::new();
 			let mut encoder = Encoder::new(&mut sealed, version.into());
 			encoder.varint(super::super::flate::COMPRESSION).unwrap();
@@ -16595,13 +16595,67 @@ mod compression_tests {
 					Err(Error::Unsupported)
 				));
 				assert!(matches!(
-					track_properties(&info, wanted, Version::Draft14, true),
+					track_properties(&info, wanted, Version::Draft16, true),
 					Err(Error::Unsupported)
 				));
 			}
 			let plain = track::Info::default().with_compress(true);
 			assert!(!track_properties(&plain, true, version, false).unwrap().compress);
 			assert!(!track_properties(&plain, true, Version::Draft15, true).unwrap().compress);
+		}
+	}
+
+	/// The actual JS SETUP offer selects the plain egress of a compressed Rust track.
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn ietf_compression_fallback_interop() {
+		use crate::coding::Decode;
+		use crate::lite::test_transport::{Log, SinkSession};
+		for (version, draft) in [(Version::Draft17, 17), (Version::Draft22, 22)] {
+			let input = serde_json::json!({"draft": draft});
+			let bytes: Vec<u8> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
+			assert_eq!(consumed, bytes.len());
+			let negotiated = super::super::flate::from_setup(&parameters, version).unwrap();
+			assert!(!negotiated, "JS offered an unsupported codec");
+			let track = track::Producer::new(
+				Arc::new(crate::broadcast::Info::default()),
+				"data",
+				track::Info::timed().with_compress(true),
+			);
+			let subscriber = track.subscribe(None);
+			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];
+			let mut group = track.append_group().unwrap();
+			for payload in &frames {
+				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let response = ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 0,
+				largest: None,
+				properties: track_properties(track.info(), true, version, negotiated).unwrap(),
+			}
+			.encode_bytes(version)
+			.unwrap();
+			let log = Log::default();
+			let mut serve = TrackServe::new(
+				SinkSession::new(log.clone()),
+				subscriber,
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				Some(Timescale::MILLI),
+			)
+			.compression(negotiated);
+			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+			let written = log.writes.lock().unwrap().clone();
+			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
+			let received: Vec<Vec<u8>> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
 		}
 	}
 }

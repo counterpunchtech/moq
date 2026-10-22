@@ -45,7 +45,7 @@ harness:
 # draft, and Lite AUTH_ERROR NOT_SUPPORTED after a grant in both directions.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop auth_unsupported_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
