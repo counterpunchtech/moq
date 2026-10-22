@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Set `Deltas` to a pointer to `false` where you set `DeltaRatio` to a pointer to `0`, and leave it nil otherwise.
 Publish the track with a `Refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.

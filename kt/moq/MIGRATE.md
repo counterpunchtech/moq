@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `deltas = false` where you passed `deltaRatio = 0u`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
