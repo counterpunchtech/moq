@@ -997,6 +997,9 @@ pub struct RecvStream {
 	/// Every byte up to the FIN was read out of the connection; reads report the end once
 	/// `backlog` is drained too.
 	finished: bool,
+	/// The peer reset the stream with this code. Reading it frees the connection's stream
+	/// state, so later reads and `poll_closed` report it from here.
+	reset: Option<u64>,
 	/// We stopped the stream; no more reads matter.
 	stopped: bool,
 	/// Bytes `poll_closed` read ahead, handed to `poll_read` before the connection's.
@@ -1013,6 +1016,7 @@ impl RecvStream {
 			id,
 			park: kio::Park::default(),
 			finished: false,
+			reset: None,
 			stopped: false,
 			backlog: BytesMut::new(),
 			backlog_credit: moq_quic::Credit::default(),
@@ -1026,6 +1030,9 @@ impl RecvStream {
 		}
 		if !self.backlog.is_empty() {
 			return Poll::Ready(Ok(Some(self.drain(max))));
+		}
+		if let Some(code) = self.reset {
+			return Poll::Ready(Err(Error::StreamReset(code)));
 		}
 		if self.finished {
 			return Poll::Ready(Ok(None));
@@ -1044,7 +1051,10 @@ impl RecvStream {
 				waiter.register(state.readable.entry(self.id).or_default());
 				Poll::Pending
 			}
-			Read::Reset(code) => Poll::Ready(Err(Error::StreamReset(code))),
+			Read::Reset(code) => {
+				self.reset = Some(code);
+				Poll::Ready(Err(Error::StreamReset(code)))
+			}
 		}
 	}
 
@@ -1067,7 +1077,7 @@ impl RecvStream {
 		let mut state = self.inner.lock();
 		release(&mut state, std::mem::take(&mut self.backlog_credit));
 		self.backlog.clear();
-		if self.stopped || self.finished {
+		if self.stopped || self.finished || self.reset.is_some() {
 			return;
 		}
 		// Err means the stream is already gone, which is what we wanted.
@@ -1134,6 +1144,9 @@ impl poll::RecvStream for RecvStream {
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		let waiter = self.park.hold(cx);
+		if let Some(code) = self.reset {
+			return Poll::Ready(Err(Error::StreamReset(code)));
+		}
 		if self.finished || self.stopped {
 			return Poll::Ready(Ok(()));
 		}
@@ -1162,7 +1175,10 @@ impl poll::RecvStream for RecvStream {
 					waiter.register(state.readable.entry(self.id).or_default());
 					return Poll::Pending;
 				}
-				Read::Reset(code) => return Poll::Ready(Err(Error::StreamReset(code))),
+				Read::Reset(code) => {
+					self.reset = Some(code);
+					return Poll::Ready(Err(Error::StreamReset(code)));
+				}
 			}
 		}
 	}
@@ -1173,7 +1189,7 @@ impl Drop for RecvStream {
 		let mut state = self.inner.lock();
 		release(&mut state, std::mem::take(&mut self.backlog_credit));
 		state.readable.remove(&self.id);
-		if !self.finished && !self.stopped {
+		if !self.finished && !self.stopped && self.reset.is_none() {
 			let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
 			state.driver.wake();
 		}

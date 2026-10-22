@@ -136,7 +136,8 @@ impl Params {
                 return Err(err("duplicate transport parameter"));
             }
             match id {
-                MAX_RECORD_SIZE => {
+                // Draft-00 has no records, so its peer's value would only shrink our frames
+                MAX_RECORD_SIZE if version.uses_records() => {
                     max_record_size = crate::coding::BufExt::get(&mut value)
                         .map_err(|_| err("malformed max_record_size"))?;
                     if value.has_remaining() {
@@ -238,11 +239,12 @@ mod tests {
     }
 
     #[test]
-    fn record_size_floor_is_for_records_only() {
+    fn record_size_is_for_records_only() {
         let mut buf = Vec::new();
-        write_param(&mut buf, MAX_RECORD_SIZE, 1024);
+        write_param(&mut buf, MAX_RECORD_SIZE, 1);
         assert!(decode(buf.clone()).is_err());
-        assert!(Params::decode(Side::Client, Version::QMux00, buf.into()).is_ok());
+        let params = Params::decode(Side::Client, Version::QMux00, buf.into()).unwrap();
+        assert_eq!(params.max_record_size.into_inner(), DEFAULT_MAX_RECORD_SIZE);
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub struct Config {
 	/// `QX_PING` meanwhile, or `None` to never time out. The smaller of the two peers' values
 	/// applies. Only the record-framed drafts (QMux01+) negotiate it.
 	pub max_idle_timeout: Option<Duration>,
-	/// Maximum QMux Record size in bytes (draft-01+). Default: 16382.
+	/// Maximum QMux Record size in bytes (draft-01+), at least the default. Default: 16382.
 	pub max_record_size: u64,
 
 	/// Largest DATAGRAM *frame* (RFC 9221: frame type + length + payload) we
@@ -140,7 +140,8 @@ impl Config {
 		}
 	}
 
-	/// The connection's settings, refusing a value the wire cannot carry
+	/// The connection's settings, refusing a value the wire cannot carry or the peer would
+	/// refuse
 	pub(crate) fn to_mux(&self) -> Result<mux::Config, crate::Error> {
 		fn varint(value: u64) -> Result<VarInt, crate::Error> {
 			VarInt::from_u64(value).map_err(|_| crate::Error::TransportParameter)
@@ -153,6 +154,9 @@ impl Config {
 		config.receive_window = varint(self.max_data)?;
 		config.stream_receive_window = varint(self.max_stream_data)?;
 		config.max_idle_timeout = self.max_idle_timeout;
+		if self.version.uses_records() && self.max_record_size < DEFAULT_MAX_RECORD_SIZE {
+			return Err(crate::Error::TransportParameter);
+		}
 		config.max_record_size = varint(self.max_record_size)?;
 		config.max_datagram_frame_size = (self.max_datagram_frame_size != 0)
 			.then(|| varint(self.max_datagram_frame_size))
@@ -166,5 +170,21 @@ impl Config {
 			Protocol::None | Protocol::Negotiated(_) => None,
 		};
 		Ok(config)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn record_size_below_the_minimum_is_refused() {
+		for &version in Version::ALL {
+			let config = Config {
+				max_record_size: DEFAULT_MAX_RECORD_SIZE - 1,
+				..Config::new(version)
+			};
+			assert_eq!(config.to_mux().is_err(), version.uses_records(), "{version:?}");
+		}
 	}
 }
