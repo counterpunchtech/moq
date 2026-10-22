@@ -99,7 +99,6 @@ lands before the cut.
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [GOAWAY deadline](/quest/m1/goaway-deadline.md) - the drain deadline counts from the trigger in moq-net and js/net, so a peer that stops reading cannot stall it
 - [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
-- [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
 - [JS linger](/quest/m1/linger-js.md) - `js/net` finishes a broadcast cleanly like Rust, and `@moq/publish` uses it when a source stops
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations

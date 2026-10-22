@@ -68,8 +68,6 @@ settled. The unattended instruction was to skip uncertain choices:
   live session's grant, but not how independent concurrent sessions select
   grants and refusals. Existing reconnect code only designates one active
   generation alongside draining predecessors.
-- [Binding linger](/quest/m1/linger-ffi.md) extends the hand-written C ABI,
-  while [generated C](/quest/m1/c/README.md) freezes it except claim safety.
 - [Catalog HLS](/quest/m1/archive/catalog-hls.md) names `.hls.z` tracks,
   while [compression migration](/quest/m1/compress/migrate.md) removes `.z`
   names. Their shared timeline edits need a consistent final name and order.
