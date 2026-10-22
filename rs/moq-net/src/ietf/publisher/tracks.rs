@@ -1080,7 +1080,11 @@ where
 		let mut subscriber = match subscribed {
 			Some(Ok(subscriber)) => subscriber,
 			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
-			None => return self.resume_failed(stream, request_id, how.answer, Error::NotFound).await,
+			None => {
+				return self
+					.resume_failed(stream, request_id, how.answer, Error::NotFound)
+					.await;
+			}
 		};
 		let live = kio::wait(|waiter| {
 			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
@@ -1093,7 +1097,9 @@ where
 		})
 		.await?;
 		if !live {
-			return self.resume_failed(stream, request_id, how.answer, Error::NotFound).await;
+			return self
+				.resume_failed(stream, request_id, how.answer, Error::NotFound)
+				.await;
 		}
 
 		let edge = live_edge(track);
