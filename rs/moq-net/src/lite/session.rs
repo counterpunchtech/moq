@@ -923,7 +923,37 @@ mod tests {
 	/// waiting for them, otherwise receive draining could wait for new peer data.
 	#[moq_clock::test]
 	async fn malformed_auth_closes_before_draining_a_partial_group_header() {
-		assert_session_closes(ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(vec![vec![0]])).await;
+		assert_session_closes(
+			ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(vec![vec![0]]),
+			Setup::default(),
+		)
+		.await;
+	}
+
+	/// After close, no stream can deliver the peer SETUP a GROUP stream waits on to read
+	/// its header, whether the SETUP stream was truncated or never opened.
+	#[moq_clock::test]
+	async fn drain_ends_when_groups_wait_on_an_undeliverable_setup() {
+		let version = Version::Lite07;
+		let mut group = Vec::new();
+		DataType::Group
+			.encode(&mut crate::coding::Encoder::new(&mut group, version.into()), version)
+			.unwrap();
+		let mut setup = Vec::new();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		let ietf = Setup {
+			ietf: true,
+			..Default::default()
+		};
+		for unis in [vec![group.clone(), setup], vec![group]] {
+			assert_session_closes(
+				ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(unis),
+				ietf.clone(),
+			)
+			.await;
+		}
 	}
 
 	async fn malformed_auth_reply(script: Vec<u8>) {
@@ -1026,7 +1056,7 @@ mod tests {
 		w.varint(0).unwrap();
 		w.varint(4).unwrap();
 		w.varint(0).unwrap();
-		assert_session_closes(ScriptedSession::per_stream_eof(vec![script])).await;
+		assert_session_closes(ScriptedSession::per_stream_eof(vec![script]), Setup::default()).await;
 	}
 
 	#[moq_clock::test]
@@ -1044,10 +1074,10 @@ mod tests {
 	}
 
 	async fn assert_malformed_reply_closes(script: Vec<u8>) {
-		assert_session_closes(ScriptedSession::per_stream(vec![script])).await;
+		assert_session_closes(ScriptedSession::per_stream(vec![script]), Setup::default()).await;
 	}
 
-	async fn assert_session_closes(transport: ScriptedSession) {
+	async fn assert_session_closes(transport: ScriptedSession, our_setup: Setup) {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::sim(),
@@ -1059,7 +1089,7 @@ mod tests {
 			subscribe: None,
 			peer_hop: None,
 			version: Version::Lite07,
-			our_setup: Setup::default(),
+			our_setup,
 			peer_setup: None,
 			auth: crate::auth::Handle::new(true),
 		})
