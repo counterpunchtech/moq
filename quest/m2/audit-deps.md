@@ -54,9 +54,9 @@ Open at the end of the m1 run:
 - web-transport-iroh 0.8.4 takes kio 0.6, removing the kio 0.5 duplicate.
   It shipped the day of the run, so Dependabot's cargo group should land it;
   confirm.
-- The first Dependabot PR for `test/smoke/flake.lock` must also bump the npm
-  `playwright` pin in `test/smoke/clients/js/package.json` to the flake's
-  `PLAYWRIGHT_VERSION`, or `freshness.sh` fails it.
+- `test/smoke/flake.lock` lands through the Smoke toolchain update workflow,
+  which bumps the npm `playwright` pin with it; Dependabot auto-merge refuses
+  a lock-only smoke PR. Confirm those coupled PRs land.
 - http-cache-reqwest stays on its 1.0 prerelease (alpha.9) until 1.0 ships.
 
 Advisories waiting on upstream, with no exceptions or overrides added:
