@@ -3043,9 +3043,9 @@ impl Producer {
 	/// Abort the track with the given error.
 	///
 	/// Consumes the handle, since nothing can be written to an aborted track. Consumers
-	/// still draining get the finished groups, then the abort error. Open groups are
-	/// aborted with the same error and leave the cache, so a consumer that already pulled
-	/// one ends with it too, and their writers fail. The pool's idle expiry (see
+	/// still draining get the finished groups, then the abort error. Open groups, fetched
+	/// copies included, are aborted with the same error and leave the cache, so a consumer
+	/// that already pulled one ends with it too, and their writers fail. The pool's idle expiry (see
 	/// [`cache::Config::with_expiry`]) reclaims the rest, the latest group included, so a
 	/// stale [`Consumer`] can't pin them in memory forever.
 	///
@@ -3062,8 +3062,9 @@ impl Producer {
 		let open: Vec<_> = state
 			.lookup
 			.values()
-			.filter(|slot| !slot.group.is_finished())
-			.map(|slot| slot.group.clone())
+			.flat_map(|slot| std::iter::once(&slot.group).chain(slot.head.as_deref()))
+			.filter(|group| !group.is_finished())
+			.cloned()
 			.collect();
 		// Snapshot the resume boundary before aborting groups releases their frames.
 		commit_abort(state, err.clone());
@@ -11614,6 +11615,34 @@ mod test {
 		assert!(matches!(read, Err(Error::Cancel)), "{read:?}");
 		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
+	}
+
+	/// Aborting a track also aborts a fetched head still being written, so its reader ends
+	/// with the track's error rather than waiting on a fetch that can no longer land.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn abort_ends_an_open_fetched_head() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+
+		let _fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_group().await.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut reading = consumer.peek_group(0).expect("the head serves group 0");
+		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		producer.abort(Error::App(7)).unwrap();
+		let read = reading.read_frame().now_or_never().expect("the abort settles the head");
+		assert!(matches!(read, Err(Error::App(7))), "{read:?}");
+		let write = head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"));
+		assert!(matches!(write, Err(Error::App(7))), "{write:?}");
 	}
 
 	#[test]

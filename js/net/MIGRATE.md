@@ -12,7 +12,7 @@ Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the 
 ### A frameless group is not a successor (#6111)
 
 A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
-`Track.Producer.received()` marks a track as written from a peer, and `Track.Producer.dropGroups(start, end)` marks groups the peer said it skipped.
+`Track.Producer.received()` marks a track as written from a peer, and `Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
