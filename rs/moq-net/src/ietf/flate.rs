@@ -45,23 +45,26 @@ pub(crate) fn egress(info: &crate::track::Info, compression: bool) -> Result<(),
 	Ok(())
 }
 
+/// A sealed object size cannot describe a plain fallback on another protocol either.
+pub(crate) fn egress_object(
+	properties: &crate::model::object::Properties,
+	source: Option<Version>,
+	compression: bool,
+) -> Result<(), crate::Error> {
+	let Some(block) = properties.block.as_ref().filter(|b| !compression && b.immutable) else {
+		return Ok(());
+	};
+	super::object::compression(block.bytes.to_vec(), source.ok_or(crate::Error::MalformedTrack)?, None)?;
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
 	fn negotiation_requires_an_offer_on_draft16_or_later() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in crate::Versions::all().iter().filter_map(|v| Version::try_from(*v).ok()) {
 			let mut parameters = Parameters::default();
 			assert!(!from_setup(&parameters, version).unwrap());
 			into_setup(&mut parameters, version);

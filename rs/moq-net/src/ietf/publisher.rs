@@ -16569,7 +16569,26 @@ mod compression_tests {
 				})),
 				..Default::default()
 			};
-			assert!(track_properties(&info, true, version, true).unwrap().compress);
+			let outgoing = track_properties(&info, true, version, true).unwrap();
+			assert!(outgoing.compress);
+			let mut bytes = Vec::new();
+			outgoing
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+			let decoded =
+				ietf::Properties::decode(&mut crate::coding::Decoder::new(&bytes, version.into()), version).unwrap();
+			assert!(decoded.compress);
+			assert_eq!(decoded.unknown, outgoing.unknown);
+			let mut contradiction = info.clone();
+			contradiction.compress = false;
+			assert!(
+				contradiction
+					.properties
+					.as_ref()
+					.unwrap()
+					.refused(&contradiction)
+					.is_some()
+			);
 			for wanted in [false, true] {
 				assert!(matches!(
 					track_properties(&info, wanted, version, false),

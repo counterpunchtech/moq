@@ -4094,6 +4094,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 	/// Send a datagram, recording its sequence once it went out.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
+		if let Some(wire) = &datagram.wire
+			&& crate::ietf::flate::egress_object(
+				&wire.properties,
+				self.track.info().ietf(),
+				self.ctx.version.has_compression(),
+			)
+			.is_err()
+		{
+			return;
+		}
 		let sequence = datagram.sequence;
 		// Metered in the form the wire carries.
 		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
@@ -4505,6 +4515,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							} else if *batch_pos < batch.len() {
 								let index = self.group.index() - batch.len() as u64 + *batch_pos as u64;
 								let batched = &mut batch[*batch_pos];
+								if let Some(fields) = &batched.fields
+									&& let Err(err) = crate::ietf::flate::egress_object(
+										&fields.properties,
+										self.group.ietf(),
+										self.ctx.version.has_compression(),
+									) {
+									break 'serve Err(err);
+								}
 								let buffered = records
 									.as_mut()
 									.map_or(Ok(()), |records| {
@@ -4551,6 +4569,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
 										let index = self.group.index() - 1;
+										if let Some(fields) = &next.fields
+											&& let Err(err) = crate::ietf::flate::egress_object(
+												&fields.properties,
+												self.group.ietf(),
+												self.ctx.version.has_compression(),
+											) {
+											break 'serve Err(err);
+										}
 										let buffered = records
 											.as_mut()
 											.map_or(Ok(()), |records| {

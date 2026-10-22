@@ -14,6 +14,14 @@ compressed on lite-07.
 
 See the [epic](/quest/m1/compress/README.md) for the decisions.
 
+- The maintainer permits compression declarations inside Immutable Properties.
+  Preserve them unchanged and refuse plain fallback whenever that would remove a
+  sealed track declaration or object size.
+- Draft-16's TRACK_STATUS answer has no Track Extensions block. Before publishing,
+  settle whether mutual FLATE adds a length-prefixed Track Properties parameter
+  using the existing codec (recommended), adds a trailing block to REQUEST_OK, or
+  compression starts at draft-17. Forcing a live SUBSCRIBE to learn metadata
+  regresses existing fetch-only behavior, including finished tracks.
 - A setup parameter is required because receivers discard unknown track
   properties: without it an old peer would read compressed bytes as plain.
 - Rewrite `drafts/draft-lcurley-moq-flate.md` as the MoQT extension: the

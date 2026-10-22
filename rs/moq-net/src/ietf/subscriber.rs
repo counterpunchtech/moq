@@ -16528,3 +16528,34 @@ mod track_property_tests {
 		}
 	}
 }
+
+#[cfg(test)]
+mod compression_negotiation_tests {
+	use super::*;
+	#[test]
+	fn a_compression_declaration_requires_mutual_negotiation() {
+		let properties = ietf::Properties {
+			compress: true,
+			..Default::default()
+		};
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft18,
+			Version::Draft22,
+		] {
+			assert!(matches!(
+				refused(&properties, version, false),
+				Some(Error::UnsupportedExtension)
+			));
+			assert_eq!(
+				refused(&properties, version, true).is_none(),
+				super::super::flate::supported(version)
+			);
+		}
+		let info = accepted_info(&properties, Version::Draft22);
+		assert!(info.compress);
+		assert!(info.properties.unwrap().values.is_empty());
+	}
+}

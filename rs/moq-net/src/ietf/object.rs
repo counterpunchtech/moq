@@ -865,6 +865,27 @@ mod tests {
 #[cfg(test)]
 mod compression_tests {
 	use super::*;
+	#[test]
+	fn inflated_size_is_admitted_before_any_inflate() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("data", crate::track::Info::default().with_compress(true))
+			.unwrap();
+		let group = track.append_group().unwrap();
+		let header = crate::frame::Header {
+			info: crate::frame::Info {
+				size: 1,
+				timestamp: None,
+			},
+			fields: None,
+			inflated: inflated(Some(crate::group::MAX_CACHE_BYTES + 1), true).unwrap(),
+		};
+		assert!(matches!(
+			group.create_frame_owned(header, &crate::frame::Budget::default()),
+			Err(Error::FrameTooLarge)
+		));
+	}
+
 	fn property(id: u64, value: u64) -> Property {
 		Property {
 			id,
@@ -898,6 +919,11 @@ mod compression_tests {
 			let wire = serialize([&sealed], version).unwrap();
 			let decoded = read(&wire.clone().into(), version, None).unwrap();
 			assert_eq!(decoded.inflated, Some(23));
+			assert!(super::super::flate::egress_object(&decoded.properties, Some(version), true).is_ok());
+			assert!(matches!(
+				super::super::flate::egress_object(&decoded.properties, Some(version), false),
+				Err(Error::Unsupported)
+			));
 			assert_eq!(compression(wire.clone(), version, Some(23)).unwrap(), wire);
 			assert!(matches!(
 				compression(wire.clone(), version, None),
