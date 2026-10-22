@@ -1,4 +1,8 @@
 //! Finite raw-track interop client. The harness acknowledges a clean read on stdin.
+//!
+//! `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
+//! moq-transport subscription starts at the largest group rather than at the range asked for,
+//! so it must read a contiguous run of groups through the last one.
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
@@ -12,11 +16,14 @@ const BYTES: usize = 256 * 1024;
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
-		args.len() == 4 || args.len() == 6,
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION drop]"
+		(4..=6).contains(&args.len()),
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join]]"
 	);
 	let url: url::Url = args[2].parse()?;
-	let drop = args.get(5).is_some_and(|mode| mode == "drop");
+	let mode = args.get(5).map(String::as_str);
+	ensure!(matches!(mode, None | Some("drop" | "join")), "unknown mode: {mode:?}");
+	let drop = mode == Some("drop");
+	let join = mode == Some("join");
 	let mut config = moq_tokio::connect::Config::default();
 	if let Some(version) = args.get(4) {
 		config.version.push(version.parse().map_err(anyhow::Error::msg)?);
@@ -90,14 +97,18 @@ async fn main() -> anyhow::Result<()> {
 				seen.push(sequence);
 			}
 			seen.sort_unstable();
-			let expected = if drop { vec![0, 2, 3] } else { (0..GROUPS).collect() };
+			let first = if join { seen.first().copied().unwrap_or(0) } else { 0 };
+			let expected: Vec<u64> = if drop { vec![0, 2, 3] } else { (first..GROUPS).collect() };
 			ensure!(seen == expected, "wrong groups: {seen:?}");
 			ensure!(
 				track.finished().await? == moq_net::track::Position::group(GROUPS),
 				"wrong declared end"
 			);
 			session.close().await?;
-			if drop {
+			if join {
+				let groups: Vec<_> = seen.iter().map(u64::to_string).collect();
+				eprintln!("tail join clean end=4 groups={}", groups.join(","));
+			} else if drop {
 				eprintln!("tail drop clean end=4 groups=0,2,3 bytes=786432");
 			} else {
 				eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
