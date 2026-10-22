@@ -11,6 +11,13 @@ The track's default was 127, the midpoint, and the subscription's was 0, the lea
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
 
+### A dropped or cut group ends its reader with an error (#6143)
+
+A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `Track.Subscriber` saw it is now handed out, and its reads reject with the publisher's `StreamError`; before, it was skipped or ended cleanly.
+A group already held rejects the same way when the drop lands, even while its stream is still arriving.
+On lite-05 and lite-06 the code is always `StreamCode.NotFound`.
+Treat a rejected group read as the loss of that group and keep reading the track, rather than ending the subscription.
+
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.

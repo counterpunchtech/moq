@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
@@ -24,6 +29,13 @@ A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals ne
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
 `TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update generated `moq.dev/moq-ffi` sources and its bundled static libraries together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
 
 ### JSON consumers return `*json.Timed` (#5677)
 

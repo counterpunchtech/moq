@@ -8,6 +8,12 @@ How to update your code for each breaking change, newest first.
 
 `track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.
 
+### `Source` resolution takes the reference's epoch (#5699)
+
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
+Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
+
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 
 `dropped`, `trimmed`, `gaps`, `drift`, and `out_of_tolerance` are now fields of `Export::release`, a `ts::stats::Release`, which `ts::Release::stats` also returns on its own.

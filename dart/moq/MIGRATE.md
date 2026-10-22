@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `origin.dynamic_(prefix:)` takes no route, and `update` is gone.
@@ -19,6 +24,13 @@ Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`,
 
 `Anchor` gains a time variant, so exhaustive switches need a case for it.
 `TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update `moq_ffi` and its native library together; older generated guards reject the rebuilt library.
+For a custom native library, regenerate its matching Dart bindings with `just dart generate`.
+Application calls are unchanged.
 
 ### JSON consumers return `Value` (#5677)
 
