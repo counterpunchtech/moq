@@ -1145,9 +1145,10 @@ run_tail_publisher() {
 }
 
 run_tail_pair() {
-    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid started=$SECONDS
+    local pub="$1" sub="$2" mode="${3:-}" version="${4:-}" pid subscriber_pid started=$SECONDS
+    local name="tail-$1-$2-${mode:-plain}-${version:-default}"
     local fifo="$HARNESS_RUN/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM"
-    local cell=(case=tail publisher="$pub" subscriber="$sub" log="$HARNESS_RUN/$name-sub.log")
+    local cell=(case="${mode:-tail}${version:+-$version}" publisher="$pub" subscriber="$sub" log="$HARNESS_RUN/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  tail $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -1158,9 +1159,9 @@ run_tail_pair() {
     # Open both ends so neither child startup nor a failed publisher can block the harness.
     exec 9<>"$fifo"
     # Each side's token grants this broadcast alone, like a media round's.
-    harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")"
+    harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" "$mode"
     pid="$HARNESS_PID"
-    harness_spawn "$name-sub" "$HARNESS_RUN/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "**/$broadcast")"
+    harness_spawn "$name-sub" "$HARNESS_RUN/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "**/$broadcast")" "$version" "$mode"
     subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
@@ -1376,6 +1377,10 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
         if needs "$runtime"; then
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
+            for version in moq-lite-07-wip moq-lite-06; do
+                run_tail_pair rust "$runtime" compress "$version"
+                run_tail_pair "$runtime" rust compress "$version"
+            done
         fi
     done
     if needs js-native-node; then

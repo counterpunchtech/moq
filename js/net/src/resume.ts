@@ -89,7 +89,12 @@ function verdict(err: Error): boolean {
 
 /** Two copies claiming the same content must agree on what it is. */
 function compatible(a: track.Info, b: track.Info): boolean {
-	return a.timescale === b.timescale && a.maxAge === b.maxAge && a.priority === b.priority;
+	return (
+		a.timescale === b.timescale &&
+		a.maxAge === b.maxAge &&
+		a.priority === b.priority &&
+		!!a.compress === !!b.compress
+	);
 }
 
 /**

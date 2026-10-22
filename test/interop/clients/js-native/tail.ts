@@ -10,6 +10,7 @@ const GROUPS = 4;
 const BYTES = 256 * 1024;
 const [role, url, path, version, mode] = process.argv.slice(2);
 const drop = mode === "drop";
+const compress = mode === "compress";
 if (!url || !path || !["publish", "subscribe"].includes(role)) {
 	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST");
 }
@@ -24,7 +25,7 @@ const connection = await Moq.Connection.connect({
 try {
 	if (role === "publish") {
 		const broadcast = origin.createBroadcast(Moq.Path.from(path));
-		const track = broadcast.createTrack("tail");
+		const track = broadcast.createTrack("tail", { compress });
 		broadcast.announce();
 		const demand = track.demand();
 		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
@@ -36,7 +37,8 @@ try {
 				group.close(new Error("cut"));
 				continue;
 			}
-			group.writeFrame({ payload: new Uint8Array(BYTES).fill(sequence) });
+			const sizes = compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES];
+			for (const size of sizes) group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
 			group.close();
 		}
 		track.close();
@@ -60,6 +62,7 @@ try {
 			const track = broadcast
 				.track("tail")
 				.subscribe({ maxDelay: Milli(drop ? 60_000 : 5000), groups: { start: { included: 0 } } });
+			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
 			const seen: number[] = [];
 			try {
 				for (;;) {
@@ -67,13 +70,15 @@ try {
 					if (!group) break;
 					try {
 						assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
-						const frame = await group.readFrame();
-						assert(frame, "empty group");
-						assert.equal(frame.payload.byteLength, BYTES, "truncated group");
-						assert(
-							frame.payload.every((byte) => byte === group.sequence),
-							"corrupt group",
-						);
+						for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
+							const frame = await group.readFrame();
+							assert(frame, "empty group");
+							assert.equal(frame.payload.byteLength, size, "truncated group");
+							assert(
+								frame.payload.every((byte) => byte === group.sequence),
+								"corrupt group",
+							);
+						}
 						assert.equal(await group.readFrame(), undefined, "extra frame");
 						seen.push(group.sequence);
 					} finally {

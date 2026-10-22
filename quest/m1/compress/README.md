@@ -81,7 +81,6 @@ This README owns the end-to-end proof and the guide once every child lands:
 ## Required
 
 - [IETF extension](/quest/m1/compress/ietf.md) - moq-transport draft-16+ peers that negotiate the extension exchange compressed tracks
-- [JavaScript](/quest/m1/compress/js.md) - js/net publishes and consumes compressed tracks on lite-07
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related

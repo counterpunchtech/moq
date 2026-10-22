@@ -64,7 +64,7 @@ if (version === Version.DRAFT_07) {
 const setup = await Setup.decode(reader(input.setup), version);
 const setupBytes = await write((w) => setup.encode(w, version));
 
-const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => true);
+const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => ({ timed: true }));
 const datagramBytes = [...datagram.encode(version)];
 
 // Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
@@ -72,7 +72,7 @@ const untimed = version === Version.DRAFT_07;
 
 let untimedDatagramBytes: number[] = [];
 if (untimed) {
-	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => false);
+	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => ({ timed: false }));
 	assert.equal(datagram.timestamp, undefined);
 	untimedDatagramBytes = [...datagram.encode(version)];
 } else {

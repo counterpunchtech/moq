@@ -13,10 +13,11 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		args.len() == 4 || args.len() == 6,
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION drop]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION drop|compress]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let drop = args.get(5).is_some_and(|mode| mode == "drop");
+	let compress = args.get(5).is_some_and(|mode| mode == "compress");
 	let mut config = moq_tokio::connect::Config::default();
 	if let Some(version) = args.get(4) {
 		config.version.push(version.parse().map_err(anyhow::Error::msg)?);
@@ -30,7 +31,9 @@ async fn main() -> anyhow::Result<()> {
 			let broadcast = origin.create_broadcast(&args[3])?;
 			let mut track = broadcast.create_track(
 				"tail",
-				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_compress(compress),
 			)?;
 			broadcast.announce(Default::default())?;
 			let session = client
@@ -49,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
 					group.abort(moq_net::Error::App(1))?;
 					continue;
 				}
-				group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; BYTES])?;
+				let sizes: &[usize] = if compress { &[BYTES / 2, 0, BYTES / 2] } else { &[BYTES] };
+				for &size in sizes {
+					group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; size])?;
+				}
 				group.finish()?;
 			}
 			// A finished track is not a drained transport. Keep the session alive
@@ -76,16 +82,25 @@ async fn main() -> anyhow::Result<()> {
 				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
 				.with_groups(0..);
 			let mut track = broadcast.track("tail")?.subscribe(Some(options)).await?;
+			if compress {
+				ensure!(
+					track.info().compress == args.get(4).is_some_and(|version| version == "moq-lite-07-wip"),
+					"wrong compression metadata"
+				);
+			}
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {
 				let sequence = group.sequence;
-				let frame = group.read_frame().await?.context("empty group")?;
 				ensure!(sequence < GROUPS, "unexpected group {sequence}");
-				ensure!(frame.payload.len() == BYTES, "truncated group {sequence}");
-				ensure!(
-					frame.payload.iter().all(|byte| *byte == sequence as u8),
-					"corrupt group {sequence}"
-				);
+				let sizes: &[usize] = if compress { &[BYTES / 2, 0, BYTES / 2] } else { &[BYTES] };
+				for &size in sizes {
+					let frame = group.read_frame().await?.context("empty group")?;
+					ensure!(frame.payload.len() == size, "truncated group {sequence}");
+					ensure!(
+						frame.payload.iter().all(|byte| *byte == sequence as u8),
+						"corrupt group {sequence}"
+					);
+				}
 				ensure!(group.read_frame().await?.is_none(), "extra frame in group {sequence}");
 				seen.push(sequence);
 			}

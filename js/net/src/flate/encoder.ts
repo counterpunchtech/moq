@@ -1,6 +1,5 @@
-// Loaded only by an original publisher opting into track compression.
-import { Z_SYNC_FLUSH } from "pako";
-import { Deflate, type DeflateOptions } from "pako/browser/deflate";
+// Synchronous model writes include the encoder in the static graph.
+import { Deflate, type DeflateOptions, Z_SYNC_FLUSH } from "pako";
 
 const DEFAULT_LEVEL = 6;
 const SYNC_FLUSH_TAIL = new Uint8Array([0x00, 0x00, 0xff, 0xff]);

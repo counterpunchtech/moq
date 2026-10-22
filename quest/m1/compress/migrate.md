@@ -50,7 +50,3 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
 
 Public API: removals listed above. Wire: the hang catalog loses
 `compression` and the `.z` tracks, in its draft too; moq-net none.
-
-## Required
-
-- [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
