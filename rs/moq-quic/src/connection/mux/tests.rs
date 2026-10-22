@@ -288,6 +288,16 @@ fn draft02_requires_params_first() {
 }
 
 #[test]
+fn rejects_empty_records() {
+    let mut pair = Pair::new(config(Version::QMux02));
+    pair.server.handle_record(Bytes::new(), pair.now);
+    assert_eq!(
+        transport_error(&mut pair.server).code,
+        TransportErrorCode::FRAME_ENCODING_ERROR
+    );
+}
+
+#[test]
 fn rejects_oversized_records() {
     let now = Instant::now();
     let mut server = Connection::new(config(Version::QMux01), Side::Server, now);

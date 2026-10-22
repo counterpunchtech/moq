@@ -966,7 +966,12 @@ mod ws_transport {
 					let _ = tx.send(Err(Error::Closed)).await;
 					return;
 				}
-				Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => {
+				// QMux rides binary messages only; text means the peer speaks something else
+				Message::Text(_) => {
+					let _ = tx.send(Err(Error::ProtocolViolation)).await;
+					return;
+				}
+				Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
 					// tungstenite auto-queues a Pong reply when it reads a Ping; the
 					// writer half flushes it on its next send/ping. The pump owns no
 					// sink, so there's nothing to reply with here.
@@ -1088,6 +1093,19 @@ mod ws_transport {
 			let pump = tokio::spawn(ws_pump(stream, None, 4, tx));
 
 			assert!(matches!(rx.recv().await, Some(Err(Error::FrameTooLarge))));
+			assert!(rx.recv().await.is_none(), "pump must stop after the violation");
+			pump.await.unwrap();
+		}
+
+		#[tokio::test]
+		async fn rejects_a_text_message() {
+			let (feed, stream) = mock_stream();
+			feed.unbounded_send(Ok(Message::Text("hello".into()))).unwrap();
+
+			let (tx, mut rx) = mpsc::channel(1);
+			let pump = tokio::spawn(ws_pump(stream, None, usize::MAX, tx));
+
+			assert!(matches!(rx.recv().await, Some(Err(Error::ProtocolViolation))));
 			assert!(rx.recv().await.is_none(), "pump must stop after the violation");
 			pump.await.unwrap();
 		}

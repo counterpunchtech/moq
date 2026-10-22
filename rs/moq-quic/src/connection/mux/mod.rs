@@ -563,6 +563,11 @@ impl Connection {
                 return Ok(());
             }
         }
+        if frames == 0 {
+            return Err(TransportError::FRAME_ENCODING_ERROR(
+                "record carries no frames",
+            ));
+        }
         self.streams.queue_max_stream_id(&mut self.pending);
         Ok(())
     }

@@ -193,6 +193,15 @@ async fn resets_and_stops_carry_their_codes() {
 	recv.stop(9);
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(9))));
 	assert!(matches!(send.write(b"more").await, Err(Error::StreamStop(9))));
+
+	// A stop that fails `finish` still reads as a stop, not a clean end
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, Bytes::from_static(b"refused")).await;
+	let mut recv = server.accept_uni().await.unwrap();
+	recv.stop(11);
+	tokio::time::sleep(Duration::from_millis(1)).await;
+	assert!(matches!(send.finish(), Err(Error::StreamStop(11))));
+	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
 
 /// RESET_STREAM_AT still delivers the prefix it covers.

@@ -921,9 +921,10 @@ impl poll::SendStream for SendStream {
 		let mut state = self.inner.lock();
 		match state.conn.send_stream(self.id).finish() {
 			Ok(()) => {}
-			// A STOP_SENDING beat us here; carry its code like `poll_write` does.
+			// A STOP_SENDING beat us here; carry its code like `poll_write` does. The stream is
+			// over without our reset, so `poll_closed` reports the stop the sweep recorded.
 			Err(moq_quic::FinishError::Stopped(code)) => {
-				self.reset = true;
+				self.fin = true;
 				return Err(Error::StreamStop(code.into_inner()));
 			}
 			// Already finished or reset, so the FIN it wanted is out.
