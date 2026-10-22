@@ -54,7 +54,7 @@ pub struct Config {
 	pub max_stream_data: u64,
 
 	/// Close the session after this long without hearing from the peer, keeping it alive with
-	/// `QX_PING` meanwhile, or `None` to never time out. The smaller of the two peers' values
+	/// `QX_PING` meanwhile, or `None` to never time out. Zero is refused. The smaller of the two peers' values
 	/// applies. Only the record-framed drafts (QMux01+) negotiate it.
 	pub max_idle_timeout: Option<Duration>,
 	/// Maximum QMux Record size in bytes (draft-01+), at least the default. Default: 16382.
@@ -77,7 +77,7 @@ pub struct Config {
 	pub handshake_timeout: Option<Duration>,
 
 	/// How often to send a `QX_PING` request purely to measure round-trip time, or `None`
-	/// to not measure it.
+	/// to not measure it. Zero is refused.
 	///
 	/// Separate from the keep-alive ping, which is activity-gated and so never fires while
 	/// an application is actively sending. Only the record-framed drafts (QMux01+) carry
@@ -140,11 +140,18 @@ impl Config {
 		}
 	}
 
-	/// The connection's settings, refusing a value the wire cannot carry or the peer would
-	/// refuse
+	/// The connection's settings, refusing a value the wire cannot carry, the peer would
+	/// refuse, or that never lets a timer rest
 	pub(crate) fn to_mux(&self) -> Result<mux::Config, crate::Error> {
 		fn varint(value: u64) -> Result<VarInt, crate::Error> {
-			VarInt::from_u64(value).map_err(|_| crate::Error::TransportParameter)
+			VarInt::from_u64(value).map_err(|_| crate::Error::InvalidConfig("value exceeds a QUIC varint"))
+		}
+		// `None` is how to disable these; zero would fire on every poll
+		if self.max_idle_timeout == Some(Duration::ZERO) {
+			return Err(crate::Error::InvalidConfig("zero max_idle_timeout"));
+		}
+		if self.rtt_interval == Some(Duration::ZERO) {
+			return Err(crate::Error::InvalidConfig("zero rtt_interval"));
 		}
 
 		let mut config = mux::Config::default();
@@ -155,7 +162,7 @@ impl Config {
 		config.stream_receive_window = varint(self.max_stream_data)?;
 		config.max_idle_timeout = self.max_idle_timeout;
 		if self.version.uses_records() && self.max_record_size < DEFAULT_MAX_RECORD_SIZE {
-			return Err(crate::Error::TransportParameter);
+			return Err(crate::Error::InvalidConfig("max_record_size below 16382"));
 		}
 		config.max_record_size = varint(self.max_record_size)?;
 		config.max_datagram_frame_size = (self.max_datagram_frame_size != 0)
@@ -186,5 +193,19 @@ mod tests {
 			};
 			assert_eq!(config.to_mux().is_err(), version.uses_records(), "{version:?}");
 		}
+	}
+
+	#[test]
+	fn zero_timers_are_refused() {
+		let idle = Config {
+			max_idle_timeout: Some(Duration::ZERO),
+			..Config::default()
+		};
+		assert!(matches!(idle.to_mux(), Err(crate::Error::InvalidConfig(_))));
+		let rtt = Config {
+			rtt_interval: Some(Duration::ZERO),
+			..Config::default()
+		};
+		assert!(matches!(rtt.to_mux(), Err(crate::Error::InvalidConfig(_))));
 	}
 }

@@ -32,7 +32,7 @@ Every peer must speak QMux draft-00, 01, or 02; a WebSocket client must offer on
 
 `ConnectionClosed`, `ConnectionReset`, `StreamReset`, and `StreamStop` carry `u64` codes in place of `VarInt`.
 `InvalidFrameType`, `InvalidStreamId`, `DuplicateParam`, `Short`, and `UnexpectedProtocols` are removed: malformed input surfaces as `FrameEncoding`, `ProtocolViolation`, or `TransportParameter`.
-`DatagramTooLarge` is new.
+`DatagramTooLarge` is new, and `InvalidConfig` reports a `Config` the session cannot run with, such as a zero timer.
 
 ### `StreamId` and `StreamDir` are no longer exported (#6231)
 

@@ -50,6 +50,10 @@ pub enum Error {
 	#[error("transport parameter error")]
 	TransportParameter,
 
+	/// A [`Config`](crate::Config) value the session cannot run with.
+	#[error("invalid config: {0}")]
+	InvalidConfig(&'static str),
+
 	/// The peer opened more streams than it was allowed.
 	#[error("stream limit exceeded")]
 	StreamLimitExceeded,
