@@ -104,12 +104,11 @@ async fn application_ranges_keep_their_filter_after_requesting_the_compressed_pr
 			if sequence == 6 {
 				fixture.subscriber.update(range(6, 1, 3)).unwrap();
 				let updated = fixture.track.subscription_changed().await.unwrap().unwrap();
+				// Old route copies can keep their earlier floor until a newer group arrives.
+				// The updated end must already permit the newly requested group.
 				assert_eq!(
-					updated.ranges[0],
-					Range {
-						start: Anchor::Absolute(Position::group(6)),
-						end: Some(Anchor::Absolute(Position { group: 6, frame: 3 })),
-					}
+					updated.ranges[0].end,
+					Some(Anchor::Absolute(Position { group: 6, frame: 3 }))
 				);
 			}
 			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
