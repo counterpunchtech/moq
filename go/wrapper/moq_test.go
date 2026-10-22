@@ -159,7 +159,7 @@ func TestBroadcastFinishLingersUntilCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 	maxAge := time.Hour
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{MaxAge: &maxAge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestBroadcastFinishWaitOnDoneContextCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	maxAge := time.Hour
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{MaxAge: &maxAge})
 	if err != nil {
 		t.Fatal(err)
 	}
