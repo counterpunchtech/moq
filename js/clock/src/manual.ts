@@ -72,7 +72,7 @@ export class Manual {
 		if (this.#driving) throw new Error("time driver already pending");
 		this.#driving = true;
 		try {
-			await this.#advance(duration);
+			await this.#advance(Instant.add(this.#now, duration));
 		} finally {
 			this.#driving = false;
 		}
@@ -85,23 +85,9 @@ export class Manual {
 	async fire(): Promise<Instant> {
 		if (this.#driving) throw new Error("time driver already pending");
 		this.#driving = true;
-		const fired = this.#fired;
 		try {
-			for (;;) {
-				// Lets a pending microtask chain arm an earlier timer before choosing the deadline.
-				await drain();
-				// arm() runs an already-due timer at once, so it never waits in the heap.
-				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
-				if (at !== undefined) {
-					await this.#advance(Instant.durationSince(Instant(at), this.#now));
-					return this.#now;
-				}
-				// A host task, such as I/O, may arm the timer later than any drain can wait for.
-				await new Promise<void>((resolve) => {
-					this.#armed = resolve;
-				});
-				this.#armed = undefined;
-			}
+			await this.#advance();
+			return this.#now;
 		} finally {
 			this.#driving = false;
 		}
@@ -113,14 +99,28 @@ export class Manual {
 		this.#wallAnchorAt = this.#now;
 	}
 
-	async #advance(duration: Nano): Promise<void> {
-		const target = Instant.add(this.#now, duration);
-		// Reached timers armed while draining join the heap, behind existing peers.
-		this.#advancing = true;
+	async #advance(target?: Instant): Promise<void> {
+		const fired = this.#fired;
+		// Reached timers armed while draining join the heap once a target is chosen.
+		this.#advancing = target !== undefined;
 		try {
 			for (;;) {
 				const revision = this.#revision;
 				await drain();
+				if (target === undefined) {
+					// Select fire's target in the same turn that readies its first timer.
+					const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
+					if (at === undefined) {
+						// A later host task, such as I/O, may arm a timer after any drain.
+						await new Promise<void>((resolve) => {
+							this.#armed = resolve;
+						});
+						this.#armed = undefined;
+						continue;
+					}
+					target = Instant(Math.max(this.#now, at));
+					this.#advancing = true;
+				}
 				const first = this.#timers[0];
 				if (first !== undefined && first.at <= target) {
 					this.#now = Instant(Math.max(this.#now, first.at));

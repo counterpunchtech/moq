@@ -387,3 +387,31 @@ test("a timer callback cannot move time beyond the active advance target", async
 	expect(at).toEqual([7]);
 	expect<number>(clock.now()).toBe(10);
 });
+
+test("fire returns the first deadline reached when a host task arms an earlier timer", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	void sleepUntil(Instant(10)).then(() => at.push(now()));
+	const pending = clock.fire();
+	const channel = new MessageChannel();
+	try {
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			void sleepUntil(Instant(5)).then(() => at.push(now()));
+		};
+		channel.port2.postMessage(null);
+		const fired = await pending;
+		// A host may run the task before selection or during the drain after firing.
+		// Either way fire must stop where it first observed a timer becoming ready.
+		expect<number>(fired).toBe(at[0]);
+		expect(at.every((value) => value === fired)).toBe(true);
+		if (fired < 10) {
+			expect<number>(await clock.fire()).toBe(10);
+			expect(at).toEqual([5, 10]);
+		}
+	} finally {
+		channel.port1.close();
+		channel.port2.close();
+	}
+});
