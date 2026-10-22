@@ -52,7 +52,9 @@ export type Read =
 
 interface Group {
 	consumer: Moq.Group.Consumer;
-	arrived: Instant; // from then on, any sequence missing below it is late
+	// From then on, any sequence missing below this group is late: the earliest arrival among it
+	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
+	late: Instant;
 	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
@@ -195,7 +197,7 @@ export class Consumer {
 				// may be is the subscription's own max delay, applied before it ever reaches here.
 				const group: Group = {
 					consumer,
-					arrived: now(),
+					late: now(),
 					frames: [],
 					empty: true,
 					media: false,
@@ -203,8 +205,12 @@ export class Consumer {
 
 				// Insert into #groups based on the group sequence number (ascending).
 				// This is used to cancel old groups.
-				this.#groups.push(group);
-				this.#groups.sort((a, b) => a.consumer.sequence - b.consumer.sequence);
+				let index = this.#groups.findIndex((other) => other.consumer.sequence > consumer.sequence);
+				if (index === -1) index = this.#groups.length;
+				// Arrivals only move forward, so the groups below this one keep their earliest arrival.
+				const next = this.#groups.at(index);
+				if (next && next.late < group.late) group.late = next.late;
+				this.#groups.splice(index, 0, group);
 
 				// Start buffering frames from this group
 				this.#signals.spawn(this.#runGroup.bind(this, group));
@@ -536,10 +542,7 @@ export class Consumer {
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
-					this.#hole = this.#groups.reduce(
-						(min, group) => (group.arrived < min ? group.arrived : min),
-						head.arrived,
-					);
+					this.#hole = head.late;
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;

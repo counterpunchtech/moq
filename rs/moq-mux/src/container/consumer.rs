@@ -525,12 +525,7 @@ impl<F: Container> Consumer<F> {
 				// Late since a group past it arrived, not since the cursor got here: once the edge
 				// stops moving, a backlog with every other group missing would otherwise drain one
 				// budget per hole, which reads downstream as a source far slower than real time.
-				let since = self
-					.pending
-					.iter()
-					.map(|group| group.arrived)
-					.min()
-					.expect("a front group");
+				let since = front.late;
 				let elapsed = since.elapsed() >= self.max_delay;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
 				let excluded = self
@@ -655,7 +650,7 @@ impl<F: Container> Consumer<F> {
 				return Poll::Ready(());
 			};
 
-			let reader = GroupBuffer::new(group);
+			let mut reader = GroupBuffer::new(group);
 			let sequence = reader.group.sequence;
 
 			if sequence < self.current {
@@ -666,6 +661,10 @@ impl<F: Container> Consumer<F> {
 			let idx = self
 				.pending
 				.partition_point(|g| g.group.sequence < reader.group.sequence);
+			// Arrivals only move forward, so the groups below this one keep their earliest arrival.
+			if let Some(next) = self.pending.get(idx) {
+				reader.late = reader.late.min(next.late);
+			}
 			self.pending.insert(idx, reader);
 		}
 	}
@@ -734,8 +733,9 @@ enum Failure<E> {
 struct GroupBuffer<F: Container> {
 	group: moq_net::group::Consumer,
 
-	// When the group arrived: from then on, any sequence missing below it is late.
-	arrived: moq_clock::Instant,
+	// From then on, any sequence missing below this group is late: the earliest arrival among it
+	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
+	late: moq_clock::Instant,
 
 	// The current frame index within the group.
 	index: usize,
@@ -777,7 +777,7 @@ impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::group::Consumer) -> Self {
 		Self {
 			group,
-			arrived: moq_clock::now(),
+			late: moq_clock::now(),
 			index: 0,
 			empty: true,
 			media: false,
@@ -1339,6 +1339,36 @@ mod tests {
 			});
 		}
 		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4", "gap", "frame 6"]);
+	}
+
+	/// A group that arrives late below an earlier one inherits that earlier arrival: the holes
+	/// around it were already observable then.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_is_late_from_the_earliest_arrival_past_it() {
+		let budget = Duration::from_millis(100);
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(budget));
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(0)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		write_group(&mut track, 4, &[ts(40_000)]);
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(budget / 2).await;
+		write_group(&mut track, 2, &[ts(20_000)]);
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(budget / 2).await;
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
+			read.push(match item {
+				Read::Frame { group, .. } => format!("frame {group}"),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		assert_eq!(read, ["gap", "frame 2", "gap", "frame 4"]);
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than
