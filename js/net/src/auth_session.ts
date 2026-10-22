@@ -840,12 +840,12 @@ export class AuthSession {
 					console.warn("auth token refused", reply.refused);
 					// A refused setup token leaves an empty union, not an unknown (unrestricted)
 					// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
-					const unjudged =
-						reply.refused instanceof Unsupported ||
-						(reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway);
-					if (!unjudged) this.#replied = true;
+					const goingAway =
+						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
+					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
-					refused = true;
+					// A peer going away judged nothing, so the successor presents the token instead.
+					refused = !goingAway;
 					stream.close();
 					break;
 				}

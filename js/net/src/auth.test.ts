@@ -1071,6 +1071,39 @@ test("a reset AUTH stream fails the token on moq-transport", async () => {
 	}
 });
 
+test("a GOING_AWAY refusal leaves a shared token for the next session on moq-transport", async () => {
+	const protocol = Ietf.ALPN.DRAFT_22;
+	const handle = new Handle();
+	const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	await waitFor(handle.grant, (g) => g !== undefined);
+	const read = spyOn(IetfAuthWire.prototype, "read").mockResolvedValue({
+		refused: new StreamError(StreamCode.GoingAway),
+	});
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	let rejected: unknown;
+	const adding = handle.add("token");
+	adding.catch((err) => {
+		rejected = err;
+	});
+	try {
+		await settles(() => warned.mock.calls.some(([line]) => line === "auth token refused"));
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(rejected).toBeUndefined();
+	} finally {
+		read.mockRestore();
+		warned.mockRestore();
+		first.client.abort();
+		first.server.abort();
+	}
+
+	const second = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	answer(second.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
+	const token = await adding;
+	await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
+	second.client.abort();
+	second.server.abort();
+});
+
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
 // opens one.
 test.each([
