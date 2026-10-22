@@ -39,7 +39,7 @@ Decided with the maintainer on 2026-10-17 (see the
   path opens. A cluster that finds congestion (a falling estimate) ends
   early.
 - **Wire.** lite-07 reserves the padding stream type
-  ([lite-07 padding](/quest/m1/lite07-padding.md)), matching moq-transport's
+  (Padding Stream 0x2), matching moq-transport's
   PADDING. Pad only on lite-07 and, on moq-transport, from draft-18 on. On
   lite-05 and lite-06 the peer resets every padding stream, so the estimate
   can never rise, and drafts 14 to 17 close the session on an unknown stream
@@ -76,4 +76,3 @@ Tests, on `@moq/clock`'s `Manual`:
 ## Required
 
 - [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
-- [lite-07 padding](/quest/m1/lite07-padding.md) - the stream type the padding is sent on
