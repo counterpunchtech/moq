@@ -1063,6 +1063,22 @@ mod tests {
 
 	const DELAY: Duration = Duration::from_millis(100);
 
+	/// Two floors from the recovery arm's exact audio clock and wandering video lead.
+	/// Both envelopes interpolate their two samples, so rounding in their equal depths
+	/// must not make the changing send-ahead look like source clock drift.
+	#[test]
+	fn equal_depths_do_not_turn_a_track_lead_into_clock_drift() {
+		let audio = VecDeque::from([(97.0, 9.44999008545876e-10), (98.32, 4.143163449267329e-10)]);
+		let video = VecDeque::from([(98.726666, 0.6206660009629188), (99.004, 0.5390000015665989)]);
+		let steer = Steer {
+			phase: audio.clone(),
+			tracks: BTreeMap::from([(1, audio), (2, video)]),
+			..Steer::default()
+		};
+		let (rate, _) = steer.measure([1, 2].iter(), 100.284).unwrap();
+		assert!(rate.abs() < MAX_DRIFT, "an exact clock measured {rate} off real time");
+	}
+
 	fn ms(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
 	}

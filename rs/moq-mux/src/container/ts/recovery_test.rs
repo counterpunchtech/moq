@@ -1292,6 +1292,11 @@ async fn recover(arm: Arm) -> Run {
 	let run = run(&recording, &arm).await;
 	let _evidence = Evidence::save(&run);
 	grade(&run.ledgers, &run.stats).unwrap();
+	assert_eq!(
+		run.stats.release.out_of_tolerance, 0,
+		"exact source clock: {:?}",
+		run.stats.release
+	);
 	assert!(assert_on_time(&run.frames) > 200, "too little output to judge");
 	assert_continuous(&run.ts());
 	assert_eq!(
