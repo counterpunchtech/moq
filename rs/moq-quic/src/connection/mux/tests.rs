@@ -599,7 +599,7 @@ fn golden_transport_parameters() {
 fn golden_records() {
     for &version in Version::ALL {
         let mut pair = Pair::new(config(version));
-        let mut record = |conn: &mut Connection, now| {
+        let record = |conn: &mut Connection, now| {
             let record = conn.poll_transmit(now).unwrap();
             assert!(conn.poll_transmit(now).is_none());
             record
