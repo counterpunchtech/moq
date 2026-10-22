@@ -286,6 +286,34 @@ async fn an_application_close_is_delivered() {
 	}
 }
 
+/// An unfinished read hands over what already arrived, then ends with the close instead of
+/// hanging.
+#[tokio::test(start_paused = true)]
+async fn a_close_ends_an_unfinished_read_after_its_data() {
+	let (mut client, mut server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, Bytes::from_static(b"tail")).await;
+	let mut recv = server.accept_uni().await.unwrap();
+
+	client.close(42, "bye");
+	assert!(matches!(
+		server.closed().await,
+		Error::ConnectionClosed { code: 42, .. }
+	));
+
+	let mut data = BytesMut::new();
+	let err = loop {
+		match recv.read_chunk(usize::MAX).await {
+			Ok(Some(chunk)) => data.extend_from_slice(&chunk),
+			Ok(None) => panic!("an unfinished stream never finishes"),
+			Err(err) => break err,
+		}
+	};
+	assert_eq!(&data[..], b"tail");
+	assert!(matches!(err, Error::ConnectionClosed { code: 42, .. }), "got {err:?}");
+	drop(send);
+}
+
 #[tokio::test(start_paused = true)]
 async fn dropping_the_last_handle_closes_the_session() {
 	let (client, mut server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
