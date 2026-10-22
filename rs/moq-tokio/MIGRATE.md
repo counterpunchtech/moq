@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### qmux sessions are qmux 0.7 (#PRNUM)
+### qmux sessions are qmux 0.7 (#6231)
 
 The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
 Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
