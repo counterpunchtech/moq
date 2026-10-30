@@ -792,7 +792,17 @@ impl Driver {
 		// a full retirement channel is the one case where the mixer has to free
 		// on the audio thread after all.
 		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
-		let layout = Layout::from_channels(channels as u32)?;
+		// Past 7.1 there is no speaker layout to mix into (device.rs takes
+		// such a count only when the device offers nothing narrower), so the
+		// mixer and the bus run as stereo and the callback spreads each stereo
+		// frame over the device's first two channels, the rest silent. Bolo
+		// #195: the harness's 16-channel loopback device offers no other count.
+		let device_channels = channels;
+		let (layout, bus_channels) = if channels > usize::from(super::device::MAX_CHANNELS) {
+			(Layout::Stereo, 2)
+		} else {
+			(Layout::from_channels(channels as u32)?, channels)
+		};
 		let mixer = Mixer::new(rx, retired_tx, rate, layout)?;
 
 		let failures = Arc::new(Failures::default());
@@ -800,7 +810,7 @@ impl Driver {
 			failures: failures.clone(),
 			commands: self.commands.clone(),
 		};
-		let stream = self.build(&device, config, format, mixer, reporter)?;
+		let stream = self.build(&device, config, format, mixer, reporter, bus_channels)?;
 		stream
 			.play()
 			.map_err(|err| Error::Playback(format!("cannot start output stream: {err}")))?;
@@ -813,7 +823,7 @@ impl Driver {
 		self.retired = Some(retired_rx);
 		self.retry = RETRY_MIN;
 
-		tracing::info!(rate, ?layout, ?format, "opened audio output");
+		tracing::info!(rate, ?layout, ?format, device_channels, "opened audio output");
 		Ok(())
 	}
 
@@ -826,12 +836,13 @@ impl Driver {
 		format: cpal::SampleFormat,
 		mixer: Mixer,
 		failures: FailureReporter,
+		bus_channels: usize,
 	) -> Result<cpal::Stream, Error> {
 		match format {
-			cpal::SampleFormat::F32 => self.build_as::<f32>(device, config, mixer, failures),
-			cpal::SampleFormat::I16 => self.build_as::<i16>(device, config, mixer, failures),
-			cpal::SampleFormat::U16 => self.build_as::<u16>(device, config, mixer, failures),
-			cpal::SampleFormat::I32 => self.build_as::<i32>(device, config, mixer, failures),
+			cpal::SampleFormat::F32 => self.build_as::<f32>(device, config, mixer, failures, bus_channels),
+			cpal::SampleFormat::I16 => self.build_as::<i16>(device, config, mixer, failures, bus_channels),
+			cpal::SampleFormat::U16 => self.build_as::<u16>(device, config, mixer, failures, bus_channels),
+			cpal::SampleFormat::I32 => self.build_as::<i32>(device, config, mixer, failures, bus_channels),
 			other => Err(Error::Unsupported(format!("output sample format {other:?}"))),
 		}
 	}
@@ -842,6 +853,7 @@ impl Driver {
 		config: cpal::StreamConfig,
 		mut mixer: Mixer,
 		failures: FailureReporter,
+		bus_channels: usize,
 	) -> Result<cpal::Stream, Error>
 	where
 		T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -850,19 +862,20 @@ impl Driver {
 		// Allocated once and a whole number of frames long, so however big a
 		// buffer the device asks for, the callback loops over this rather than
 		// resizing (allocating on the audio thread is the one thing it must
-		// never do).
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * config.channels as usize];
+		// never do). The bus is as wide as the mixer's layout; the device frame
+		// may be wider (a count past 7.1, played as stereo into channels 1–2).
+		let device_channels = config.channels as usize;
+		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * bus_channels];
 
 		device
 			.build_output_stream::<T, _, _>(
 				config,
 				move |data, _| {
-					for chunk in data.chunks_mut(scratch.len()) {
-						let scratch = &mut scratch[..chunk.len()];
+					for chunk in data.chunks_mut(SCRATCH_FRAMES * device_channels) {
+						let frames = chunk.len() / device_channels;
+						let scratch = &mut scratch[..frames * bus_channels];
 						mixer.fill(scratch);
-						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
-							*out = T::from_sample(*sample);
-						}
+						spread(scratch, chunk, bus_channels, device_channels);
 					}
 				},
 				move |error| {
@@ -1439,5 +1452,76 @@ mod tests {
 
 		current.record(lost.kind());
 		assert!(driver.should_restart(), "ignored the live stream's error");
+	}
+}
+
+/// Write `bus` (interleaved, `bus_channels` wide) into `out` (interleaved,
+/// `device_channels` wide), converting to the device's sample type. When the
+/// widths match this is the plain conversion; when the device is wider, each
+/// bus frame lands in the first `bus_channels` of the device frame and the
+/// rest of the frame is silence. No allocation: this runs on the audio thread.
+fn spread<T>(bus: &[f32], out: &mut [T], bus_channels: usize, device_channels: usize)
+where
+	T: cpal::SizedSample + cpal::FromSample<f32>,
+{
+	if bus_channels == device_channels {
+		for (sample, mixed) in out.iter_mut().zip(bus) {
+			*sample = T::from_sample(*mixed);
+		}
+		return;
+	}
+	let silence = T::from_sample(0.0f32);
+	for (frame, mixed) in out.chunks_mut(device_channels).zip(bus.chunks(bus_channels)) {
+		for (i, sample) in frame.iter_mut().enumerate() {
+			*sample = match mixed.get(i) {
+				Some(value) => T::from_sample(*value),
+				None => silence,
+			};
+		}
+	}
+}
+
+#[cfg(test)]
+mod spread_tests {
+	use super::spread;
+
+	/// A stereo bus onto a 16-channel device: left and right in channels 1–2
+	/// of every frame, channels 3–16 silent, frame by frame.
+	#[test]
+	fn stereo_lands_in_the_first_two_channels_and_the_rest_is_silent() {
+		let bus = [0.1f32, 0.2, 0.3, 0.4];
+		let mut out = [9.0f32; 32];
+		spread(&bus, &mut out, 2, 16);
+		assert_eq!(&out[0..2], &[0.1, 0.2]);
+		assert!(
+			out[2..16].iter().all(|s| *s == 0.0),
+			"channels 3–16 of frame 1 are silent"
+		);
+		assert_eq!(&out[16..18], &[0.3, 0.4]);
+		assert!(
+			out[18..32].iter().all(|s| *s == 0.0),
+			"channels 3–16 of frame 2 are silent"
+		);
+	}
+
+	/// Equal widths are the plain conversion, every sample in place.
+	#[test]
+	fn equal_widths_convert_in_place() {
+		let bus = [0.5f32, -0.5, 0.25, -0.25];
+		let mut out = [9.0f32; 4];
+		spread(&bus, &mut out, 2, 2);
+		assert_eq!(out, bus);
+		let mut out = [7i16; 2];
+		spread(&[1.0f32, -1.0], &mut out, 1, 1);
+		assert_eq!(out, [32767, -32768]);
+	}
+
+	/// The conversion applies to the wide path too: silence is the type's zero.
+	#[test]
+	fn the_wide_path_converts_the_sample_type() {
+		let bus = [1.0f32, -1.0];
+		let mut out = [7i16; 4];
+		spread(&bus, &mut out, 2, 4);
+		assert_eq!(out, [32767, -32768, 0, 0]);
 	}
 }

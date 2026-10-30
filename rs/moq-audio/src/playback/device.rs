@@ -12,8 +12,11 @@ use crate::Error;
 const RATES: &[u32] = &[48_000, 44_100];
 
 /// The widest channel count with a well-known layout. Wider counts name no
-/// speaker positions to mix into, so they are never opened.
-const MAX_CHANNELS: u16 = 8;
+/// speaker positions to mix into, so they are opened only when the device
+/// offers nothing narrower, and the driver then plays stereo into their
+/// first two channels (Bolo #195: a 16-channel loopback device reports
+/// exactly one count).
+pub(super) const MAX_CHANNELS: u16 = 8;
 
 /// Sample formats we can write, best first: `f32` is what the mixer produces,
 /// and the rest are conversions on the way out.
@@ -132,7 +135,8 @@ pub(super) fn open(selector: Option<&str>) -> Result<cpal::Device, Error> {
 /// that order: the device's own channel count, the widest layout, a rate the
 /// pipeline already runs at, then a format we write without converting. Failing
 /// the rates it takes the highest the device supports, since resampling down is
-/// kinder than resampling up.
+/// kinder than resampling up. A count past [`MAX_CHANNELS`] is considered only
+/// when no count with a layout is offered at all.
 pub(super) fn negotiate(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, Error> {
 	let supported = device
 		.supported_output_configs()
@@ -157,9 +161,17 @@ fn choose(
 	supported: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
 	native: Option<u16>,
 ) -> Option<cpal::SupportedStreamConfig> {
-	supported
+	let writable: Vec<_> = supported
 		.filter(|config| FORMATS.contains(&config.sample_format()))
-		.filter(|config| (1..=MAX_CHANNELS).contains(&config.channels()))
+		.filter(|config| config.channels() >= 1)
+		.collect();
+	// A count past MAX_CHANNELS names no speaker positions, so it is taken
+	// only when the device offers nothing with a layout; the driver then runs
+	// the bus as stereo and leaves the channels past the second silent.
+	let named = writable.iter().any(|config| config.channels() <= MAX_CHANNELS);
+	writable
+		.into_iter()
+		.filter(|config| (config.channels() <= MAX_CHANNELS) == named)
 		.min_by_key(|config| preference(config, native))
 		.map(|config| match preferred_rate(&config) {
 			Some(rate) => config.try_with_sample_rate(rate).expect("a rate the range covers"),
@@ -273,11 +285,16 @@ mod tests {
 		assert_eq!(choose(offered, Some(2)).expect("a config").channels(), 2);
 	}
 
-	/// Past 7.1 there is no convention naming the speakers, so there is nothing
-	/// to remix into.
+	/// Past 7.1 there is no convention naming the speakers, so a count without
+	/// a layout is the last resort: taken when it is all the device offers (the
+	/// driver then plays stereo into channels 1–2), never over a count that has
+	/// one.
 	#[test]
-	fn counts_without_a_layout_are_refused() {
-		assert!(choose([range(12, 48_000, SampleFormat::F32)].into_iter(), Some(12)).is_none());
+	fn counts_without_a_layout_are_taken_only_when_nothing_narrower_is_offered() {
+		let chosen = choose([range(12, 48_000, SampleFormat::F32)].into_iter(), Some(12)).expect("a config");
+		assert_eq!(chosen.channels(), 12);
+		let chosen = choose([range(16, 48_000, SampleFormat::F32)].into_iter(), Some(16)).expect("a config");
+		assert_eq!((chosen.channels(), chosen.sample_rate()), (16, 48_000));
 		let chosen = choose(
 			[
 				range(12, 48_000, SampleFormat::F32),
